@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 
 type StockStatus = "В норме" | "Мало" | "Заканчивается";
+type View = "overview" | "stock" | "fbs" | "sales" | "reports";
 
 type StockRow = {
   key: string;
@@ -38,6 +39,13 @@ type InventoryResponse = {
 
 const emptyTotals = { available: 0, fbs: 0, receiving: 0, toSale: 0, risk: 0, activeSupplies: 0 };
 const formatNumber = new Intl.NumberFormat("ru-RU");
+const viewTitles: Record<View, { eyebrow: string; title: string }> = {
+  overview: { eyebrow: "WILDBERRIES · ОПЕРАЦИИ", title: "Остатки и движение товаров" },
+  stock: { eyebrow: "СКЛАДЫ · АРТИКУЛЫ", title: "Остатки по всем складам" },
+  fbs: { eyebrow: "FBS · ПОСЛЕДНИЕ 30 ДНЕЙ", title: "Отгрузки и приёмка" },
+  sales: { eyebrow: "ПРОДАЖИ · ОЖИДАНИЕ", title: "Товары на пути к продаже" },
+  reports: { eyebrow: "ВЫГРУЗКИ · CSV", title: "Отчёты по кабинету" },
+};
 
 function stockTotal(row: StockRow) {
   return Object.values(row.warehouses).reduce((sum, value) => sum + value, 0);
@@ -49,6 +57,7 @@ function formatSyncTime(value: string | null) {
 }
 
 export default function Home() {
+  const [activeView, setActiveView] = useState<View>("overview");
   const [rows, setRows] = useState<StockRow[]>([]);
   const [warehouseNames, setWarehouseNames] = useState<string[]>([]);
   const [totals, setTotals] = useState(emptyTotals);
@@ -90,9 +99,10 @@ export default function Home() {
       const matchesQuery = !term || row.name.toLowerCase().includes(term) || row.sku.toLowerCase().includes(term) || String(row.nmId ?? "").includes(term);
       const matchesFilter = filter === "Все" || (filter === "Дефицит" && row.status !== "В норме") || (filter === "В пути" && row.fbs > 0);
       const matchesWarehouse = warehouse === "Все склады" || (row.warehouses[warehouse] ?? 0) > 0;
-      return matchesQuery && matchesFilter && matchesWarehouse;
+      const matchesView = activeView === "fbs" ? row.fbs > 0 : activeView === "sales" ? row.toSale > 0 : true;
+      return matchesQuery && matchesFilter && matchesWarehouse && matchesView;
     });
-  }, [rows, query, filter, warehouse]);
+  }, [rows, query, filter, warehouse, activeView]);
 
   const counts = useMemo(() => ({
     all: rows.length,
@@ -100,29 +110,51 @@ export default function Home() {
     transit: rows.filter((row) => row.fbs > 0).length,
   }), [rows]);
 
-  const exportCsv = () => {
+  const viewTotal = activeView === "fbs"
+    ? rows.filter((row) => row.fbs > 0).length
+    : activeView === "sales"
+      ? rows.filter((row) => row.toSale > 0).length
+      : rows.length;
+
+  const stockTitle = activeView === "fbs"
+    ? "Артикулы в FBS-движении"
+    : activeView === "sales"
+      ? "Артикулы, ожидающие продажи"
+      : "Все товары Wildberries";
+
+  const navigateTo = (view: View) => {
+    setActiveView(view);
+    setFilter("Все");
+    setQuery("");
+    setSelected(null);
+    window.scrollTo({ top: 0, behavior: "smooth" });
+  };
+
+  const downloadCsv = (sourceRows: StockRow[], suffix: string) => {
     const header = ["Артикул продавца", "Артикул WB", ...warehouseNames, "Всего", "Отгружено FBS", "На приёмке", "Ожидают продажи", "Статус"];
-    const body = filteredRows.map((row) => [row.sku, row.nmId ?? "", ...warehouseNames.map((name) => row.warehouses[name] ?? 0), stockTotal(row), row.fbs, row.receiving, row.toSale, row.status]);
+    const body = sourceRows.map((row) => [row.sku, row.nmId ?? "", ...warehouseNames.map((name) => row.warehouses[name] ?? 0), stockTotal(row), row.fbs, row.receiving, row.toSale, row.status]);
     const content = [header, ...body].map((line) => line.map((cell) => String(cell).replaceAll(";", ",")).join(";")).join("\n");
     const blob = new Blob(["\uFEFF" + content], { type: "text/csv;charset=utf-8" });
     const url = URL.createObjectURL(blob);
     const link = document.createElement("a");
     link.href = url;
-    link.download = `ostatki-wb-${new Date().toISOString().slice(0, 10)}.csv`;
+    link.download = `${suffix}-${new Date().toISOString().slice(0, 10)}.csv`;
     link.click();
     URL.revokeObjectURL(url);
   };
+
+  const exportCsv = () => downloadCsv(filteredRows, "ostatki-wb");
 
   return (
     <main className="app-shell">
       <aside className="sidebar">
         <div className="brand"><span className="brand-mark">С</span><span>СКЛАДНО</span></div>
         <nav className="nav-list" aria-label="Основная навигация">
-          <a className="nav-item active" href="#overview"><span className="nav-symbol">▦</span>Обзор</a>
-          <a className="nav-item" href="#stock"><span className="nav-symbol">□</span>Остатки</a>
-          <a className="nav-item" href="#movement"><span className="nav-symbol">→</span>FBS-отгрузки<span className="nav-badge">{totals.fbs}</span></a>
-          <a className="nav-item" href="#sales"><span className="nav-symbol">↗</span>Продажи</a>
-          <a className="nav-item" href="#reports"><span className="nav-symbol">≡</span>Отчёты</a>
+          <button type="button" className={`nav-item ${activeView === "overview" ? "active" : ""}`} onClick={() => navigateTo("overview")} aria-current={activeView === "overview" ? "page" : undefined}><span className="nav-symbol">▦</span>Обзор</button>
+          <button type="button" className={`nav-item ${activeView === "stock" ? "active" : ""}`} onClick={() => navigateTo("stock")} aria-current={activeView === "stock" ? "page" : undefined}><span className="nav-symbol">□</span>Остатки</button>
+          <button type="button" className={`nav-item ${activeView === "fbs" ? "active" : ""}`} onClick={() => navigateTo("fbs")} aria-current={activeView === "fbs" ? "page" : undefined}><span className="nav-symbol">→</span>FBS-отгрузки<span className="nav-badge">{totals.fbs}</span></button>
+          <button type="button" className={`nav-item ${activeView === "sales" ? "active" : ""}`} onClick={() => navigateTo("sales")} aria-current={activeView === "sales" ? "page" : undefined}><span className="nav-symbol">↗</span>Продажи</button>
+          <button type="button" className={`nav-item ${activeView === "reports" ? "active" : ""}`} onClick={() => navigateTo("reports")} aria-current={activeView === "reports" ? "page" : undefined}><span className="nav-symbol">≡</span>Отчёты</button>
         </nav>
         <div className="sidebar-bottom">
           <div className="connection"><span className={error ? "live-dot offline" : "live-dot"} />{error ? "Нужна проверка подключения" : "Подключено к WB API"}</div>
@@ -134,7 +166,7 @@ export default function Home() {
 
       <section className="workspace">
         <header className="topbar">
-          <div><p className="eyebrow">WILDBERRIES · ОПЕРАЦИИ</p><h1>Остатки и движение товаров</h1></div>
+          <div><p className="eyebrow">{viewTitles[activeView].eyebrow}</p><h1>{viewTitles[activeView].title}</h1></div>
           <div className="header-actions">
             <div className="sync-state"><span className={error ? "live-dot offline" : "live-dot"} /><span>Последнее обновление<br/><strong>{formatSyncTime(updatedAt)} МСК</strong></span></div>
             <button className="secondary-btn" type="button" onClick={() => void loadData(true)} disabled={loading}><span className={loading ? "spin" : ""}>↻</span>{loading ? "Обновляем" : "Обновить"}</button>
@@ -154,7 +186,7 @@ export default function Home() {
             <section className="warning-strip"><span>!</span><p>{warnings.join(" · ")}</p></section>
           )}
 
-          <section className="metric-grid" aria-label="Ключевые показатели">
+          <section className={`metric-grid ${activeView !== "overview" ? "view-hidden" : ""}`} aria-label="Ключевые показатели">
             <article className="metric-card featured">
               <div className="metric-top"><span>Всего на складах</span><span className="trend up">● WB API</span></div>
               <strong className="metric-value">{loading ? "—" : formatNumber.format(totals.available)} <small>шт.</small></strong>
@@ -178,7 +210,7 @@ export default function Home() {
             </article>
           </section>
 
-          <section className="movement-card" id="movement">
+          <section className={`movement-card ${activeView !== "overview" && activeView !== "fbs" ? "view-hidden" : ""}`} id="movement">
             <div className="section-heading">
               <div><span className="section-kicker">ДВИЖЕНИЕ FBS</span><h2>От вашего склада до продажи</h2></div>
               <span className="period-pill">Актуальные заказы за 30 дней</span>
@@ -194,9 +226,9 @@ export default function Home() {
             </div>
           </section>
 
-          <section className="stock-card" id="stock">
+          <section className={`stock-card ${activeView === "reports" ? "view-hidden" : ""}`} id="stock">
             <div className="stock-header">
-              <div><span className="section-kicker">ОСТАТКИ ПО АРТИКУЛАМ</span><h2>Все товары Wildberries</h2></div>
+              <div><span className="section-kicker">ОСТАТКИ ПО АРТИКУЛАМ</span><h2>{stockTitle}</h2></div>
               <div className="stock-tools">
                 <label className="search-field"><span>⌕</span><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Артикул или название" aria-label="Поиск по товарам"/></label>
                 <label className="select-wrap"><span>Склад:</span><select value={warehouse} onChange={(event) => setWarehouse(event.target.value)} aria-label="Выбрать склад"><option>Все склады</option>{warehouseNames.map((item) => <option key={item}>{item}</option>)}</select></label>
@@ -208,7 +240,7 @@ export default function Home() {
                   <button type="button" key={item.name} className={filter === item.name ? "active" : ""} onClick={() => setFilter(item.name)}>{item.name}<span>{item.count}</span></button>
                 ))}
               </div>
-              <span className="result-count">Показано {filteredRows.length} из {rows.length} артикулов</span>
+              <span className="result-count">Показано {filteredRows.length} из {viewTotal} артикулов</span>
             </div>
             <div className="table-wrap">
               <table>
@@ -233,6 +265,21 @@ export default function Home() {
             </div>
             <footer className="table-footer"><span><i className={error ? "live-dot offline" : "live-dot"} />{updatedAt ? `Остатки обновлены в ${formatSyncTime(updatedAt)} МСК` : "Ожидаем синхронизацию"}</span><button type="button" onClick={() => {setQuery(""); setFilter("Все"); setWarehouse("Все склады");}}>Сбросить фильтры</button></footer>
           </section>
+
+          {activeView === "reports" && (
+            <section className="reports-panel" id="reports">
+              <div className="section-heading">
+                <div><span className="section-kicker">ГОТОВЫЕ ВЫГРУЗКИ</span><h2>Скачать данные из кабинета</h2></div>
+                <span className="period-pill">CSV · Excel</span>
+              </div>
+              <div className="reports-grid">
+                <article className="report-card"><span className="report-symbol blue">□</span><div><strong>Все остатки</strong><p>Артикулы и количество по каждому складу</p><small>{rows.length} артикулов · {warehouseNames.length} складов</small></div><button type="button" onClick={() => downloadCsv(rows, "vse-ostatki-wb")} disabled={!rows.length}>Скачать ↓</button></article>
+                <article className="report-card"><span className="report-symbol amber">→</span><div><strong>FBS-движение</strong><p>Отгружено, на приёмке и ожидает продажи</p><small>{counts.transit} артикулов · {totals.fbs} единиц</small></div><button type="button" onClick={() => downloadCsv(rows.filter((row) => row.fbs > 0), "fbs-wb")} disabled={!counts.transit}>Скачать ↓</button></article>
+                <article className="report-card"><span className="report-symbol red">!</span><div><strong>Дефицит</strong><p>Товары с остатком меньше 21 единицы</p><small>{counts.risk} артикулов требуют внимания</small></div><button type="button" onClick={() => downloadCsv(rows.filter((row) => row.status !== "В норме"), "deficit-wb")} disabled={!counts.risk}>Скачать ↓</button></article>
+                <article className="report-card"><span className="report-symbol green">↗</span><div><strong>Ожидают продажи</strong><p>Отсортировано, готово к выдаче или возвращается</p><small>{rows.filter((row) => row.toSale > 0).length} артикулов · {totals.toSale} единиц</small></div><button type="button" onClick={() => downloadCsv(rows.filter((row) => row.toSale > 0), "prodazhi-wb")} disabled={!totals.toSale}>Скачать ↓</button></article>
+              </div>
+            </section>
+          )}
         </div>
       </section>
 
