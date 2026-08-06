@@ -146,7 +146,7 @@ export default function Home() {
           {error && (
             <section className="api-notice" role="alert">
               <span className="api-notice-icon">!</span>
-              <div><strong>{error}</strong><p>{configured ? "Для полной загрузки токену нужны категории: Контент, Маркетплейс и Статистика." : "Безопасный токен хранится только на сервере и не передаётся в браузер."}</p></div>
+              <div><strong>{error}</strong><p>{configured ? "Для полной загрузки токену нужны категории: Контент, Маркетплейс и Аналитика." : "Безопасный токен хранится только на сервере и не передаётся в браузер."}</p></div>
               <button type="button" onClick={() => void loadData(true)}>Проверить снова</button>
             </section>
           )}

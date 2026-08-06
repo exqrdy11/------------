@@ -39,7 +39,7 @@ type DashboardRow = {
 
 const WB_MARKETPLACE = "https://marketplace-api.wildberries.ru";
 const WB_CONTENT = "https://content-api.wildberries.ru";
-const WB_STATISTICS = "https://statistics-api.wildberries.ru";
+const WB_ANALYTICS = "https://seller-analytics-api.wildberries.ru";
 const palette = ["#ffb45c", "#8ea6ff", "#d7a6cc", "#94c5a6", "#eaa070", "#79b9bd", "#adb1b8", "#d0ad82"];
 
 let memoryCache: { expiresAt: number; payload: unknown } | null = null;
@@ -121,16 +121,16 @@ async function getSellerStocks(token: string, cards: WbCard[]) {
 }
 
 async function getWbStocks(token: string) {
-  const dateFrom = "2019-06-20T00:00:00";
-  return wbFetch<Array<{
-    supplierArticle?: string;
+  const response = await wbFetch<{ data?: { items?: Array<{
     nmId?: number;
     warehouseName?: string;
     quantity?: number;
     inWayFromClient?: number;
-    subject?: string;
-    category?: string;
-  }>>(token, `${WB_STATISTICS}/api/v1/supplier/stocks?dateFrom=${encodeURIComponent(dateFrom)}`);
+  }> } }>(token, `${WB_ANALYTICS}/api/analytics/v1/stocks-report/wb-warehouses`, {
+    method: "POST",
+    body: JSON.stringify({ nmIds: [], chrtIds: [], limit: 250000, offset: 0 }),
+  });
+  return response.data?.items ?? [];
 }
 
 async function getOrders(token: string): Promise<{ orders: WbOrder[]; statuses: Map<number, OrderStatus> }> {
@@ -228,9 +228,6 @@ export async function GET(request: Request) {
     for (const stock of wbStocksResult.value) {
       const row = getOrCreateRow(rowMap, {
         nmId: stock.nmId,
-        sku: stock.supplierArticle,
-        name: stock.supplierArticle,
-        category: stock.subject ?? stock.category,
       });
       const warehouseName = `WB · ${stock.warehouseName || "Склад WB"}`;
       row.warehouses[warehouseName] = (row.warehouses[warehouseName] ?? 0) + (stock.quantity ?? 0);
@@ -289,7 +286,7 @@ export async function GET(request: Request) {
 
   if (!rows.length && warnings.length) {
     return NextResponse.json(
-      { configured: true, error: "Wildberries не вернул данные. Проверьте категории токена: Контент, Маркетплейс и Статистика.", warnings },
+      { configured: true, error: "Wildberries не вернул данные. Проверьте категории токена: Контент, Маркетплейс и Аналитика.", warnings },
       { status: 502, headers: { "Cache-Control": "no-store" } },
     );
   }
