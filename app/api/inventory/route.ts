@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { emptyFfStock, listFfStocks, type FfStock } from "@/db/ff-stocks";
+import { isAdminRequest } from "@/lib/admin-auth";
 
 export const dynamic = "force-dynamic";
 
@@ -228,6 +229,9 @@ async function attachFfStocks(payload: DashboardPayload): Promise<DashboardPaylo
 }
 
 export async function GET(request: Request) {
+  if (!await isAdminRequest(request)) {
+    return NextResponse.json({ configured: true, error: "Требуется вход администратора" }, { status: 401, headers: { "Cache-Control": "no-store" } });
+  }
   const token = process.env.WB_API_TOKEN?.trim();
   if (!token) {
     return NextResponse.json(

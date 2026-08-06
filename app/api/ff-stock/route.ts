@@ -1,11 +1,15 @@
 import { NextResponse } from "next/server";
 import { emptyFfStock, saveFfStock, type FfLocationKey } from "@/db/ff-stocks";
+import { isAdminRequest } from "@/lib/admin-auth";
 
 export const dynamic = "force-dynamic";
 
 const locations: FfLocationKey[] = ["kazan", "moscow", "spb"];
 
 export async function POST(request: Request) {
+  if (!await isAdminRequest(request)) {
+    return NextResponse.json({ error: "Требуется вход администратора" }, { status: 401, headers: { "Cache-Control": "no-store" } });
+  }
   try {
     const payload = await request.json() as {
       productKey?: string;

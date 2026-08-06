@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { type FormEvent, useCallback, useEffect, useMemo, useState } from "react";
 
 type StockStatus = "В норме" | "Мало" | "Заканчивается";
 type View = "overview" | "stock" | "fbs" | "sales" | "reports";
@@ -72,6 +72,11 @@ function formatSyncTime(value: string | null) {
 }
 
 export default function Home() {
+  const [authState, setAuthState] = useState<"checking" | "authenticated" | "unauthenticated">("checking");
+  const [adminLogin, setAdminLogin] = useState("");
+  const [adminPassword, setAdminPassword] = useState("");
+  const [loginLoading, setLoginLoading] = useState(false);
+  const [loginError, setLoginError] = useState<string | null>(null);
   const [activeView, setActiveView] = useState<View>("overview");
   const [rows, setRows] = useState<StockRow[]>([]);
   const [warehouseNames, setWarehouseNames] = useState<string[]>([]);
@@ -96,6 +101,10 @@ export default function Home() {
     try {
       const response = await fetch(`/api/inventory${force ? "?refresh=1" : ""}`, { cache: "no-store" });
       const data = await response.json() as InventoryResponse;
+      if (response.status === 401) {
+        setAuthState("unauthenticated");
+        return;
+      }
       setConfigured(data.configured);
       setWarnings(data.warnings ?? []);
       if (!response.ok) throw new Error(data.error || "Не удалось получить данные Wildberries");
@@ -110,7 +119,21 @@ export default function Home() {
     }
   }, []);
 
-  useEffect(() => { void loadData(); }, [loadData]);
+  useEffect(() => {
+    void (async () => {
+      try {
+        const response = await fetch("/api/auth/session", { cache: "no-store" });
+        const data = await response.json() as { authenticated?: boolean };
+        setAuthState(data.authenticated ? "authenticated" : "unauthenticated");
+      } catch {
+        setAuthState("unauthenticated");
+      }
+    })();
+  }, []);
+
+  useEffect(() => {
+    if (authState === "authenticated") void loadData();
+  }, [authState, loadData]);
 
   const filteredRows = useMemo(() => {
     const term = query.trim().toLowerCase();
@@ -168,6 +191,10 @@ export default function Home() {
         body: JSON.stringify({ productKey: selected.key, nmId: selected.nmId, sku: selected.sku, stock: ffDraft }),
       });
       const data = await response.json() as { stock?: FfStock; error?: string };
+      if (response.status === 401) {
+        setAuthState("unauthenticated");
+        return;
+      }
       if (!response.ok || !data.stock) throw new Error(data.error || "Не удалось сохранить остатки ФФ");
       const previous = { ...emptyFfStock, ...selected.ffStock };
       const nextStock = { ...emptyFfStock, ...data.stock };
@@ -190,6 +217,34 @@ export default function Home() {
     }
   };
 
+  const submitAdminLogin = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    setLoginLoading(true);
+    setLoginError(null);
+    try {
+      const response = await fetch("/api/auth/login", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ login: adminLogin, password: adminPassword }),
+      });
+      const data = await response.json() as { authenticated?: boolean; error?: string };
+      if (!response.ok || !data.authenticated) throw new Error(data.error || "Не удалось выполнить вход");
+      setAdminPassword("");
+      setAuthState("authenticated");
+    } catch (authError) {
+      setLoginError(authError instanceof Error ? authError.message : "Не удалось выполнить вход");
+    } finally {
+      setLoginLoading(false);
+    }
+  };
+
+  const logoutAdmin = async () => {
+    await fetch("/api/auth/logout", { method: "POST" }).catch(() => undefined);
+    setRows([]);
+    setSelected(null);
+    setAuthState("unauthenticated");
+  };
+
   const downloadCsv = (sourceRows: StockRow[], suffix: string) => {
     const header = ["Артикул продавца", "Артикул WB", ...warehouseNames, "Всего на WB", "ФФ Казань — Наш склад", "ФФ Москва — БикПартнер", "ФФ Питер — ФФ RUS СПБ", "FBS всего", "FBS Казань", "FBS Москва", "FBS Питер", "На приёмке", "Ожидают продажи", "Статус"];
     const body = sourceRows.map((row) => [row.sku, row.nmId ?? "", ...warehouseNames.map((name) => row.warehouses[name] ?? 0), stockTotal(row), row.ffStock?.kazan ?? 0, row.ffStock?.moscow ?? 0, row.ffStock?.spb ?? 0, row.fbs, row.fbsByLocation?.kazan ?? 0, row.fbsByLocation?.moscow ?? 0, row.fbsByLocation?.spb ?? 0, row.receiving, row.toSale, row.status]);
@@ -204,6 +259,30 @@ export default function Home() {
   };
 
   const exportCsv = () => downloadCsv(filteredRows, "ostatki-wb");
+
+  if (authState === "checking") {
+    return <main className="admin-login-shell"><section className="admin-login-card checking"><span className="login-brand-mark">С</span><div className="loader"/><strong>Проверяем доступ</strong></section></main>;
+  }
+
+  if (authState === "unauthenticated") {
+    return (
+      <main className="admin-login-shell">
+        <section className="admin-login-card">
+          <div className="login-brand"><span className="login-brand-mark">С</span><span>СКЛАДНО</span></div>
+          <span className="login-kicker">АДМИНИСТРАТИВНАЯ ПАНЕЛЬ</span>
+          <h1>Вход в остатки и FBS</h1>
+          <p>Данные Wildberries и ручные остатки ФФ доступны только администратору.</p>
+          <form className="admin-login-form" onSubmit={submitAdminLogin}>
+            <label><span>Логин</span><input value={adminLogin} onChange={(event) => setAdminLogin(event.target.value)} autoComplete="username" autoFocus required /></label>
+            <label><span>Пароль</span><input type="password" value={adminPassword} onChange={(event) => setAdminPassword(event.target.value)} autoComplete="current-password" required /></label>
+            {loginError && <div className="login-error" role="alert">{loginError}</div>}
+            <button type="submit" disabled={loginLoading}>{loginLoading ? "Входим…" : "Войти в админку"}</button>
+          </form>
+          <small className="login-security-note">Защищённый вход · данные API не передаются в браузер</small>
+        </section>
+      </main>
+    );
+  }
 
   return (
     <main className="app-shell">
@@ -229,6 +308,7 @@ export default function Home() {
           <div><p className="eyebrow">{viewTitles[activeView].eyebrow}</p><h1>{viewTitles[activeView].title}</h1></div>
           <div className="header-actions">
             <div className="sync-state"><span className={error ? "live-dot offline" : "live-dot"} /><span>Последнее обновление<br/><strong>{formatSyncTime(updatedAt)} МСК</strong></span></div>
+            <button className="logout-btn" type="button" onClick={() => void logoutAdmin()}>Выйти</button>
             <button className="secondary-btn" type="button" onClick={() => void loadData(true)} disabled={loading}><span className={loading ? "spin" : ""}>↻</span>{loading ? "Обновляем" : "Обновить"}</button>
             <button className="primary-btn" type="button" onClick={exportCsv} disabled={!rows.length}>Экспорт<span>↓</span></button>
           </div>
