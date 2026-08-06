@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { emptyFfStock, listFfStocks, type FfStock } from "@/db/ff-stocks";
 
 export const dynamic = "force-dynamic";
 
@@ -33,6 +34,7 @@ type DashboardRow = {
   category: string;
   color: string;
   warehouses: Record<string, number>;
+  ffStock: FfStock;
   fbs: number;
   fbsByLocation: FbsBreakdown;
   receiving: number;
@@ -47,7 +49,26 @@ const WB_ANALYTICS = "https://seller-analytics-api.wildberries.ru";
 const palette = ["#ffb45c", "#8ea6ff", "#d7a6cc", "#94c5a6", "#eaa070", "#79b9bd", "#adb1b8", "#d0ad82"];
 const emptyFbsBreakdown = (): FbsBreakdown => ({ kazan: 0, moscow: 0, spb: 0, other: 0 });
 
-let memoryCache: { expiresAt: number; payload: unknown } | null = null;
+type DashboardPayload = {
+  configured: true;
+  rows: DashboardRow[];
+  warehouseNames: string[];
+  totals: {
+    available: number;
+    ffTotal: number;
+    ffStock: FfStock;
+    fbs: number;
+    fbsByLocation: FbsBreakdown;
+    receiving: number;
+    toSale: number;
+    risk: number;
+    activeSupplies: number;
+  };
+  warnings: string[];
+  updatedAt: string;
+};
+
+let memoryCache: { expiresAt: number; payload: DashboardPayload } | null = null;
 
 function chunks<T>(items: T[], size: number): T[][] {
   const result: T[][] = [];
@@ -164,6 +185,7 @@ function getOrCreateRow(map: Map<string, DashboardRow>, input: { nmId?: number; 
     category: input.category || "Wildberries",
     color: palette[Math.abs(seed) % palette.length],
     warehouses: {},
+    ffStock: emptyFfStock(),
     fbs: 0,
     fbsByLocation: emptyFbsBreakdown(),
     receiving: 0,
@@ -182,6 +204,29 @@ function warningFor(section: string, error: unknown) {
   return `${section}: данные временно недоступны`;
 }
 
+async function attachFfStocks(payload: DashboardPayload): Promise<DashboardPayload> {
+  try {
+    const byProduct = await listFfStocks();
+    const rows = payload.rows.map((row) => ({ ...row, ffStock: byProduct.get(row.key) ?? emptyFfStock() }));
+    const ffStock = rows.reduce((total, row) => ({
+      kazan: total.kazan + row.ffStock.kazan,
+      moscow: total.moscow + row.ffStock.moscow,
+      spb: total.spb + row.ffStock.spb,
+    }), emptyFfStock());
+    return {
+      ...payload,
+      rows,
+      totals: { ...payload.totals, ffStock, ffTotal: ffStock.kazan + ffStock.moscow + ffStock.spb },
+    };
+  } catch (error) {
+    return {
+      ...payload,
+      rows: payload.rows.map((row) => ({ ...row, ffStock: emptyFfStock() })),
+      warnings: [...payload.warnings, warningFor("Ручные остатки ФФ", error)],
+    };
+  }
+}
+
 export async function GET(request: Request) {
   const token = process.env.WB_API_TOKEN?.trim();
   if (!token) {
@@ -193,7 +238,7 @@ export async function GET(request: Request) {
 
   const force = new URL(request.url).searchParams.get("refresh") === "1";
   if (!force && memoryCache && memoryCache.expiresAt > Date.now()) {
-    return NextResponse.json(memoryCache.payload, { headers: { "Cache-Control": "private, max-age=0" } });
+    return NextResponse.json(await attachFfStocks(memoryCache.payload), { headers: { "Cache-Control": "private, max-age=0" } });
   }
 
   const [cardsResult, wbStocksResult, ordersResult] = await Promise.allSettled([
@@ -268,6 +313,8 @@ export async function GET(request: Request) {
   const warehouseNames = [...new Set(rows.flatMap((row) => Object.keys(row.warehouses)))].sort((a, b) => a.localeCompare(b, "ru"));
   const totals = {
     available: rows.reduce((sum, row) => sum + Object.values(row.warehouses).reduce((inner, value) => inner + value, 0), 0),
+    ffTotal: 0,
+    ffStock: emptyFfStock(),
     fbs: rows.reduce((sum, row) => sum + row.fbs, 0),
     fbsByLocation: rows.reduce((total, row) => ({
       kazan: total.kazan + row.fbsByLocation.kazan,
@@ -281,8 +328,8 @@ export async function GET(request: Request) {
     activeSupplies,
   };
   const updatedAt = new Date().toISOString();
-  const payload = { configured: true, rows, warehouseNames, totals, warnings, updatedAt };
+  const payload: DashboardPayload = { configured: true, rows, warehouseNames, totals, warnings, updatedAt };
   memoryCache = { expiresAt: Date.now() + 2 * 60 * 1000, payload };
 
-  return NextResponse.json(payload, { headers: { "Cache-Control": "private, max-age=0" } });
+  return NextResponse.json(await attachFfStocks(payload), { headers: { "Cache-Control": "private, max-age=0" } });
 }

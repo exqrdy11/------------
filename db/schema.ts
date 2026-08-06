@@ -1,4 +1,11 @@
-// Intentionally empty by default.
-// Add Drizzle tables here when the site actually needs a database.
-// See examples/d1/db/schema.ts for an opt-in example.
-export {};
+import { sql } from "drizzle-orm";
+import { integer, primaryKey, sqliteTable, text } from "drizzle-orm/sqlite-core";
+
+export const ffStocks = sqliteTable("ff_stocks", {
+  productKey: text("product_key").notNull(),
+  nmId: integer("nm_id"),
+  sku: text("sku").notNull().default(""),
+  location: text("location").notNull(),
+  quantity: integer("quantity").notNull().default(0),
+  updatedAt: text("updated_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+}, (table) => [primaryKey({ columns: [table.productKey, table.location] })]);

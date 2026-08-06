@@ -6,6 +6,7 @@ type StockStatus = "В норме" | "Мало" | "Заканчивается";
 type View = "overview" | "stock" | "fbs" | "sales" | "reports";
 type FbsLocationKey = "kazan" | "moscow" | "spb" | "other";
 type FbsBreakdown = Record<FbsLocationKey, number>;
+type FfStock = Record<Exclude<FbsLocationKey, "other">, number>;
 
 type StockRow = {
   key: string;
@@ -15,6 +16,7 @@ type StockRow = {
   category: string;
   color: string;
   warehouses: Record<string, number>;
+  ffStock: FfStock;
   fbs: number;
   fbsByLocation: FbsBreakdown;
   receiving: number;
@@ -29,6 +31,8 @@ type InventoryResponse = {
   warehouseNames?: string[];
   totals?: {
     available: number;
+    ffTotal: number;
+    ffStock: FfStock;
     fbs: number;
     fbsByLocation: FbsBreakdown;
     receiving: number;
@@ -41,8 +45,9 @@ type InventoryResponse = {
   error?: string;
 };
 
+const emptyFfStock: FfStock = { kazan: 0, moscow: 0, spb: 0 };
 const emptyFbsBreakdown: FbsBreakdown = { kazan: 0, moscow: 0, spb: 0, other: 0 };
-const emptyTotals = { available: 0, fbs: 0, fbsByLocation: emptyFbsBreakdown, receiving: 0, toSale: 0, risk: 0, activeSupplies: 0 };
+const emptyTotals = { available: 0, ffTotal: 0, ffStock: emptyFfStock, fbs: 0, fbsByLocation: emptyFbsBreakdown, receiving: 0, toSale: 0, risk: 0, activeSupplies: 0 };
 const fbsLocations: Array<{ key: Exclude<FbsLocationKey, "other">; city: string; label: string; short: string }> = [
   { key: "kazan", city: "Казань", label: "Наш склад", short: "КЗН" },
   { key: "moscow", city: "Москва", label: "БикПартнер", short: "МСК" },
@@ -80,6 +85,10 @@ export default function Home() {
   const [error, setError] = useState<string | null>(null);
   const [configured, setConfigured] = useState(true);
   const [loading, setLoading] = useState(true);
+  const [ffDraft, setFfDraft] = useState<FfStock>({ ...emptyFfStock });
+  const [ffSaving, setFfSaving] = useState(false);
+  const [ffSaveMessage, setFfSaveMessage] = useState<string | null>(null);
+  const [ffSaveError, setFfSaveError] = useState<string | null>(null);
 
   const loadData = useCallback(async (force = false) => {
     setLoading(true);
@@ -92,7 +101,7 @@ export default function Home() {
       if (!response.ok) throw new Error(data.error || "Не удалось получить данные Wildberries");
       setRows(data.rows ?? []);
       setWarehouseNames(data.warehouseNames ?? []);
-      setTotals(data.totals ? { ...emptyTotals, ...data.totals, fbsByLocation: { ...emptyFbsBreakdown, ...data.totals.fbsByLocation } } : emptyTotals);
+      setTotals(data.totals ? { ...emptyTotals, ...data.totals, ffStock: { ...emptyFfStock, ...data.totals.ffStock }, fbsByLocation: { ...emptyFbsBreakdown, ...data.totals.fbsByLocation } } : emptyTotals);
       setUpdatedAt(data.updatedAt ?? new Date().toISOString());
     } catch (loadError) {
       setError(loadError instanceof Error ? loadError.message : "Не удалось получить данные Wildberries");
@@ -140,9 +149,50 @@ export default function Home() {
     window.scrollTo({ top: 0, behavior: "smooth" });
   };
 
+  const openProduct = (row: StockRow) => {
+    setSelected(row);
+    setFfDraft({ ...emptyFfStock, ...row.ffStock });
+    setFfSaveMessage(null);
+    setFfSaveError(null);
+  };
+
+  const saveManualFfStock = async () => {
+    if (!selected) return;
+    setFfSaving(true);
+    setFfSaveMessage(null);
+    setFfSaveError(null);
+    try {
+      const response = await fetch("/api/ff-stock", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ productKey: selected.key, nmId: selected.nmId, sku: selected.sku, stock: ffDraft }),
+      });
+      const data = await response.json() as { stock?: FfStock; error?: string };
+      if (!response.ok || !data.stock) throw new Error(data.error || "Не удалось сохранить остатки ФФ");
+      const previous = { ...emptyFfStock, ...selected.ffStock };
+      const nextStock = { ...emptyFfStock, ...data.stock };
+      const nextSelected = { ...selected, ffStock: nextStock };
+      setRows((current) => current.map((row) => row.key === selected.key ? nextSelected : row));
+      setSelected(nextSelected);
+      setTotals((current) => {
+        const ffStock = {
+          kazan: current.ffStock.kazan - previous.kazan + nextStock.kazan,
+          moscow: current.ffStock.moscow - previous.moscow + nextStock.moscow,
+          spb: current.ffStock.spb - previous.spb + nextStock.spb,
+        };
+        return { ...current, ffStock, ffTotal: ffStock.kazan + ffStock.moscow + ffStock.spb };
+      });
+      setFfSaveMessage("Остатки ФФ сохранены");
+    } catch (saveError) {
+      setFfSaveError(saveError instanceof Error ? saveError.message : "Не удалось сохранить остатки ФФ");
+    } finally {
+      setFfSaving(false);
+    }
+  };
+
   const downloadCsv = (sourceRows: StockRow[], suffix: string) => {
-    const header = ["Артикул продавца", "Артикул WB", ...warehouseNames, "Всего на WB", "FBS всего", "FBS Казань — Наш склад", "FBS Москва — БикПартнер", "FBS Питер — ФФ RUS СПБ", "На приёмке", "Ожидают продажи", "Статус"];
-    const body = sourceRows.map((row) => [row.sku, row.nmId ?? "", ...warehouseNames.map((name) => row.warehouses[name] ?? 0), stockTotal(row), row.fbs, row.fbsByLocation?.kazan ?? 0, row.fbsByLocation?.moscow ?? 0, row.fbsByLocation?.spb ?? 0, row.receiving, row.toSale, row.status]);
+    const header = ["Артикул продавца", "Артикул WB", ...warehouseNames, "Всего на WB", "ФФ Казань — Наш склад", "ФФ Москва — БикПартнер", "ФФ Питер — ФФ RUS СПБ", "FBS всего", "FBS Казань", "FBS Москва", "FBS Питер", "На приёмке", "Ожидают продажи", "Статус"];
+    const body = sourceRows.map((row) => [row.sku, row.nmId ?? "", ...warehouseNames.map((name) => row.warehouses[name] ?? 0), stockTotal(row), row.ffStock?.kazan ?? 0, row.ffStock?.moscow ?? 0, row.ffStock?.spb ?? 0, row.fbs, row.fbsByLocation?.kazan ?? 0, row.fbsByLocation?.moscow ?? 0, row.fbsByLocation?.spb ?? 0, row.receiving, row.toSale, row.status]);
     const content = [header, ...body].map((line) => line.map((cell) => String(cell).replaceAll(";", ",")).join(";")).join("\n");
     const blob = new Blob(["\uFEFF" + content], { type: "text/csv;charset=utf-8" });
     const url = URL.createObjectURL(blob);
@@ -204,6 +254,11 @@ export default function Home() {
               <p>Фактический остаток · для FBS недоступен</p>
             </article>
             <article className="metric-card">
+              <div className="metric-icon green">□</div><div className="metric-label">Остатки ФФ · вручную</div>
+              <strong className="metric-value">{loading ? "—" : formatNumber.format(totals.ffTotal)} <small>шт.</small></strong>
+              <p>Казань <b>{totals.ffStock.kazan}</b> · Москва <b>{totals.ffStock.moscow}</b> · Питер <b>{totals.ffStock.spb}</b></p>
+            </article>
+            <article className="metric-card">
               <div className="metric-icon blue">→</div><div className="metric-label">Активные FBS</div>
               <strong className="metric-value">{loading ? "—" : formatNumber.format(totals.fbs)} <small>шт.</small></strong>
               <p>Казань <b>{totals.fbsByLocation.kazan}</b> · Москва <b>{totals.fbsByLocation.moscow}</b> · Питер <b>{totals.fbsByLocation.spb}</b></p>
@@ -213,16 +268,11 @@ export default function Home() {
               <strong className="metric-value">{loading ? "—" : formatNumber.format(totals.toSale)} <small>шт.</small></strong>
               <p><b>{totals.receiving}</b> ожидают приёмки WB</p>
             </article>
-            <article className="metric-card warning">
-              <div className="metric-icon red">!</div><div className="metric-label">Риск дефицита</div>
-              <strong className="metric-value">{loading ? "—" : formatNumber.format(totals.risk)} <small>арт.</small></strong>
-              <p>Остаток меньше 21 единицы</p>
-            </article>
           </section>
 
           <section className={`movement-card ${activeView !== "overview" && activeView !== "fbs" ? "view-hidden" : ""}`} id="movement">
             <div className="section-heading">
-              <div><span className="section-kicker">ОСТАТКИ WB И ДВИЖЕНИЕ FBS</span><h2>Фактический остаток и активные FBS-отгрузки</h2></div>
+              <div><span className="section-kicker">ОСТАТКИ WB, ФФ И ДВИЖЕНИЕ FBS</span><h2>Фактические и ручные остатки отдельно</h2></div>
               <span className="period-pill">Актуальные заказы за 30 дней</span>
             </div>
             <div className="movement-grid">
@@ -231,9 +281,12 @@ export default function Home() {
                 <div><small>ФАКТИЧЕСКИЙ ОСТАТОК НА WB</small><strong>{formatNumber.format(totals.available)} <em>шт.</em></strong><p>Уже находится на складах Wildberries и не является доступным запасом для FBS.</p></div>
               </article>
               <div className="fbs-overview">
-                <div className="fbs-location-grid">
-                  {fbsLocations.map((location) => <article className="fbs-location-card" key={location.key}><span>{location.city}</span><strong>{formatNumber.format(totals.fbsByLocation[location.key])}</strong><small>{location.label}</small></article>)}
+                <div className="movement-subhead"><span>РУЧНЫЕ ОСТАТКИ ФФ</span><small>Заполняются в карточке артикула</small></div>
+                <div className="fbs-location-grid manual-location-grid">
+                  {fbsLocations.map((location) => <article className="fbs-location-card manual" key={location.key}><span>{location.city}</span><strong>{formatNumber.format(totals.ffStock[location.key])}</strong><small>{location.label}</small></article>)}
                 </div>
+                <div className="movement-subhead orders"><span>АКТИВНЫЕ FBS-ЗАКАЗЫ</span><small>По данным WB API</small></div>
+                <div className="fbs-location-grid order-location-grid">{fbsLocations.map((location) => <article className="fbs-location-card" key={location.key}><span>{location.city}</span><strong>{formatNumber.format(totals.fbsByLocation[location.key])}</strong><small>{location.label}</small></article>)}</div>
                 <div className="fbs-stage-strip"><span><b>{totals.fbs}</b> активные FBS</span><i>→</i><span><b>{totals.receiving}</b> ожидают WB</span><i>→</i><span className="sale-stage"><b>{totals.toSale}</b> к продаже</span></div>
               </div>
             </div>
@@ -257,13 +310,14 @@ export default function Home() {
             </div>
             <div className="table-wrap">
               <table>
-                <thead><tr><th>Товар / артикул</th><th>Остаток WB</th><th>{warehouse === "Все склады" ? "Складов WB" : "На выбранном"}</th><th>FBS по складам</th><th>Приёмка</th><th>К продаже</th><th>Статус</th><th /></tr></thead>
+                <thead><tr><th>Товар / артикул</th><th>Остаток WB</th><th>{warehouse === "Все склады" ? "Складов WB" : "На выбранном"}</th><th>Остатки ФФ</th><th>Активные FBS</th><th>Приёмка</th><th>К продаже</th><th>Статус</th><th /></tr></thead>
                 <tbody>
                   {filteredRows.map((row) => (
-                    <tr key={row.key} onClick={() => setSelected(row)} tabIndex={0} onKeyDown={(event) => { if (event.key === "Enter") setSelected(row); }}>
+                    <tr key={row.key} onClick={() => openProduct(row)} tabIndex={0} onKeyDown={(event) => { if (event.key === "Enter") openProduct(row); }}>
                       <td><div className="product-cell"><span className="product-swatch" style={{background:row.color}}>{row.name.charAt(0).toUpperCase()}</span><span><strong>{row.name}</strong><small>{row.sku}{row.nmId ? ` · WB ${row.nmId}` : ""} · {row.category}</small></span></div></td>
                       <td><b>{formatNumber.format(stockTotal(row))}</b><small> шт.</small></td>
                       <td><b>{warehouse === "Все склады" ? Object.values(row.warehouses).filter((value) => value > 0).length : formatNumber.format(row.warehouses[warehouse] ?? 0)}</b>{warehouse !== "Все склады" && <small> шт.</small>}</td>
+                      <td><div className="fbs-split-cell ff-stock-split">{fbsLocations.map((location) => <span key={location.key} title={`${location.city} — ${location.label}`}><small>{location.short}</small><b>{row.ffStock?.[location.key] ?? 0}</b></span>)}</div></td>
                       <td><div className="fbs-split-cell">{fbsLocations.map((location) => <span key={location.key} title={`${location.city} — ${location.label}`}><small>{location.short}</small><b>{row.fbsByLocation?.[location.key] ?? 0}</b></span>)}</div></td>
                       <td><span className="number-pill amber-pill">{row.receiving}</span></td>
                       <td><span className="number-pill green-pill">{row.toSale}</span></td>
@@ -308,6 +362,13 @@ export default function Home() {
               {!Object.keys(selected.warehouses).length && <div><span>Нет остатков</span><strong>0 шт.</strong></div>}
             </div>
             <p className="drawer-stock-note">Этот остаток уже находится на складах WB и недоступен для FBS.</p>
+            <h3>Ручные остатки ФФ</h3>
+            <div className="ff-stock-editor">
+              {fbsLocations.map((location) => <label key={location.key}><span><strong>{location.city}</strong><small>{location.label}</small></span><input type="number" min="0" max="10000000" step="1" inputMode="numeric" value={ffDraft[location.key]} onChange={(event) => setFfDraft((current) => ({ ...current, [location.key]: Math.max(0, Math.floor(Number(event.target.value) || 0)) }))} aria-label={`Остаток ФФ: ${location.city} — ${location.label}`} /></label>)}
+            </div>
+            <button className="drawer-primary ff-save-button" type="button" onClick={() => void saveManualFfStock()} disabled={ffSaving}>{ffSaving ? "Сохраняем…" : "Сохранить остатки ФФ"}</button>
+            {ffSaveMessage && <p className="ff-save-status success">{ffSaveMessage}</p>}
+            {ffSaveError && <p className="ff-save-status error">{ffSaveError}</p>}
             <h3>Активные FBS по складам</h3>
             <div className="drawer-fbs-locations">{fbsLocations.map((location) => <div key={location.key}><span><strong>{location.city}</strong><small>{location.label}</small></span><b>{selected.fbsByLocation?.[location.key] ?? 0} шт.</b></div>)}</div>
             <h3>Текущее движение FBS</h3>
@@ -316,7 +377,6 @@ export default function Home() {
               <div className="timeline-item active"><i>2</i><div><strong>Ожидает приёмки WB</strong><span>{selected.receiving} шт. в статусе waiting</span></div></div>
               <div className="timeline-item"><i>3</i><div><strong>Ожидает продажи</strong><span>{selected.toSale} шт. отсортировано или готово к выдаче</span></div></div>
             </div>
-            <button className="drawer-primary" type="button" onClick={() => setSelected(null)}>Понятно</button>
             <p className="drawer-note">Данные Wildberries обновлены в {selected.updated} МСК</p>
           </aside>
         </div>
