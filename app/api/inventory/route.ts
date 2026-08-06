@@ -18,9 +18,12 @@ type WbOrder = {
   article?: string;
   supplyId?: string;
   createdAt?: string;
+  warehouseId?: number;
 };
 
 type OrderStatus = { id: number; supplierStatus?: string; wbStatus?: string };
+type FbsLocationKey = "kazan" | "moscow" | "spb" | "other";
+type FbsBreakdown = Record<FbsLocationKey, number>;
 
 type DashboardRow = {
   key: string;
@@ -31,6 +34,7 @@ type DashboardRow = {
   color: string;
   warehouses: Record<string, number>;
   fbs: number;
+  fbsByLocation: FbsBreakdown;
   receiving: number;
   toSale: number;
   status: "В норме" | "Мало" | "Заканчивается";
@@ -41,6 +45,7 @@ const WB_MARKETPLACE = "https://marketplace-api.wildberries.ru";
 const WB_CONTENT = "https://content-api.wildberries.ru";
 const WB_ANALYTICS = "https://seller-analytics-api.wildberries.ru";
 const palette = ["#ffb45c", "#8ea6ff", "#d7a6cc", "#94c5a6", "#eaa070", "#79b9bd", "#adb1b8", "#d0ad82"];
+const emptyFbsBreakdown = (): FbsBreakdown => ({ kazan: 0, moscow: 0, spb: 0, other: 0 });
 
 let memoryCache: { expiresAt: number; payload: unknown } | null = null;
 
@@ -92,40 +97,11 @@ async function getCards(token: string): Promise<WbCard[]> {
   return cards;
 }
 
-async function getSellerStocks(token: string, cards: WbCard[]) {
-  const warehouses = await wbFetch<Array<{ id: number; name: string; isDeleting?: boolean }>>(
-    token,
-    `${WB_MARKETPLACE}/api/v3/warehouses`,
-  );
-  const activeWarehouses = warehouses.filter((item) => !item.isDeleting);
-  const chrtIds = [...new Set(cards.flatMap((card) => (card.sizes ?? []).map((size) => size.chrtID ?? size.chrtId).filter((id): id is number => Boolean(id))))];
-  const stockByChrt = new Map<number, Record<string, number>>();
-
-  for (const warehouse of activeWarehouses) {
-    for (const batch of chunks(chrtIds, 1000)) {
-      if (!batch.length) continue;
-      const data = await wbFetch<{ stocks?: Array<{ chrtId: number; amount: number }> }>(
-        token,
-        `${WB_MARKETPLACE}/api/v3/stocks/${warehouse.id}`,
-        { method: "POST", body: JSON.stringify({ chrtIds: batch }) },
-      );
-      for (const item of data.stocks ?? []) {
-        const current = stockByChrt.get(item.chrtId) ?? {};
-        current[`FBS · ${warehouse.name}`] = item.amount ?? 0;
-        stockByChrt.set(item.chrtId, current);
-      }
-    }
-  }
-
-  return { stockByChrt, warehouses: activeWarehouses.map((item) => `FBS · ${item.name}`) };
-}
-
 async function getWbStocks(token: string) {
   const response = await wbFetch<{ data?: { items?: Array<{
     nmId?: number;
     warehouseName?: string;
     quantity?: number;
-    inWayFromClient?: number;
   }> } }>(token, `${WB_ANALYTICS}/api/analytics/v1/stocks-report/wb-warehouses`, {
     method: "POST",
     body: JSON.stringify({ nmIds: [], chrtIds: [], limit: 250000, offset: 0 }),
@@ -133,11 +109,15 @@ async function getWbStocks(token: string) {
   return response.data?.items ?? [];
 }
 
-async function getOrders(token: string): Promise<{ orders: WbOrder[]; statuses: Map<number, OrderStatus> }> {
+async function getOrders(token: string): Promise<{ orders: WbOrder[]; statuses: Map<number, OrderStatus>; warehouseNames: Map<number, string> }> {
   const orders: WbOrder[] = [];
   const now = Math.floor(Date.now() / 1000);
   const dateFrom = now - 30 * 24 * 60 * 60;
   let next = 0;
+  const sellerWarehousesPromise = wbFetch<Array<{ id: number; name: string; isDeleting?: boolean }>>(
+    token,
+    `${WB_MARKETPLACE}/api/v3/warehouses`,
+  );
 
   for (let page = 0; page < 30; page += 1) {
     const params = new URLSearchParams({ limit: "1000", next: String(next), dateFrom: String(dateFrom), dateTo: String(now) });
@@ -158,7 +138,17 @@ async function getOrders(token: string): Promise<{ orders: WbOrder[]; statuses: 
     for (const status of data.orders ?? []) statuses.set(status.id, status);
   }
 
-  return { orders, statuses };
+  const sellerWarehouses = await sellerWarehousesPromise;
+  const warehouseNames = new Map(sellerWarehouses.filter((item) => !item.isDeleting).map((item) => [item.id, item.name]));
+  return { orders, statuses, warehouseNames };
+}
+
+function resolveFbsLocation(warehouseId: number | undefined, warehouseName: string | undefined): FbsLocationKey {
+  const name = (warehouseName ?? "").toLocaleLowerCase("ru-RU");
+  if (warehouseId === 1692397 || name.includes("родины") || name.includes("казан")) return "kazan";
+  if (name.includes("бикпартнер") || name.includes("бик партнер") || name.includes("моск")) return "moscow";
+  if (name.includes("фф rus спб") || name.includes("спб") || name.includes("питер") || name.includes("санкт")) return "spb";
+  return "other";
 }
 
 function getOrCreateRow(map: Map<string, DashboardRow>, input: { nmId?: number; sku?: string; name?: string; category?: string }) {
@@ -175,6 +165,7 @@ function getOrCreateRow(map: Map<string, DashboardRow>, input: { nmId?: number; 
     color: palette[Math.abs(seed) % palette.length],
     warehouses: {},
     fbs: 0,
+    fbsByLocation: emptyFbsBreakdown(),
     receiving: 0,
     toSale: 0,
     status: "В норме",
@@ -231,28 +222,9 @@ export async function GET(request: Request) {
       });
       const warehouseName = `WB · ${stock.warehouseName || "Склад WB"}`;
       row.warehouses[warehouseName] = (row.warehouses[warehouseName] ?? 0) + (stock.quantity ?? 0);
-      row.toSale += stock.inWayFromClient ?? 0;
     }
   } else {
     warnings.push(warningFor("Остатки на складах WB", wbStocksResult.reason));
-  }
-
-  if (cards.length) {
-    try {
-      const sellerStocks = await getSellerStocks(token, cards);
-      for (const card of cards) {
-        const row = getOrCreateRow(rowMap, { nmId: card.nmID ?? card.nmId, sku: card.vendorCode, name: card.title, category: card.subjectName });
-        for (const size of card.sizes ?? []) {
-          const chrtId = size.chrtID ?? size.chrtId;
-          if (!chrtId) continue;
-          for (const [warehouse, amount] of Object.entries(sellerStocks.stockByChrt.get(chrtId) ?? {})) {
-            row.warehouses[warehouse] = (row.warehouses[warehouse] ?? 0) + amount;
-          }
-        }
-      }
-    } catch (error) {
-      warnings.push(warningFor("Остатки на складах продавца", error));
-    }
   }
 
   let activeSupplies = 0;
@@ -265,6 +237,8 @@ export async function GET(request: Request) {
       const row = getOrCreateRow(rowMap, { nmId: order.nmId, sku: order.article, name: order.article });
       if (status.supplierStatus === "complete") {
         row.fbs += 1;
+        const location = resolveFbsLocation(order.warehouseId, ordersResult.value.warehouseNames.get(order.warehouseId ?? -1));
+        row.fbsByLocation[location] += 1;
         if (order.supplyId) supplies.add(order.supplyId);
       }
       if (status.supplierStatus === "complete" && status.wbStatus === "waiting") row.receiving += 1;
@@ -295,6 +269,12 @@ export async function GET(request: Request) {
   const totals = {
     available: rows.reduce((sum, row) => sum + Object.values(row.warehouses).reduce((inner, value) => inner + value, 0), 0),
     fbs: rows.reduce((sum, row) => sum + row.fbs, 0),
+    fbsByLocation: rows.reduce((total, row) => ({
+      kazan: total.kazan + row.fbsByLocation.kazan,
+      moscow: total.moscow + row.fbsByLocation.moscow,
+      spb: total.spb + row.fbsByLocation.spb,
+      other: total.other + row.fbsByLocation.other,
+    }), emptyFbsBreakdown()),
     receiving: rows.reduce((sum, row) => sum + row.receiving, 0),
     toSale: rows.reduce((sum, row) => sum + row.toSale, 0),
     risk: rows.filter((row) => row.status !== "В норме").length,

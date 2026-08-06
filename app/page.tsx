@@ -4,6 +4,8 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 
 type StockStatus = "В норме" | "Мало" | "Заканчивается";
 type View = "overview" | "stock" | "fbs" | "sales" | "reports";
+type FbsLocationKey = "kazan" | "moscow" | "spb" | "other";
+type FbsBreakdown = Record<FbsLocationKey, number>;
 
 type StockRow = {
   key: string;
@@ -14,6 +16,7 @@ type StockRow = {
   color: string;
   warehouses: Record<string, number>;
   fbs: number;
+  fbsByLocation: FbsBreakdown;
   receiving: number;
   toSale: number;
   status: StockStatus;
@@ -27,6 +30,7 @@ type InventoryResponse = {
   totals?: {
     available: number;
     fbs: number;
+    fbsByLocation: FbsBreakdown;
     receiving: number;
     toSale: number;
     risk: number;
@@ -37,7 +41,13 @@ type InventoryResponse = {
   error?: string;
 };
 
-const emptyTotals = { available: 0, fbs: 0, receiving: 0, toSale: 0, risk: 0, activeSupplies: 0 };
+const emptyFbsBreakdown: FbsBreakdown = { kazan: 0, moscow: 0, spb: 0, other: 0 };
+const emptyTotals = { available: 0, fbs: 0, fbsByLocation: emptyFbsBreakdown, receiving: 0, toSale: 0, risk: 0, activeSupplies: 0 };
+const fbsLocations: Array<{ key: Exclude<FbsLocationKey, "other">; city: string; label: string; short: string }> = [
+  { key: "kazan", city: "Казань", label: "Наш склад", short: "КЗН" },
+  { key: "moscow", city: "Москва", label: "БикПартнер", short: "МСК" },
+  { key: "spb", city: "Питер", label: "ФФ RUS СПБ", short: "СПБ" },
+];
 const formatNumber = new Intl.NumberFormat("ru-RU");
 const viewTitles: Record<View, { eyebrow: string; title: string }> = {
   overview: { eyebrow: "WILDBERRIES · ОПЕРАЦИИ", title: "Остатки и движение товаров" },
@@ -82,7 +92,7 @@ export default function Home() {
       if (!response.ok) throw new Error(data.error || "Не удалось получить данные Wildberries");
       setRows(data.rows ?? []);
       setWarehouseNames(data.warehouseNames ?? []);
-      setTotals(data.totals ?? emptyTotals);
+      setTotals(data.totals ? { ...emptyTotals, ...data.totals, fbsByLocation: { ...emptyFbsBreakdown, ...data.totals.fbsByLocation } } : emptyTotals);
       setUpdatedAt(data.updatedAt ?? new Date().toISOString());
     } catch (loadError) {
       setError(loadError instanceof Error ? loadError.message : "Не удалось получить данные Wildberries");
@@ -131,8 +141,8 @@ export default function Home() {
   };
 
   const downloadCsv = (sourceRows: StockRow[], suffix: string) => {
-    const header = ["Артикул продавца", "Артикул WB", ...warehouseNames, "Всего", "Отгружено FBS", "На приёмке", "Ожидают продажи", "Статус"];
-    const body = sourceRows.map((row) => [row.sku, row.nmId ?? "", ...warehouseNames.map((name) => row.warehouses[name] ?? 0), stockTotal(row), row.fbs, row.receiving, row.toSale, row.status]);
+    const header = ["Артикул продавца", "Артикул WB", ...warehouseNames, "Всего на WB", "FBS всего", "FBS Казань — Наш склад", "FBS Москва — БикПартнер", "FBS Питер — ФФ RUS СПБ", "На приёмке", "Ожидают продажи", "Статус"];
+    const body = sourceRows.map((row) => [row.sku, row.nmId ?? "", ...warehouseNames.map((name) => row.warehouses[name] ?? 0), stockTotal(row), row.fbs, row.fbsByLocation?.kazan ?? 0, row.fbsByLocation?.moscow ?? 0, row.fbsByLocation?.spb ?? 0, row.receiving, row.toSale, row.status]);
     const content = [header, ...body].map((line) => line.map((cell) => String(cell).replaceAll(";", ",")).join(";")).join("\n");
     const blob = new Blob(["\uFEFF" + content], { type: "text/csv;charset=utf-8" });
     const url = URL.createObjectURL(blob);
@@ -188,20 +198,20 @@ export default function Home() {
 
           <section className={`metric-grid ${activeView !== "overview" ? "view-hidden" : ""}`} aria-label="Ключевые показатели">
             <article className="metric-card featured">
-              <div className="metric-top"><span>Всего на складах</span><span className="trend up">● WB API</span></div>
+              <div className="metric-top"><span>Остаток на складах WB</span><span className="trend up">● WB API</span></div>
               <strong className="metric-value">{loading ? "—" : formatNumber.format(totals.available)} <small>шт.</small></strong>
               <div className="spark-bars" aria-hidden="true">{[24,31,28,42,38,52,47,62,58,74,69,83].map((height, index) => <i key={index} style={{height}} />)}</div>
-              <p>{warehouseNames.length} складов в едином отчёте</p>
+              <p>Фактический остаток · для FBS недоступен</p>
             </article>
             <article className="metric-card">
-              <div className="metric-icon blue">→</div><div className="metric-label">Отгружено FBS</div>
+              <div className="metric-icon blue">→</div><div className="metric-label">Активные FBS</div>
               <strong className="metric-value">{loading ? "—" : formatNumber.format(totals.fbs)} <small>шт.</small></strong>
-              <p><b>{totals.activeSupplies}</b> активных поставок за 30 дней</p>
+              <p>Казань <b>{totals.fbsByLocation.kazan}</b> · Москва <b>{totals.fbsByLocation.moscow}</b> · Питер <b>{totals.fbsByLocation.spb}</b></p>
             </article>
             <article className="metric-card">
-              <div className="metric-icon amber">◷</div><div className="metric-label">Ожидают приёмки</div>
-              <strong className="metric-value">{loading ? "—" : formatNumber.format(totals.receiving)} <small>шт.</small></strong>
-              <p><b>{totals.toSale}</b> ожидают перехода в продажу</p>
+              <div className="metric-icon amber">◷</div><div className="metric-label">Ожидают продажи</div>
+              <strong className="metric-value">{loading ? "—" : formatNumber.format(totals.toSale)} <small>шт.</small></strong>
+              <p><b>{totals.receiving}</b> ожидают приёмки WB</p>
             </article>
             <article className="metric-card warning">
               <div className="metric-icon red">!</div><div className="metric-label">Риск дефицита</div>
@@ -212,17 +222,20 @@ export default function Home() {
 
           <section className={`movement-card ${activeView !== "overview" && activeView !== "fbs" ? "view-hidden" : ""}`} id="movement">
             <div className="section-heading">
-              <div><span className="section-kicker">ДВИЖЕНИЕ FBS</span><h2>От вашего склада до продажи</h2></div>
+              <div><span className="section-kicker">ОСТАТКИ WB И ДВИЖЕНИЕ FBS</span><h2>Фактический остаток и активные FBS-отгрузки</h2></div>
               <span className="period-pill">Актуальные заказы за 30 дней</span>
             </div>
-            <div className="movement-flow">
-              <div className="flow-node"><span className="node-dot navy">1</span><div><small>НА СКЛАДАХ</small><strong>{formatNumber.format(totals.available)}</strong><span>доступно</span></div></div>
-              <div className="flow-line"><i style={{width:"78%"}} /><span>{totals.fbs} шт.</span></div>
-              <div className="flow-node"><span className="node-dot blue">2</span><div><small>ОТГРУЖЕНО FBS</small><strong>{formatNumber.format(totals.fbs)}</strong><span>в доставке</span></div></div>
-              <div className="flow-line"><i style={{width:"61%"}} /><span>{totals.receiving} шт.</span></div>
-              <div className="flow-node"><span className="node-dot amber">3</span><div><small>ОЖИДАЮТ WB</small><strong>{formatNumber.format(totals.receiving)}</strong><span>на приёмке</span></div></div>
-              <div className="flow-line final"><i style={{width:"72%"}} /><span>{totals.toSale} шт.</span></div>
-              <div className="flow-node"><span className="node-dot green">✓</span><div><small>К ПРОДАЖЕ</small><strong className="green-text">{formatNumber.format(totals.toSale)}</strong><span>ожидаются</span></div></div>
+            <div className="movement-grid">
+              <article className="wb-stock-fact">
+                <span className="wb-stock-mark">WB</span>
+                <div><small>ФАКТИЧЕСКИЙ ОСТАТОК НА WB</small><strong>{formatNumber.format(totals.available)} <em>шт.</em></strong><p>Уже находится на складах Wildberries и не является доступным запасом для FBS.</p></div>
+              </article>
+              <div className="fbs-overview">
+                <div className="fbs-location-grid">
+                  {fbsLocations.map((location) => <article className="fbs-location-card" key={location.key}><span>{location.city}</span><strong>{formatNumber.format(totals.fbsByLocation[location.key])}</strong><small>{location.label}</small></article>)}
+                </div>
+                <div className="fbs-stage-strip"><span><b>{totals.fbs}</b> активные FBS</span><i>→</i><span><b>{totals.receiving}</b> ожидают WB</span><i>→</i><span className="sale-stage"><b>{totals.toSale}</b> к продаже</span></div>
+              </div>
             </div>
           </section>
 
@@ -244,14 +257,14 @@ export default function Home() {
             </div>
             <div className="table-wrap">
               <table>
-                <thead><tr><th>Товар / артикул</th><th>Всего</th><th>{warehouse === "Все склады" ? "Складов" : "На выбранном"}</th><th>FBS</th><th>Приёмка</th><th>К продаже</th><th>Статус</th><th /></tr></thead>
+                <thead><tr><th>Товар / артикул</th><th>Остаток WB</th><th>{warehouse === "Все склады" ? "Складов WB" : "На выбранном"}</th><th>FBS по складам</th><th>Приёмка</th><th>К продаже</th><th>Статус</th><th /></tr></thead>
                 <tbody>
                   {filteredRows.map((row) => (
                     <tr key={row.key} onClick={() => setSelected(row)} tabIndex={0} onKeyDown={(event) => { if (event.key === "Enter") setSelected(row); }}>
                       <td><div className="product-cell"><span className="product-swatch" style={{background:row.color}}>{row.name.charAt(0).toUpperCase()}</span><span><strong>{row.name}</strong><small>{row.sku}{row.nmId ? ` · WB ${row.nmId}` : ""} · {row.category}</small></span></div></td>
                       <td><b>{formatNumber.format(stockTotal(row))}</b><small> шт.</small></td>
                       <td><b>{warehouse === "Все склады" ? Object.values(row.warehouses).filter((value) => value > 0).length : formatNumber.format(row.warehouses[warehouse] ?? 0)}</b>{warehouse !== "Все склады" && <small> шт.</small>}</td>
-                      <td><span className="number-pill blue-pill">{row.fbs}</span></td>
+                      <td><div className="fbs-split-cell">{fbsLocations.map((location) => <span key={location.key} title={`${location.city} — ${location.label}`}><small>{location.short}</small><b>{row.fbsByLocation?.[location.key] ?? 0}</b></span>)}</div></td>
                       <td><span className="number-pill amber-pill">{row.receiving}</span></td>
                       <td><span className="number-pill green-pill">{row.toSale}</span></td>
                       <td><span className={`status ${row.status === "В норме" ? "ok" : row.status === "Мало" ? "low" : "critical"}`}><i />{row.status}</span></td>
@@ -276,7 +289,7 @@ export default function Home() {
                 <article className="report-card"><span className="report-symbol blue">□</span><div><strong>Все остатки</strong><p>Артикулы и количество по каждому складу</p><small>{rows.length} артикулов · {warehouseNames.length} складов</small></div><button type="button" onClick={() => downloadCsv(rows, "vse-ostatki-wb")} disabled={!rows.length}>Скачать ↓</button></article>
                 <article className="report-card"><span className="report-symbol amber">→</span><div><strong>FBS-движение</strong><p>Отгружено, на приёмке и ожидает продажи</p><small>{counts.transit} артикулов · {totals.fbs} единиц</small></div><button type="button" onClick={() => downloadCsv(rows.filter((row) => row.fbs > 0), "fbs-wb")} disabled={!counts.transit}>Скачать ↓</button></article>
                 <article className="report-card"><span className="report-symbol red">!</span><div><strong>Дефицит</strong><p>Товары с остатком меньше 21 единицы</p><small>{counts.risk} артикулов требуют внимания</small></div><button type="button" onClick={() => downloadCsv(rows.filter((row) => row.status !== "В норме"), "deficit-wb")} disabled={!counts.risk}>Скачать ↓</button></article>
-                <article className="report-card"><span className="report-symbol green">↗</span><div><strong>Ожидают продажи</strong><p>Отсортировано, готово к выдаче или возвращается</p><small>{rows.filter((row) => row.toSale > 0).length} артикулов · {totals.toSale} единиц</small></div><button type="button" onClick={() => downloadCsv(rows.filter((row) => row.toSale > 0), "prodazhi-wb")} disabled={!totals.toSale}>Скачать ↓</button></article>
+                <article className="report-card"><span className="report-symbol green">↗</span><div><strong>Ожидают продажи</strong><p>Активные FBS-заказы отсортированы или готовы к выдаче</p><small>{rows.filter((row) => row.toSale > 0).length} артикулов · {totals.toSale} единиц</small></div><button type="button" onClick={() => downloadCsv(rows.filter((row) => row.toSale > 0), "prodazhi-wb")} disabled={!totals.toSale}>Скачать ↓</button></article>
               </div>
             </section>
           )}
@@ -289,11 +302,14 @@ export default function Home() {
             <button className="close-btn" type="button" onClick={() => setSelected(null)} aria-label="Закрыть">×</button>
             <span className="drawer-kicker">КАРТОЧКА ТОВАРА · WB API</span>
             <div className="drawer-product"><span className="product-swatch large" style={{background:selected.color}}>{selected.name.charAt(0).toUpperCase()}</span><div><h2>{selected.name}</h2><p>{selected.sku}{selected.nmId ? ` · WB ${selected.nmId}` : ""}</p></div></div>
-            <div className="drawer-total"><span>Всего на складах</span><strong>{formatNumber.format(stockTotal(selected))} <small>шт.</small></strong></div>
+            <div className="drawer-total"><span>Фактический остаток на WB</span><strong>{formatNumber.format(stockTotal(selected))} <small>шт.</small></strong></div>
             <div className="warehouse-list">
               {Object.entries(selected.warehouses).sort((a,b) => b[1] - a[1]).map(([name, value]) => <div key={name}><span><i />{name}</span><strong>{formatNumber.format(value)} шт.</strong></div>)}
               {!Object.keys(selected.warehouses).length && <div><span>Нет остатков</span><strong>0 шт.</strong></div>}
             </div>
+            <p className="drawer-stock-note">Этот остаток уже находится на складах WB и недоступен для FBS.</p>
+            <h3>Активные FBS по складам</h3>
+            <div className="drawer-fbs-locations">{fbsLocations.map((location) => <div key={location.key}><span><strong>{location.city}</strong><small>{location.label}</small></span><b>{selected.fbsByLocation?.[location.key] ?? 0} шт.</b></div>)}</div>
             <h3>Текущее движение FBS</h3>
             <div className="timeline">
               <div className="timeline-item done"><i>✓</i><div><strong>Отгружено на FBS</strong><span>{selected.fbs} шт. в доставке</span></div></div>
