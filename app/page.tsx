@@ -310,16 +310,14 @@ export default function Home() {
             </div>
             <div className="table-wrap">
               <table>
-                <thead><tr><th>Товар / артикул</th><th>Остаток WB</th><th>{warehouse === "Все склады" ? "Складов WB" : "На выбранном"}</th><th>Остатки ФФ</th><th>Активные FBS</th><th>Приёмка</th><th>К продаже</th><th>Статус</th><th /></tr></thead>
+                <thead><tr><th>Товар / артикул</th><th>{warehouse === "Все склады" ? "Остаток WB" : "Выбранный склад WB"}</th>{fbsLocations.map((location) => <th className="ff-column-head" key={location.key}><span>{location.city}</span><small>{location.label}</small></th>)}<th>Активные FBS</th><th>К продаже</th><th>Статус</th><th /></tr></thead>
                 <tbody>
                   {filteredRows.map((row) => (
                     <tr key={row.key} onClick={() => openProduct(row)} tabIndex={0} onKeyDown={(event) => { if (event.key === "Enter") openProduct(row); }}>
                       <td><div className="product-cell"><span className="product-swatch" style={{background:row.color}}>{row.name.charAt(0).toUpperCase()}</span><span><strong>{row.name}</strong><small>{row.sku}{row.nmId ? ` · WB ${row.nmId}` : ""} · {row.category}</small></span></div></td>
-                      <td><b>{formatNumber.format(stockTotal(row))}</b><small> шт.</small></td>
-                      <td><b>{warehouse === "Все склады" ? Object.values(row.warehouses).filter((value) => value > 0).length : formatNumber.format(row.warehouses[warehouse] ?? 0)}</b>{warehouse !== "Все склады" && <small> шт.</small>}</td>
-                      <td><div className="fbs-split-cell ff-stock-split">{fbsLocations.map((location) => <span key={location.key} title={`${location.city} — ${location.label}`}><small>{location.short}</small><b>{row.ffStock?.[location.key] ?? 0}</b></span>)}</div></td>
-                      <td><div className="fbs-split-cell">{fbsLocations.map((location) => <span key={location.key} title={`${location.city} — ${location.label}`}><small>{location.short}</small><b>{row.fbsByLocation?.[location.key] ?? 0}</b></span>)}</div></td>
-                      <td><span className="number-pill amber-pill">{row.receiving}</span></td>
+                      <td><b>{formatNumber.format(warehouse === "Все склады" ? stockTotal(row) : row.warehouses[warehouse] ?? 0)}</b><small> шт.</small></td>
+                      {fbsLocations.map((location) => <td key={location.key}><span className={`manual-stock-value ${(row.ffStock?.[location.key] ?? 0) === 0 ? "zero" : ""}`} title={`Открыть и изменить: ${location.city} — ${location.label}`}>{formatNumber.format(row.ffStock?.[location.key] ?? 0)}<small> шт.</small></span></td>)}
+                      <td><span className="number-pill blue-pill">{row.fbs}</span></td>
                       <td><span className="number-pill green-pill">{row.toSale}</span></td>
                       <td><span className={`status ${row.status === "В норме" ? "ok" : row.status === "Мало" ? "low" : "critical"}`}><i />{row.status}</span></td>
                       <td><button type="button" className="row-action" aria-label={`Открыть ${row.name}`}>›</button></td>
