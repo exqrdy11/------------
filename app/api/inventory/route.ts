@@ -69,7 +69,9 @@ type DashboardPayload = {
   updatedAt: string;
 };
 
-let memoryCache: { expiresAt: number; payload: DashboardPayload } | null = null;
+const CACHE_LIFETIME_MS = 2 * 60 * 1000;
+const FORCE_REFRESH_COOLDOWN_MS = 20 * 1000;
+let memoryCache: { createdAt: number; expiresAt: number; payload: DashboardPayload } | null = null;
 
 function chunks<T>(items: T[], size: number): T[][] {
   const result: T[][] = [];
@@ -241,7 +243,9 @@ export async function GET(request: Request) {
   }
 
   const force = new URL(request.url).searchParams.get("refresh") === "1";
-  if (!force && memoryCache && memoryCache.expiresAt > Date.now()) {
+  const now = Date.now();
+  const forceIsTooSoon = force && memoryCache && now - memoryCache.createdAt < FORCE_REFRESH_COOLDOWN_MS;
+  if (memoryCache && memoryCache.expiresAt > now && (!force || forceIsTooSoon)) {
     return NextResponse.json(await attachFfStocks(memoryCache.payload), { headers: { "Cache-Control": "private, max-age=0" } });
   }
 
@@ -273,7 +277,15 @@ export async function GET(request: Request) {
       row.warehouses[warehouseName] = (row.warehouses[warehouseName] ?? 0) + (stock.quantity ?? 0);
     }
   } else {
-    warnings.push(warningFor("Остатки на складах WB", wbStocksResult.reason));
+    if (memoryCache) {
+      for (const previous of memoryCache.payload.rows) {
+        const row = getOrCreateRow(rowMap, { nmId: previous.nmId ?? undefined, sku: previous.sku, name: previous.name, category: previous.category });
+        row.warehouses = { ...previous.warehouses };
+      }
+      warnings.push(`${warningFor("Остатки на складах WB", wbStocksResult.reason)} — показаны последние корректные данные`);
+    } else {
+      warnings.push(warningFor("Остатки на складах WB", wbStocksResult.reason));
+    }
   }
 
   let activeSupplies = 0;
@@ -333,7 +345,7 @@ export async function GET(request: Request) {
   };
   const updatedAt = new Date().toISOString();
   const payload: DashboardPayload = { configured: true, rows, warehouseNames, totals, warnings, updatedAt };
-  memoryCache = { expiresAt: Date.now() + 2 * 60 * 1000, payload };
+  memoryCache = { createdAt: now, expiresAt: now + CACHE_LIFETIME_MS, payload };
 
   return NextResponse.json(await attachFfStocks(payload), { headers: { "Cache-Control": "private, max-age=0" } });
 }
