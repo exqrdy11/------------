@@ -97,7 +97,7 @@ export default function Home() {
     const term = query.trim().toLowerCase();
     return rows.filter((row) => {
       const matchesQuery = !term || row.name.toLowerCase().includes(term) || row.sku.toLowerCase().includes(term) || String(row.nmId ?? "").includes(term);
-      const matchesFilter = filter === "Все" || (filter === "Дефицит" && row.status !== "В норме") || (filter === "В пути" && row.fbs > 0);
+      const matchesFilter = filter === "Все" || (filter === "Дефицит" && row.status !== "В норме") || (filter === "Активные FBS" && row.fbs > 0);
       const matchesWarehouse = warehouse === "Все склады" || (row.warehouses[warehouse] ?? 0) > 0;
       const matchesView = activeView === "fbs" ? row.fbs > 0 : activeView === "sales" ? row.toSale > 0 : true;
       return matchesQuery && matchesFilter && matchesWarehouse && matchesView;
@@ -236,7 +236,7 @@ export default function Home() {
             </div>
             <div className="filter-row">
               <div className="filter-tabs" role="tablist" aria-label="Фильтр остатков">
-                {[{name:"Все", count:counts.all}, {name:"Дефицит", count:counts.risk}, {name:"В пути", count:counts.transit}].map((item) => (
+                {[{name:"Все", count:counts.all}, {name:"Дефицит", count:counts.risk}, {name:"Активные FBS", count:counts.transit}].map((item) => (
                   <button type="button" key={item.name} className={filter === item.name ? "active" : ""} onClick={() => setFilter(item.name)}>{item.name}<span>{item.count}</span></button>
                 ))}
               </div>
