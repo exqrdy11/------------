@@ -226,6 +226,7 @@ export default function Home() {
   const [query, setQuery] = useState("");
   const [warehouse, setWarehouse] = useState("Все склады");
   const [salesWarehouseId, setSalesWarehouseId] = useState("all");
+  const [salesProductScope, setSalesProductScope] = useState<"ff" | "all">("ff");
   const [filter, setFilter] = useState("Все");
   const [selectedFulfillmentWarehouseId, setSelectedFulfillmentWarehouseId] = useState<string | null>(null);
   const [selected, setSelected] = useState<StockRow | null>(null);
@@ -368,8 +369,13 @@ export default function Home() {
       const need = Math.max(0, targetStock - stock);
       const coverageDays = sales > 0 ? Math.floor(stock / averagePerDay) : null;
       return { row, stock, sales, averagePerDay, targetStock, need, coverageDays };
-    }).filter(({ row }) => !term || row.name.toLowerCase().includes(term) || row.sku.toLowerCase().includes(term) || String(row.nmId ?? "").includes(term)).sort((left, right) => right.need - left.need || right.sales - left.sales || left.row.name.localeCompare(right.row.name, "ru"));
-  }, [rows, query, selectedSalesWarehouse]);
+    }).filter(({ row, stock }) => {
+      const hasStockOnFf = stock > 0;
+      const matchesScope = salesProductScope === "all" || hasStockOnFf;
+      const matchesQuery = !term || row.name.toLowerCase().includes(term) || row.sku.toLowerCase().includes(term) || String(row.nmId ?? "").includes(term);
+      return matchesScope && matchesQuery;
+    }).sort((left, right) => right.need - left.need || right.sales - left.sales || left.row.name.localeCompare(right.row.name, "ru"));
+  }, [rows, query, selectedSalesWarehouse, salesProductScope]);
 
   const salesTotals = useMemo(() => salesRows.reduce((total, item) => ({ sales: total.sales + item.sales, stock: total.stock + item.stock, need: total.need + item.need }), { sales: 0, stock: 0, need: 0 }), [salesRows]);
 
@@ -764,6 +770,7 @@ export default function Home() {
                 <label className="search-field"><span>⌕</span><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Артикул или название" aria-label="Поиск по продажам" /></label>
                 <label className="sales-warehouse-select"><span>Склад ФФ</span><select value={salesWarehouseId} onChange={(event) => setSalesWarehouseId(event.target.value)} aria-label="Выбрать склад ФФ для продаж"><option value="all">Все склады ФФ</option>{manualWarehouses.map((item) => <option value={item.id} key={item.id}>{formatManualWarehouse(item)}</option>)}</select></label>
               </div>
+              <div className="sales-scope" role="group" aria-label="Какие товары показывать"><span>Показывать</span><div><button type="button" className={salesProductScope === "ff" ? "active" : ""} onClick={() => setSalesProductScope("ff")}>{selectedSalesWarehouse ? "Только есть на этом ФФ" : "Только есть на ФФ"}</button><button type="button" className={salesProductScope === "all" ? "active" : ""} onClick={() => setSalesProductScope("all")}>Все товары</button></div></div>
 
               <div className="sales-metric-grid">
                 <article><span>Заказы FBS · 7 дней</span><strong>{formatNumber.format(salesTotals.sales)} <small>шт.</small></strong><p>{selectedSalesWarehouse ? "Только выбранный ФФ" : "По всем ФФ"}</p></article>
@@ -774,7 +781,7 @@ export default function Home() {
               {selectedSalesWarehouse && !selectedSalesWarehouse.wbWarehouseId && <p className="sales-link-notice">Для этого ФФ ещё не указан склад WB FBS. Свяжите их в разделе «Склады ФФ и импорт Excel», чтобы продажи попадали в расчёт.</p>}
 
               <section className="sales-table-card">
-                <div className="sales-table-heading"><div><span className="section-kicker">ПО АРТИКУЛАМ</span><h3>Что продавалось и что довезти</h3></div><span>{salesRows.length} артикулов</span></div>
+                <div className="sales-table-heading"><div><span className="section-kicker">ПО АРТИКУЛАМ</span><h3>Что продавалось и что довезти</h3></div><span>{salesRows.length} из {rows.length} артикулов</span></div>
                 <div className="sales-table-wrap"><table><thead><tr><th>Товар / артикул</th><th>Остаток {selectedSalesWarehouse ? selectedSalesWarehouse.city : "ФФ"}</th><th>Заказы 7 дней</th><th>Среднее в день</th><th>Потребность 14 дней</th><th>Хватит на</th><th /></tr></thead><tbody>{salesRows.map((item) => <tr key={item.row.key} onClick={() => openProduct(item.row)} tabIndex={0} onKeyDown={(event) => { if (event.key === "Enter") openProduct(item.row); }}><td><div className="product-cell"><span className="product-swatch" style={{ background: item.row.color }}>{item.row.name.charAt(0).toUpperCase()}</span><span><strong>{item.row.name}</strong><small>{item.row.sku}{item.row.nmId ? ` · WB ${item.row.nmId}` : ""} · {item.row.category}</small></span></div></td><td><span className={`manual-stock-value ${item.stock === 0 ? "zero" : ""}`}>{formatNumber.format(item.stock)}<small> шт.</small></span></td><td><span className="number-pill blue-pill">{formatNumber.format(item.sales)}</span></td><td><b className="sales-average">{item.sales ? (item.sales / 7).toLocaleString("ru-RU", { maximumFractionDigits: 1 }) : "0"}</b></td><td><span className={`sales-need ${item.need ? "needed" : "covered"}`}>{item.need ? `+${formatNumber.format(item.need)}` : "Запаса достаточно"}</span></td><td><span className={`sales-coverage ${item.coverageDays !== null && item.coverageDays < 14 ? "low" : ""}`}>{item.coverageDays === null ? "Нет продаж" : `${item.coverageDays} дн.`}</span></td><td><button type="button" className="row-action" aria-label={`Открыть ${item.row.name}`}>›</button></td></tr>)}</tbody></table>{loading && <div className="loading-state"><span className="loader"/><strong>Загружаем продажи из Wildberries</strong><small>Считаем FBS-заказы за последние 7 дней</small></div>}{!loading && !salesRows.length && <div className="empty-state"><strong>Ничего не найдено</strong><span>Попробуйте изменить поиск или выберите другой склад ФФ.</span></div>}</div>
                 <footer className="table-footer"><span><i className={error ? "live-dot offline" : "live-dot"} />Данные WB API · FBS-заказы за 7 дней</span><span>Потребность = продажи × 14 дней − остаток ФФ</span></footer>
               </section>
