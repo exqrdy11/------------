@@ -40,6 +40,9 @@ type DashboardRow = {
   fbs: number;
   fbsByLocation: FbsBreakdown;
   fbsByWbWarehouse: FbsBreakdown;
+  sales7d: number;
+  sales7dByLocation: FbsBreakdown;
+  sales7dByWbWarehouse: FbsBreakdown;
   receiving: number;
   receivingByLocation: FbsBreakdown;
   receivingByWbWarehouse: FbsBreakdown;
@@ -68,6 +71,7 @@ type DashboardPayload = {
     ffStock: FfStock;
     fbs: number;
     fbsByLocation: FbsBreakdown;
+    sales7d: number;
     receiving: number;
     toSale: number;
     risk: number;
@@ -187,6 +191,9 @@ function getOrCreateRow(map: Map<string, DashboardRow>, input: { nmId?: number; 
     fbs: 0,
     fbsByLocation: emptyFbsBreakdown(),
     fbsByWbWarehouse: emptyFbsBreakdown(),
+    sales7d: 0,
+    sales7dByLocation: emptyFbsBreakdown(),
+    sales7dByWbWarehouse: emptyFbsBreakdown(),
     receiving: 0,
     receivingByLocation: emptyFbsBreakdown(),
     receivingByWbWarehouse: emptyFbsBreakdown(),
@@ -229,6 +236,7 @@ async function attachFfStocks(payload: DashboardPayload, cabinetId: CabinetId): 
       ffExpiry: expiryForProduct(lookup, { productKey: row.key, sku: row.sku }, manualWarehouses),
       ffBatches: batchesForProduct(lookup, { productKey: row.key, sku: row.sku }, manualWarehouses),
       fbsByLocation: mapWbWarehouseBreakdown(row.fbsByWbWarehouse, wbWarehouseToFfWarehouse),
+      sales7dByLocation: mapWbWarehouseBreakdown(row.sales7dByWbWarehouse, wbWarehouseToFfWarehouse),
       receivingByLocation: mapWbWarehouseBreakdown(row.receivingByWbWarehouse, wbWarehouseToFfWarehouse),
       toSaleByLocation: mapWbWarehouseBreakdown(row.toSaleByWbWarehouse, wbWarehouseToFfWarehouse),
     }));
@@ -248,6 +256,7 @@ async function attachFfStocks(payload: DashboardPayload, cabinetId: CabinetId): 
           for (const [warehouseId, quantity] of Object.entries(row.fbsByLocation)) total[warehouseId] = (total[warehouseId] ?? 0) + quantity;
           return total;
         }, {}),
+        sales7d: rows.reduce((sum, row) => sum + row.sales7d, 0),
       },
     };
   } catch (error) {
@@ -324,18 +333,25 @@ export async function GET(request: Request) {
   let activeSupplies = 0;
   if (ordersResult.status === "fulfilled") {
     const supplies = new Set<string>();
+    const weekStart = Date.now() - 7 * 24 * 60 * 60 * 1000;
     const terminal = new Set(["sold", "canceled", "canceled_by_client", "declined_by_client", "defect"]);
+    const canceled = new Set(["canceled", "canceled_by_client", "declined_by_client", "defect"]);
     for (const order of ordersResult.value.orders) {
       const status = ordersResult.value.statuses.get(order.id);
-      if (!status || terminal.has(status.wbStatus ?? "") || status.supplierStatus === "cancel") continue;
+      if (!status) continue;
       const row = getOrCreateRow(rowMap, { nmId: order.nmId, sku: order.article, name: order.article });
+      const warehouseId = order.warehouseId ? String(order.warehouseId) : "unknown";
+      const createdAt = order.createdAt ? Date.parse(order.createdAt) : Number.NaN;
+      if (!canceled.has(status.wbStatus ?? "") && status.supplierStatus !== "cancel" && Number.isFinite(createdAt) && createdAt >= weekStart) {
+        row.sales7d += 1;
+        row.sales7dByWbWarehouse[warehouseId] = (row.sales7dByWbWarehouse[warehouseId] ?? 0) + 1;
+      }
+      if (terminal.has(status.wbStatus ?? "") || status.supplierStatus === "cancel") continue;
       if (status.supplierStatus === "complete") {
         row.fbs += 1;
-        const warehouseId = order.warehouseId ? String(order.warehouseId) : "unknown";
         row.fbsByWbWarehouse[warehouseId] = (row.fbsByWbWarehouse[warehouseId] ?? 0) + 1;
         if (order.supplyId) supplies.add(order.supplyId);
       }
-      const warehouseId = order.warehouseId ? String(order.warehouseId) : "unknown";
       if (status.supplierStatus === "complete" && status.wbStatus === "waiting") {
         row.receiving += 1;
         row.receivingByWbWarehouse[warehouseId] = (row.receivingByWbWarehouse[warehouseId] ?? 0) + 1;
@@ -373,6 +389,7 @@ export async function GET(request: Request) {
     ffStock: emptyFfStock(),
     fbs: rows.reduce((sum, row) => sum + row.fbs, 0),
     fbsByLocation: emptyFbsBreakdown(),
+    sales7d: rows.reduce((sum, row) => sum + row.sales7d, 0),
     receiving: rows.reduce((sum, row) => sum + row.receiving, 0),
     toSale: rows.reduce((sum, row) => sum + row.toSale, 0),
     risk: rows.filter((row) => row.status !== "В норме").length,
