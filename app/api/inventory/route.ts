@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { emptyFfExpiry, emptyFfStock, expiryForProduct, listFfStocks, listFfWarehouses, stockForProduct, type FfExpiry, type FfStock, type ManualWarehouse } from "@/db/ff-stocks";
-import { isAdminRequest } from "@/lib/admin-auth";
+import { cabinetSummary, cabinetToken, getAdminCabinet, type CabinetId, type CabinetSummary } from "@/lib/admin-auth";
 
 export const dynamic = "force-dynamic";
 
@@ -53,6 +53,7 @@ const emptyFbsBreakdown = (): FbsBreakdown => ({ kazan: 0, moscow: 0, spb: 0, ot
 
 type DashboardPayload = {
   configured: true;
+  cabinet: CabinetSummary;
   rows: DashboardRow[];
   warehouseNames: string[];
   manualWarehouses: ManualWarehouse[];
@@ -73,7 +74,7 @@ type DashboardPayload = {
 
 const CACHE_LIFETIME_MS = 2 * 60 * 1000;
 const FORCE_REFRESH_COOLDOWN_MS = 20 * 1000;
-let memoryCache: { createdAt: number; expiresAt: number; payload: DashboardPayload } | null = null;
+const memoryCache = new Map<CabinetId, { createdAt: number; expiresAt: number; payload: DashboardPayload }>();
 
 function chunks<T>(items: T[], size: number): T[][] {
   const result: T[][] = [];
@@ -210,9 +211,9 @@ function warningFor(section: string, error: unknown) {
   return `${section}: данные временно недоступны`;
 }
 
-async function attachFfStocks(payload: DashboardPayload): Promise<DashboardPayload> {
+async function attachFfStocks(payload: DashboardPayload, cabinetId: CabinetId): Promise<DashboardPayload> {
   try {
-    const [manualWarehouses, lookup] = await Promise.all([listFfWarehouses(), listFfStocks()]);
+    const [manualWarehouses, lookup] = await Promise.all([listFfWarehouses(cabinetId), listFfStocks(cabinetId)]);
     const rows = payload.rows.map((row) => ({
       ...row,
       ffStock: stockForProduct(lookup, { productKey: row.key, sku: row.sku }, manualWarehouses),
@@ -239,22 +240,25 @@ async function attachFfStocks(payload: DashboardPayload): Promise<DashboardPaylo
 }
 
 export async function GET(request: Request) {
-  if (!await isAdminRequest(request)) {
+  const cabinetId = await getAdminCabinet(request);
+  if (!cabinetId) {
     return NextResponse.json({ configured: true, error: "Требуется вход администратора" }, { status: 401, headers: { "Cache-Control": "no-store" } });
   }
-  const token = process.env.WB_API_TOKEN?.trim();
+  const cabinet = cabinetSummary(cabinetId);
+  const token = cabinetToken(cabinetId);
   if (!token) {
     return NextResponse.json(
-      { configured: false, error: "Токен Wildberries ещё не подключён" },
+      { configured: false, cabinet, error: `Токен Wildberries для кабинета «${cabinet.name}» ещё не подключён` },
       { status: 503, headers: { "Cache-Control": "no-store" } },
     );
   }
 
   const force = new URL(request.url).searchParams.get("refresh") === "1";
   const now = Date.now();
-  const forceIsTooSoon = force && memoryCache && now - memoryCache.createdAt < FORCE_REFRESH_COOLDOWN_MS;
-  if (memoryCache && memoryCache.expiresAt > now && (!force || forceIsTooSoon)) {
-    return NextResponse.json(await attachFfStocks(memoryCache.payload), { headers: { "Cache-Control": "private, max-age=0" } });
+  const cached = memoryCache.get(cabinetId);
+  const forceIsTooSoon = force && cached && now - cached.createdAt < FORCE_REFRESH_COOLDOWN_MS;
+  if (cached && cached.expiresAt > now && (!force || forceIsTooSoon)) {
+    return NextResponse.json(await attachFfStocks(cached.payload, cabinetId), { headers: { "Cache-Control": "private, max-age=0" } });
   }
 
   const [cardsResult, wbStocksResult, ordersResult] = await Promise.allSettled([
@@ -285,8 +289,8 @@ export async function GET(request: Request) {
       row.warehouses[warehouseName] = (row.warehouses[warehouseName] ?? 0) + (stock.quantity ?? 0);
     }
   } else {
-    if (memoryCache) {
-      for (const previous of memoryCache.payload.rows) {
+    if (cached) {
+      for (const previous of cached.payload.rows) {
         const row = getOrCreateRow(rowMap, { nmId: previous.nmId ?? undefined, sku: previous.sku, name: previous.name, category: previous.category });
         row.warehouses = { ...previous.warehouses };
       }
@@ -352,8 +356,8 @@ export async function GET(request: Request) {
     activeSupplies,
   };
   const updatedAt = new Date().toISOString();
-  const payload: DashboardPayload = { configured: true, rows, warehouseNames, manualWarehouses: [], totals, warnings, updatedAt };
-  memoryCache = { createdAt: now, expiresAt: now + CACHE_LIFETIME_MS, payload };
+  const payload: DashboardPayload = { configured: true, cabinet, rows, warehouseNames, manualWarehouses: [], totals, warnings, updatedAt };
+  memoryCache.set(cabinetId, { createdAt: now, expiresAt: now + CACHE_LIFETIME_MS, payload });
 
-  return NextResponse.json(await attachFfStocks(payload), { headers: { "Cache-Control": "private, max-age=0" } });
+  return NextResponse.json(await attachFfStocks(payload, cabinetId), { headers: { "Cache-Control": "private, max-age=0" } });
 }

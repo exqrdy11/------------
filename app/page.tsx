@@ -9,6 +9,7 @@ type FbsLocationKey = "kazan" | "moscow" | "spb" | "other";
 type FbsBreakdown = Record<FbsLocationKey, number>;
 type FfStock = Record<string, number>;
 type FfExpiry = Record<string, string | null>;
+type CabinetSummary = { id: "metanutrix" | "trusthome"; name: string; configured: boolean };
 
 type ManualWarehouse = {
   id: string;
@@ -49,6 +50,7 @@ type DashboardTotals = {
 
 type InventoryResponse = {
   configured: boolean;
+  cabinet?: CabinetSummary | null;
   rows?: StockRow[];
   warehouseNames?: string[];
   manualWarehouses?: ManualWarehouse[];
@@ -245,6 +247,7 @@ function ExpiryManager({ rows, warehouses, onSaved }: {
 
 export default function Home() {
   const [authState, setAuthState] = useState<"checking" | "authenticated" | "unauthenticated">("checking");
+  const [cabinet, setCabinet] = useState<CabinetSummary | null>(null);
   const [adminLogin, setAdminLogin] = useState("");
   const [adminPassword, setAdminPassword] = useState("");
   const [loginLoading, setLoginLoading] = useState(false);
@@ -306,6 +309,7 @@ export default function Home() {
       }
       setConfigured(data.configured);
       setWarnings(data.warnings ?? []);
+      if (data.cabinet) setCabinet(data.cabinet);
       if (data.manualWarehouses?.length) setManualWarehouses(data.manualWarehouses);
       if (!response.ok) throw new Error(data.error || "Не удалось получить данные Wildberries");
       setRows(data.rows ?? []);
@@ -323,8 +327,9 @@ export default function Home() {
     void (async () => {
       try {
         const response = await fetch("/api/auth/session", { cache: "no-store" });
-        const data = await response.json() as { authenticated?: boolean };
+        const data = await response.json() as { authenticated?: boolean; cabinet?: CabinetSummary | null };
         setAuthState(data.authenticated ? "authenticated" : "unauthenticated");
+        setCabinet(data.cabinet ?? null);
       } catch {
         setAuthState("unauthenticated");
       }
@@ -509,9 +514,10 @@ export default function Home() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ login: adminLogin, password: adminPassword }),
       });
-      const data = await response.json() as { authenticated?: boolean; error?: string };
+      const data = await response.json() as { authenticated?: boolean; cabinet?: CabinetSummary; error?: string };
       if (!response.ok || !data.authenticated) throw new Error(data.error || "Не удалось выполнить вход");
       setAdminPassword("");
+      setCabinet(data.cabinet ?? null);
       setAuthState("authenticated");
     } catch (authError) {
       setLoginError(authError instanceof Error ? authError.message : "Не удалось выполнить вход");
@@ -524,6 +530,7 @@ export default function Home() {
     await fetch("/api/auth/logout", { method: "POST" }).catch(() => undefined);
     setRows([]);
     setSelected(null);
+    setCabinet(null);
     setAuthState("unauthenticated");
   };
 
@@ -567,6 +574,11 @@ export default function Home() {
         <header className="topbar"><div><p className="eyebrow">{viewTitles[activeView].eyebrow}</p><h1>{viewTitles[activeView].title}</h1></div><div className="header-actions"><div className="sync-state"><span className={error ? "live-dot offline" : "live-dot"} /><span>Последнее обновление<br/><strong>{formatSyncTime(updatedAt)} МСК</strong></span></div><button className="logout-btn" type="button" onClick={() => void logoutAdmin()}>Выйти</button><button className="secondary-btn" type="button" onClick={() => void loadData(true)} disabled={loading}><span className={loading ? "spin" : ""}>↻</span>{loading ? "Обновляем" : "Обновить"}</button><button className="primary-btn" type="button" onClick={() => downloadCsv(filteredRows, "ostatki-wb")} disabled={!rows.length}>Экспорт<span>↓</span></button></div></header>
 
         <div className="content" id="overview">
+          {cabinet && <section className={`cabinet-strip ${cabinet.configured ? "ready" : "waiting"}`}>
+            <div><span className="cabinet-strip-mark">WB</span><span><small>ТЕКУЩИЙ КАБИНЕТ</small><strong>{cabinet.name}</strong></span></div>
+            <p>{cabinet.configured ? "Данные, склады ФФ и сроки годности отделены от второго кабинета." : "Ожидает API-токен Wildberries. Вход и отдельные склады уже готовы."}</p>
+            <button type="button" onClick={() => void logoutAdmin()}>Сменить кабинет</button>
+          </section>}
           {error && <section className="api-notice" role="alert"><span className="api-notice-icon">!</span><div><strong>{error}</strong><p>{configured ? "Для полной загрузки токену нужны категории: Контент, Маркетплейс и Аналитика." : "Безопасный токен хранится только на сервере и не передаётся в браузер."}</p></div><button type="button" onClick={() => void loadData(true)}>Проверить снова</button></section>}
           {!error && warnings.length > 0 && <section className="warning-strip"><span>!</span><p>{warnings.join(" · ")}</p></section>}
 

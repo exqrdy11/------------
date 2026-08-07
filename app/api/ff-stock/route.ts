@@ -1,11 +1,12 @@
 import { NextResponse } from "next/server";
 import { listFfWarehouses, saveFfStock, type FfExpiry, type FfStock } from "@/db/ff-stocks";
-import { isAdminRequest } from "@/lib/admin-auth";
+import { getAdminCabinet } from "@/lib/admin-auth";
 
 export const dynamic = "force-dynamic";
 
 export async function POST(request: Request) {
-  if (!await isAdminRequest(request)) {
+  const cabinet = await getAdminCabinet(request);
+  if (!cabinet) {
     return NextResponse.json({ error: "Требуется вход администратора" }, { status: 401, headers: { "Cache-Control": "no-store" } });
   }
   try {
@@ -23,7 +24,7 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: "Не удалось определить артикул" }, { status: 400 });
     }
 
-    const warehouses = await listFfWarehouses();
+    const warehouses = await listFfWarehouses(cabinet);
     const stock: FfStock = {};
     const expiresAt: FfExpiry = {};
     for (const warehouse of warehouses) {
@@ -40,6 +41,7 @@ export async function POST(request: Request) {
     }
 
     const saved = await saveFfStock({
+      cabinetId: cabinet,
       productKey,
       nmId: typeof payload.nmId === "number" ? payload.nmId : null,
       sku,

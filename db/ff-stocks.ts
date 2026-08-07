@@ -1,4 +1,5 @@
 import { getD1 } from "./index";
+import { cabinetIds, type CabinetId } from "@/lib/admin-auth";
 
 export type ManualWarehouse = {
   id: string;
@@ -26,6 +27,7 @@ const defaultWarehouses: ManualWarehouse[] = [
 
 const createStocksTableSql = `
   CREATE TABLE IF NOT EXISTS ff_stocks (
+    cabinet_id TEXT NOT NULL DEFAULT 'metanutrix',
     product_key TEXT NOT NULL,
     nm_id INTEGER,
     sku TEXT NOT NULL DEFAULT '',
@@ -33,30 +35,22 @@ const createStocksTableSql = `
     quantity INTEGER NOT NULL DEFAULT 0 CHECK (quantity >= 0),
     expires_at TEXT,
     updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    PRIMARY KEY (product_key, location)
+    PRIMARY KEY (cabinet_id, product_key, location)
   )
 `;
 const createWarehousesTableSql = `
   CREATE TABLE IF NOT EXISTS ff_warehouses (
-    id TEXT PRIMARY KEY NOT NULL,
+    cabinet_id TEXT NOT NULL DEFAULT 'metanutrix',
+    id TEXT NOT NULL,
     city TEXT NOT NULL,
     name TEXT NOT NULL,
     position INTEGER NOT NULL DEFAULT 0,
-    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (cabinet_id, id)
   )
 `;
-const createMigratedStocksTableSql = `
-  CREATE TABLE ff_stocks_migrated (
-    product_key TEXT NOT NULL,
-    nm_id INTEGER,
-    sku TEXT NOT NULL DEFAULT '',
-    location TEXT NOT NULL,
-    quantity INTEGER NOT NULL DEFAULT 0 CHECK (quantity >= 0),
-    expires_at TEXT,
-    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    PRIMARY KEY (product_key, location)
-  )
-`;
+const createScopedStocksTableSql = createStocksTableSql.replace("IF NOT EXISTS ff_stocks", "ff_stocks_scoped");
+const createScopedWarehousesTableSql = createWarehousesTableSql.replace("IF NOT EXISTS ff_warehouses", "ff_warehouses_scoped");
 
 let initializePromise: Promise<D1Database> | null = null;
 
@@ -76,31 +70,49 @@ async function getFfStockDb() {
   if (!initializePromise) {
     initializePromise = (async () => {
       const d1 = getD1();
-      await d1.batch([
-        d1.prepare(createStocksTableSql),
-        d1.prepare(createWarehousesTableSql),
-      ]);
+      await d1.batch([d1.prepare(createStocksTableSql), d1.prepare(createWarehousesTableSql)]);
 
-      const legacy = await d1.prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'ff_stocks'").first<{ sql: string }>();
-      if (legacy?.sql.includes("CHECK (location IN")) {
+      const [stockColumns, warehouseColumns, stockDefinition] = await Promise.all([
+        d1.prepare("PRAGMA table_info(ff_stocks)").all<{ name: string }>(),
+        d1.prepare("PRAGMA table_info(ff_warehouses)").all<{ name: string }>(),
+        d1.prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'ff_stocks'").first<{ sql: string }>(),
+      ]);
+      const stockColumnNames = new Set((stockColumns.results ?? []).map((column) => column.name));
+      const warehouseColumnNames = new Set((warehouseColumns.results ?? []).map((column) => column.name));
+      const stockNeedsScopeMigration = !stockColumnNames.has("cabinet_id") || stockDefinition?.sql.includes("CHECK (location IN");
+      const warehouseNeedsScopeMigration = !warehouseColumnNames.has("cabinet_id");
+
+      if (stockNeedsScopeMigration) {
+        const expiresAtColumn = stockColumnNames.has("expires_at") ? "expires_at" : "NULL";
         await d1.batch([
-          d1.prepare(createMigratedStocksTableSql),
-          d1.prepare("INSERT OR REPLACE INTO ff_stocks_migrated (product_key, nm_id, sku, location, quantity, updated_at) SELECT product_key, nm_id, sku, location, quantity, updated_at FROM ff_stocks"),
+          d1.prepare("DROP TABLE IF EXISTS ff_stocks_scoped"),
+          d1.prepare(createScopedStocksTableSql),
+          d1.prepare(`INSERT INTO ff_stocks_scoped (cabinet_id, product_key, nm_id, sku, location, quantity, expires_at, updated_at) SELECT 'metanutrix', product_key, nm_id, sku, location, quantity, ${expiresAtColumn}, updated_at FROM ff_stocks`),
           d1.prepare("DROP TABLE ff_stocks"),
-          d1.prepare("ALTER TABLE ff_stocks_migrated RENAME TO ff_stocks"),
+          d1.prepare("ALTER TABLE ff_stocks_scoped RENAME TO ff_stocks"),
         ]);
       }
 
-      const columns = await d1.prepare("PRAGMA table_info(ff_stocks)").all<{ name: string }>();
-      if (!(columns.results ?? []).some((column) => column.name === "expires_at")) {
+      if (warehouseNeedsScopeMigration) {
+        await d1.batch([
+          d1.prepare("DROP TABLE IF EXISTS ff_warehouses_scoped"),
+          d1.prepare(createScopedWarehousesTableSql),
+          d1.prepare("INSERT INTO ff_warehouses_scoped (cabinet_id, id, city, name, position, created_at) SELECT 'metanutrix', id, city, name, position, created_at FROM ff_warehouses"),
+          d1.prepare("DROP TABLE ff_warehouses"),
+          d1.prepare("ALTER TABLE ff_warehouses_scoped RENAME TO ff_warehouses"),
+        ]);
+      }
+
+      const currentColumns = await d1.prepare("PRAGMA table_info(ff_stocks)").all<{ name: string }>();
+      if (!(currentColumns.results ?? []).some((column) => column.name === "expires_at")) {
         await d1.prepare("ALTER TABLE ff_stocks ADD COLUMN expires_at TEXT").run();
       }
 
-      await d1.batch(defaultWarehouses.map((warehouse) => d1.prepare(`
-        INSERT INTO ff_warehouses (id, city, name, position)
-        VALUES (?, ?, ?, ?)
-        ON CONFLICT(id) DO NOTHING
-      `).bind(warehouse.id, warehouse.city, warehouse.name, warehouse.position)));
+      await d1.batch(cabinetIds.flatMap((cabinetId) => defaultWarehouses.map((warehouse) => d1.prepare(`
+        INSERT INTO ff_warehouses (cabinet_id, id, city, name, position)
+        VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT(cabinet_id, id) DO NOTHING
+      `).bind(cabinetId, warehouse.id, warehouse.city, warehouse.name, warehouse.position))));
       return d1;
     })();
   }
@@ -108,22 +120,23 @@ async function getFfStockDb() {
   return initializePromise;
 }
 
-export async function listFfWarehouses() {
+export async function listFfWarehouses(cabinetId: CabinetId) {
   const d1 = await getFfStockDb();
-  const result = await d1.prepare("SELECT id, city, name, position FROM ff_warehouses ORDER BY position, city, name").all<ManualWarehouse>();
+  const result = await d1.prepare("SELECT id, city, name, position FROM ff_warehouses WHERE cabinet_id = ? ORDER BY position, city, name").bind(cabinetId).all<ManualWarehouse>();
   return result.results ?? [];
 }
 
-export async function createFfWarehouse(input: { city: string; name: string }) {
+export async function createFfWarehouse(input: { cabinetId: CabinetId; city: string; name: string }) {
   const d1 = await getFfStockDb();
-  const current = await listFfWarehouses();
+  const current = await listFfWarehouses(input.cabinetId);
   const warehouse: ManualWarehouse = {
     id: `warehouse_${crypto.randomUUID().replaceAll("-", "")}`,
     city: input.city.trim(),
     name: input.name.trim(),
     position: (current.at(-1)?.position ?? 0) + 10,
   };
-  await d1.prepare("INSERT INTO ff_warehouses (id, city, name, position) VALUES (?, ?, ?, ?)").bind(
+  await d1.prepare("INSERT INTO ff_warehouses (cabinet_id, id, city, name, position) VALUES (?, ?, ?, ?, ?)").bind(
+    input.cabinetId,
     warehouse.id,
     warehouse.city,
     warehouse.name,
@@ -132,15 +145,15 @@ export async function createFfWarehouse(input: { city: string; name: string }) {
   return warehouse;
 }
 
-export async function updateFfWarehouse(input: ManualWarehouse) {
+export async function updateFfWarehouse(input: ManualWarehouse & { cabinetId: CabinetId }) {
   const d1 = await getFfStockDb();
-  await d1.prepare("UPDATE ff_warehouses SET city = ?, name = ? WHERE id = ?").bind(input.city.trim(), input.name.trim(), input.id).run();
+  await d1.prepare("UPDATE ff_warehouses SET city = ?, name = ? WHERE cabinet_id = ? AND id = ?").bind(input.city.trim(), input.name.trim(), input.cabinetId, input.id).run();
   return input;
 }
 
-export async function listFfStocks() {
+export async function listFfStocks(cabinetId: CabinetId) {
   const d1 = await getFfStockDb();
-  const result = await d1.prepare("SELECT product_key, sku, location, quantity, expires_at FROM ff_stocks").all<FfStockRow>();
+  const result = await d1.prepare("SELECT product_key, sku, location, quantity, expires_at FROM ff_stocks WHERE cabinet_id = ?").bind(cabinetId).all<FfStockRow>();
   const byProduct = new Map<string, FfStock>();
   const bySku = new Map<string, FfStock>();
   const expiryByProduct = new Map<string, FfExpiry>();
@@ -183,9 +196,9 @@ export function expiryForProduct(lookup: Awaited<ReturnType<typeof listFfStocks>
   };
 }
 
-export async function saveFfStock(input: { productKey: string; nmId: number | null; sku: string; stock: FfStock; expiresAt: FfExpiry }) {
+export async function saveFfStock(input: { cabinetId: CabinetId; productKey: string; nmId: number | null; sku: string; stock: FfStock; expiresAt: FfExpiry }) {
   const d1 = await getFfStockDb();
-  const warehouses = await listFfWarehouses();
+  const warehouses = await listFfWarehouses(input.cabinetId);
   const updatedAt = new Date().toISOString();
   const productKey = normalizeSku(input.sku) ? `sku:${normalizeSku(input.sku)}` : input.productKey;
   const stock = emptyFfStock(warehouses);
@@ -193,44 +206,44 @@ export async function saveFfStock(input: { productKey: string; nmId: number | nu
   for (const warehouse of warehouses) stock[warehouse.id] = Math.max(0, Math.floor(Number(input.stock[warehouse.id]) || 0));
   for (const warehouse of warehouses) expiresAt[warehouse.id] = input.expiresAt[warehouse.id] || null;
   await d1.batch(warehouses.map((warehouse) => d1.prepare(`
-    INSERT INTO ff_stocks (product_key, nm_id, sku, location, quantity, expires_at, updated_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?)
-    ON CONFLICT(product_key, location) DO UPDATE SET
+    INSERT INTO ff_stocks (cabinet_id, product_key, nm_id, sku, location, quantity, expires_at, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(cabinet_id, product_key, location) DO UPDATE SET
       nm_id = excluded.nm_id,
       sku = excluded.sku,
       quantity = excluded.quantity,
       expires_at = excluded.expires_at,
       updated_at = excluded.updated_at
-  `).bind(productKey, input.nmId, input.sku, warehouse.id, stock[warehouse.id], expiresAt[warehouse.id], updatedAt)));
+  `).bind(input.cabinetId, productKey, input.nmId, input.sku, warehouse.id, stock[warehouse.id], expiresAt[warehouse.id], updatedAt)));
   return { stock, expiresAt };
 }
 
-export async function importFfStocks(input: { warehouseId: string; mode: "replace" | "add"; items: Array<{ sku: string; quantity: number; expiresAt?: string | null }> }) {
+export async function importFfStocks(input: { cabinetId: CabinetId; warehouseId: string; mode: "replace" | "add"; items: Array<{ sku: string; quantity: number; expiresAt?: string | null }> }) {
   const d1 = await getFfStockDb();
-  const warehouses = await listFfWarehouses();
+  const warehouses = await listFfWarehouses(input.cabinetId);
   if (!warehouses.some((warehouse) => warehouse.id === input.warehouseId)) throw new Error("Склад не найден");
   const updatedAt = new Date().toISOString();
   await d1.batch(input.items.map((item) => {
     const sku = normalizeSku(item.sku);
     const shouldUpdateExpiry = Object.hasOwn(item, "expiresAt");
     const statement = input.mode === "add" ? `
-      INSERT INTO ff_stocks (product_key, nm_id, sku, location, quantity, expires_at, updated_at)
-      VALUES (?, NULL, ?, ?, ?, ?, ?)
-      ON CONFLICT(product_key, location) DO UPDATE SET
+      INSERT INTO ff_stocks (cabinet_id, product_key, nm_id, sku, location, quantity, expires_at, updated_at)
+      VALUES (?, ?, NULL, ?, ?, ?, ?, ?)
+      ON CONFLICT(cabinet_id, product_key, location) DO UPDATE SET
         sku = excluded.sku,
         quantity = ff_stocks.quantity + excluded.quantity,
         expires_at = CASE WHEN ? THEN excluded.expires_at ELSE ff_stocks.expires_at END,
         updated_at = excluded.updated_at
     ` : `
-      INSERT INTO ff_stocks (product_key, nm_id, sku, location, quantity, expires_at, updated_at)
-      VALUES (?, NULL, ?, ?, ?, ?, ?)
-      ON CONFLICT(product_key, location) DO UPDATE SET
+      INSERT INTO ff_stocks (cabinet_id, product_key, nm_id, sku, location, quantity, expires_at, updated_at)
+      VALUES (?, ?, NULL, ?, ?, ?, ?, ?)
+      ON CONFLICT(cabinet_id, product_key, location) DO UPDATE SET
         sku = excluded.sku,
         quantity = excluded.quantity,
         expires_at = CASE WHEN ? THEN excluded.expires_at ELSE ff_stocks.expires_at END,
         updated_at = excluded.updated_at
     `;
-    return d1.prepare(statement).bind(`sku:${sku}`, item.sku.trim(), input.warehouseId, item.quantity, item.expiresAt ?? null, updatedAt, shouldUpdateExpiry ? 1 : 0);
+    return d1.prepare(statement).bind(input.cabinetId, `sku:${sku}`, item.sku.trim(), input.warehouseId, item.quantity, item.expiresAt ?? null, updatedAt, shouldUpdateExpiry ? 1 : 0);
   }));
   return { imported: input.items.length };
 }
