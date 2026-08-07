@@ -4,7 +4,7 @@ import { type ChangeEvent, type FormEvent, useCallback, useEffect, useMemo, useS
 import * as XLSX from "xlsx";
 
 type StockStatus = "В норме" | "Мало" | "Заканчивается";
-type View = "overview" | "stock" | "fbs" | "sales" | "reports" | "manual";
+type View = "overview" | "stock" | "fbs" | "sales" | "reports" | "fulfillment" | "manual";
 type FbsBreakdown = Record<string, number>;
 type FfStock = Record<string, number>;
 type FfExpiry = Record<string, string | null>;
@@ -35,7 +35,9 @@ type StockRow = {
   fbs: number;
   fbsByLocation: FbsBreakdown;
   receiving: number;
+  receivingByLocation: FbsBreakdown;
   toSale: number;
+  toSaleByLocation: FbsBreakdown;
   status: StockStatus;
   updated: string;
 };
@@ -81,6 +83,7 @@ const viewTitles: Record<View, { eyebrow: string; title: string }> = {
   fbs: { eyebrow: "FBS · ПОСЛЕДНИЕ 30 ДНЕЙ", title: "Отгрузки и приёмка" },
   sales: { eyebrow: "ПРОДАЖИ · ОЖИДАНИЕ", title: "Товары на пути к продаже" },
   reports: { eyebrow: "ВЫГРУЗКИ · CSV", title: "Отчёты по кабинету" },
+  fulfillment: { eyebrow: "ФУЛФИЛМЕНТ · СКЛАДЫ", title: "ФФ — остатки и движение" },
   manual: { eyebrow: "ФУЛФИЛМЕНТ · РУЧНЫЕ ОСТАТКИ", title: "Склады ФФ и импорт Excel" },
 };
 
@@ -256,6 +259,7 @@ export default function Home() {
   const [query, setQuery] = useState("");
   const [warehouse, setWarehouse] = useState("Все склады");
   const [filter, setFilter] = useState("Все");
+  const [selectedFulfillmentWarehouseId, setSelectedFulfillmentWarehouseId] = useState<string | null>(null);
   const [selected, setSelected] = useState<StockRow | null>(null);
   const [updatedAt, setUpdatedAt] = useState<string | null>(null);
   const [warnings, setWarnings] = useState<string[]>([]);
@@ -367,6 +371,31 @@ export default function Home() {
     return locations;
   }, [manualWarehouses, totals.fbsByLocation.unassigned]);
 
+  const fulfillmentWarehouses = useMemo(() => manualWarehouses.map((warehouse) => {
+    const products = rows.filter((row) => (row.ffStock[warehouse.id] ?? 0) > 0 || (row.fbsByLocation[warehouse.id] ?? 0) > 0 || (row.receivingByLocation[warehouse.id] ?? 0) > 0 || (row.toSaleByLocation[warehouse.id] ?? 0) > 0);
+    return {
+      warehouse,
+      products: products.length,
+      stock: totals.ffStock[warehouse.id] ?? 0,
+      fbs: totals.fbsByLocation[warehouse.id] ?? 0,
+      receiving: products.reduce((sum, row) => sum + (row.receivingByLocation[warehouse.id] ?? 0), 0),
+      toSale: products.reduce((sum, row) => sum + (row.toSaleByLocation[warehouse.id] ?? 0), 0),
+    };
+  }), [manualWarehouses, rows, totals.ffStock, totals.fbsByLocation]);
+
+  const selectedFulfillmentWarehouse = fulfillmentWarehouses.find((item) => item.warehouse.id === selectedFulfillmentWarehouseId) ?? null;
+
+  const fulfillmentRows = useMemo(() => {
+    if (!selectedFulfillmentWarehouse) return [];
+    const warehouseId = selectedFulfillmentWarehouse.warehouse.id;
+    const term = query.trim().toLowerCase();
+    return rows.filter((row) => {
+      const matchesWarehouse = (row.ffStock[warehouseId] ?? 0) > 0 || (row.fbsByLocation[warehouseId] ?? 0) > 0 || (row.receivingByLocation[warehouseId] ?? 0) > 0 || (row.toSaleByLocation[warehouseId] ?? 0) > 0;
+      const matchesQuery = !term || row.name.toLowerCase().includes(term) || row.sku.toLowerCase().includes(term) || String(row.nmId ?? "").includes(term);
+      return matchesWarehouse && matchesQuery;
+    });
+  }, [selectedFulfillmentWarehouse, rows, query]);
+
   const filteredRows = useMemo(() => {
     const term = query.trim().toLowerCase();
     return rows.filter((row) => {
@@ -391,6 +420,13 @@ export default function Home() {
     setFilter("Все");
     setQuery("");
     setSelected(null);
+    setSelectedFulfillmentWarehouseId(null);
+    window.scrollTo({ top: 0, behavior: "smooth" });
+  };
+
+  const openFulfillmentWarehouse = (warehouseId: string) => {
+    setSelectedFulfillmentWarehouseId(warehouseId);
+    setQuery("");
     window.scrollTo({ top: 0, behavior: "smooth" });
   };
 
@@ -693,7 +729,7 @@ export default function Home() {
           <button type="button" className={`nav-item ${activeView === "stock" ? "active" : ""}`} onClick={() => navigateTo("stock")}><span className="nav-symbol">□</span>Остатки</button>
           <button type="button" className={`nav-item ${activeView === "fbs" ? "active" : ""}`} onClick={() => navigateTo("fbs")}><span className="nav-symbol">→</span>FBS-отгрузки<span className="nav-badge">{totals.fbs}</span></button>
           <button type="button" className={`nav-item ${activeView === "sales" ? "active" : ""}`} onClick={() => navigateTo("sales")}><span className="nav-symbol">↗</span>Продажи</button>
-          <button type="button" className={`nav-item ${activeView === "manual" ? "active" : ""}`} onClick={() => navigateTo("manual")}><span className="nav-symbol">▤</span>Склады ФФ</button>
+          <button type="button" className={`nav-item ${activeView === "fulfillment" || activeView === "manual" ? "active" : ""}`} onClick={() => navigateTo("fulfillment")}><span className="nav-symbol">▤</span>ФФ</button>
           <button type="button" className={`nav-item ${activeView === "reports" ? "active" : ""}`} onClick={() => navigateTo("reports")}><span className="nav-symbol">≡</span>Отчёты</button>
         </nav>
         <div className="sidebar-bottom"><div className="connection"><span className={error ? "live-dot offline" : "live-dot"} />{error ? "Нужна проверка подключения" : "Подключено к WB API"}</div><div className="profile"><span className="avatar">WB</span><span><strong>Wildberries</strong><small>{configured ? "Рабочий кабинет" : "Токен не добавлен"}</small></span><span className="chevron">›</span></div></div>
@@ -711,7 +747,26 @@ export default function Home() {
           {error && <section className="api-notice" role="alert"><span className="api-notice-icon">!</span><div><strong>{error}</strong><p>{configured ? "Для полной загрузки токену нужны категории: Контент, Маркетплейс и Аналитика." : "Безопасный токен хранится только на сервере и не передаётся в браузер."}</p></div><button type="button" onClick={() => void loadData(true)}>Проверить снова</button></section>}
           {!error && warnings.length > 0 && <section className="warning-strip"><span>!</span><p>{warnings.join(" · ")}</p></section>}
 
-          {activeView === "manual" ? (
+          {activeView === "fulfillment" ? (
+            <section className="fulfillment-panel">
+              {!selectedFulfillmentWarehouse ? <>
+                <div className="section-heading fulfillment-heading">
+                  <div><span className="section-kicker">ВЫБЕРИТЕ СКЛАД ФФ</span><h2>Куда смотреть остатки и движение</h2><p className="section-note">Откройте склад, чтобы увидеть его остаток и FBS-движение по каждому артикулу.</p></div>
+                  <button className="secondary-btn" type="button" onClick={() => navigateTo("manual")}>Настроить склады</button>
+                </div>
+                <div className="fulfillment-warehouse-grid">{fulfillmentWarehouses.map((item) => <button className="fulfillment-warehouse-card" type="button" key={item.warehouse.id} onClick={() => openFulfillmentWarehouse(item.warehouse.id)}><span className="fulfillment-card-top"><i>□</i><small>{item.warehouse.wbWarehouseId ? `WB FBS · ${item.warehouse.wbWarehouseName || `№${item.warehouse.wbWarehouseId}`}` : "WB FBS не назначен"}</small><b>›</b></span><strong>{item.warehouse.city}</strong><span className="fulfillment-card-name">{item.warehouse.name}</span><span className="fulfillment-card-stock"><b>{formatNumber.format(item.stock)}</b> шт. на ФФ</span><span className="fulfillment-card-stats">{item.products} артикулов · {item.fbs} FBS в движении</span></button>)}</div>
+                {!fulfillmentWarehouses.length && <div className="empty-state"><strong>Добавьте первый склад ФФ</strong><span>После этого сюда будут попадать остатки из Excel и заказы WB.</span></div>}
+                <p className="fulfillment-note">«Ожидают продажи» показывает FBS-заказы в пути. Финансовый факт продажи и возвраты добавляются через Finance API WB.</p>
+              </> : <>
+                <div className="section-heading fulfillment-heading">
+                  <div><button className="back-link" type="button" onClick={() => { setSelectedFulfillmentWarehouseId(null); setQuery(""); }}>‹ Все склады ФФ</button><span className="section-kicker">ФФ · СКЛАД В РАБОТЕ</span><h2>{formatManualWarehouse(selectedFulfillmentWarehouse.warehouse)}</h2><p className="section-note">Остатки на этом ФФ и FBS-заказы, отгруженные с привязанного склада WB.</p></div>
+                  <button className="secondary-btn" type="button" onClick={() => navigateTo("manual")}>Настроить склад</button>
+                </div>
+                <div className="fulfillment-metric-grid"><article><span>Остаток на ФФ</span><strong>{formatNumber.format(selectedFulfillmentWarehouse.stock)} <small>шт.</small></strong><p>По загруженным партиям</p></article><article><span>FBS в движении</span><strong>{formatNumber.format(selectedFulfillmentWarehouse.fbs)} <small>шт.</small></strong><p>Отгружено с этого ФФ</p></article><article><span>Ожидают WB</span><strong>{formatNumber.format(selectedFulfillmentWarehouse.receiving)} <small>шт.</small></strong><p>Статус waiting</p></article><article><span>Ожидают продажи</span><strong>{formatNumber.format(selectedFulfillmentWarehouse.toSale)} <small>шт.</small></strong><p>sorted / ready for pickup</p></article></div>
+                <section className="stock-card fulfillment-stock-card"><div className="stock-header"><div><span className="section-kicker">ПО АРТИКУЛАМ</span><h2>Остатки и FBS-движение</h2></div><label className="search-field"><span>⌕</span><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Артикул или название" aria-label="Поиск по выбранному складу ФФ" /></label></div><div className="fulfillment-table-wrap"><table><thead><tr><th>Товар / артикул</th><th>Остаток ФФ</th><th>FBS в движении</th><th>Ожидают продажи</th><th>Статус</th><th /></tr></thead><tbody>{fulfillmentRows.map((row) => <tr key={row.key} onClick={() => openProduct(row)} tabIndex={0} onKeyDown={(event) => { if (event.key === "Enter") openProduct(row); }}><td><div className="product-cell"><span className="product-swatch" style={{ background: row.color }}>{row.name.charAt(0).toUpperCase()}</span><span><strong>{row.name}</strong><small>{row.sku}{row.nmId ? ` · WB ${row.nmId}` : ""} · {row.category}</small></span></div></td><td><span className={`manual-stock-value ${(row.ffStock[selectedFulfillmentWarehouse.warehouse.id] ?? 0) === 0 ? "zero" : ""}`}>{formatNumber.format(row.ffStock[selectedFulfillmentWarehouse.warehouse.id] ?? 0)}<small> шт.</small></span></td><td><span className="number-pill blue-pill">{formatNumber.format(row.fbsByLocation[selectedFulfillmentWarehouse.warehouse.id] ?? 0)}</span></td><td><span className="number-pill green-pill">{formatNumber.format(row.toSaleByLocation[selectedFulfillmentWarehouse.warehouse.id] ?? 0)}</span></td><td><span className={`status ${row.status === "В норме" ? "ok" : row.status === "Мало" ? "low" : "critical"}`}><i />{row.status}</span></td><td><button type="button" className="row-action" aria-label={`Открыть ${row.name}`}>›</button></td></tr>)}</tbody></table>{!loading && !fulfillmentRows.length && <div className="empty-state"><strong>На этом складе пока нет движения</strong><span>Загрузите остатки Excel или свяжите склад с FBS WB.</span></div>}</div><footer className="table-footer"><span><i className={error ? "live-dot offline" : "live-dot"} />{fulfillmentRows.length} артикулов на выбранном ФФ</span><span>Факт выкупа появится после подключения Finance API WB</span></footer></section>
+              </>}
+            </section>
+          ) : activeView === "manual" ? (
             <section className="manual-warehouses-panel">
               <div className="section-heading">
                 <div>

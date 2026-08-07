@@ -41,7 +41,11 @@ type DashboardRow = {
   fbsByLocation: FbsBreakdown;
   fbsByWbWarehouse: FbsBreakdown;
   receiving: number;
+  receivingByLocation: FbsBreakdown;
+  receivingByWbWarehouse: FbsBreakdown;
   toSale: number;
+  toSaleByLocation: FbsBreakdown;
+  toSaleByWbWarehouse: FbsBreakdown;
   status: "В норме" | "Мало" | "Заканчивается";
   updated: string;
 };
@@ -184,7 +188,11 @@ function getOrCreateRow(map: Map<string, DashboardRow>, input: { nmId?: number; 
     fbsByLocation: emptyFbsBreakdown(),
     fbsByWbWarehouse: emptyFbsBreakdown(),
     receiving: 0,
+    receivingByLocation: emptyFbsBreakdown(),
+    receivingByWbWarehouse: emptyFbsBreakdown(),
     toSale: 0,
+    toSaleByLocation: emptyFbsBreakdown(),
+    toSaleByWbWarehouse: emptyFbsBreakdown(),
     status: "В норме",
     updated: new Date().toLocaleTimeString("ru-RU", { hour: "2-digit", minute: "2-digit", timeZone: "Europe/Moscow" }),
   };
@@ -197,6 +205,14 @@ function warningFor(section: string, error: unknown) {
   if (status === 401 || status === 403) return `${section}: у токена нет нужной категории доступа`;
   if (status === 429) return `${section}: Wildberries временно ограничил частоту запросов`;
   return `${section}: данные временно недоступны`;
+}
+
+function mapWbWarehouseBreakdown(input: FbsBreakdown, warehouseMap: Map<string, string>) {
+  return Object.entries(input).reduce<FbsBreakdown>((total, [wbWarehouseId, quantity]) => {
+    const warehouseId = warehouseMap.get(wbWarehouseId) ?? "unassigned";
+    total[warehouseId] = (total[warehouseId] ?? 0) + quantity;
+    return total;
+  }, {});
 }
 
 async function attachFfStocks(payload: DashboardPayload, cabinetId: CabinetId): Promise<DashboardPayload> {
@@ -212,11 +228,9 @@ async function attachFfStocks(payload: DashboardPayload, cabinetId: CabinetId): 
       ffStock: stockForProduct(lookup, { productKey: row.key, sku: row.sku }, manualWarehouses),
       ffExpiry: expiryForProduct(lookup, { productKey: row.key, sku: row.sku }, manualWarehouses),
       ffBatches: batchesForProduct(lookup, { productKey: row.key, sku: row.sku }, manualWarehouses),
-      fbsByLocation: Object.entries(row.fbsByWbWarehouse).reduce<FbsBreakdown>((total, [wbWarehouseId, quantity]) => {
-        const warehouseId = wbWarehouseToFfWarehouse.get(wbWarehouseId) ?? "unassigned";
-        total[warehouseId] = (total[warehouseId] ?? 0) + quantity;
-        return total;
-      }, {}),
+      fbsByLocation: mapWbWarehouseBreakdown(row.fbsByWbWarehouse, wbWarehouseToFfWarehouse),
+      receivingByLocation: mapWbWarehouseBreakdown(row.receivingByWbWarehouse, wbWarehouseToFfWarehouse),
+      toSaleByLocation: mapWbWarehouseBreakdown(row.toSaleByWbWarehouse, wbWarehouseToFfWarehouse),
     }));
     const ffStock = rows.reduce((total, row) => {
       for (const warehouse of manualWarehouses) total[warehouse.id] = (total[warehouse.id] ?? 0) + (row.ffStock[warehouse.id] ?? 0);
@@ -321,8 +335,15 @@ export async function GET(request: Request) {
         row.fbsByWbWarehouse[warehouseId] = (row.fbsByWbWarehouse[warehouseId] ?? 0) + 1;
         if (order.supplyId) supplies.add(order.supplyId);
       }
-      if (status.supplierStatus === "complete" && status.wbStatus === "waiting") row.receiving += 1;
-      if (status.wbStatus === "sorted" || status.wbStatus === "ready_for_pickup") row.toSale += 1;
+      const warehouseId = order.warehouseId ? String(order.warehouseId) : "unknown";
+      if (status.supplierStatus === "complete" && status.wbStatus === "waiting") {
+        row.receiving += 1;
+        row.receivingByWbWarehouse[warehouseId] = (row.receivingByWbWarehouse[warehouseId] ?? 0) + 1;
+      }
+      if (status.wbStatus === "sorted" || status.wbStatus === "ready_for_pickup") {
+        row.toSale += 1;
+        row.toSaleByWbWarehouse[warehouseId] = (row.toSaleByWbWarehouse[warehouseId] ?? 0) + 1;
+      }
     }
     activeSupplies = supplies.size;
   } else {
