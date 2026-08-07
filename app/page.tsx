@@ -10,7 +10,7 @@ type FfStock = Record<string, number>;
 type FfExpiry = Record<string, string | null>;
 type FfBatch = { location: string; batchCode: string; expiresAt: string | null; quantity: number };
 type FfBatches = Record<string, FfBatch[]>;
-type CabinetSummary = { id: "metanutrix" | "trusthome"; name: string; configured: boolean };
+type CabinetSummary = { id: "metanutrix"; name: string; configured: boolean };
 
 type ManualWarehouse = {
   id: string;

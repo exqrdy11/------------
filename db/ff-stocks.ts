@@ -158,21 +158,18 @@ async function getFfStockDb() {
       if (!currentWarehouseColumnNames.has("wb_warehouse_id")) await d1.prepare("ALTER TABLE ff_warehouses ADD COLUMN wb_warehouse_id INTEGER").run();
       if (!currentWarehouseColumnNames.has("wb_warehouse_name")) await d1.prepare("ALTER TABLE ff_warehouses ADD COLUMN wb_warehouse_name TEXT").run();
 
-      await d1.batch(cabinetIds.flatMap((cabinetId) => defaultWarehouses.map((warehouse) => d1.prepare(`
+      await d1.batch([
+        d1.prepare("DELETE FROM ff_stock_batches WHERE cabinet_id = 'trusthome'"),
+        d1.prepare("DELETE FROM ff_stocks WHERE cabinet_id = 'trusthome'"),
+        d1.prepare("DELETE FROM ff_warehouses WHERE cabinet_id = 'trusthome'"),
+        ...cabinetIds.flatMap((cabinetId) => defaultWarehouses.map((warehouse) => d1.prepare(`
         INSERT INTO ff_warehouses (cabinet_id, id, city, name, position, wb_warehouse_id, wb_warehouse_name)
         VALUES (?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(cabinet_id, id) DO UPDATE SET
           wb_warehouse_id = COALESCE(ff_warehouses.wb_warehouse_id, excluded.wb_warehouse_id),
           wb_warehouse_name = COALESCE(ff_warehouses.wb_warehouse_name, excluded.wb_warehouse_name)
-      `).bind(cabinetId, warehouse.id, warehouse.city, warehouse.name, warehouse.position, warehouse.wbWarehouseId, warehouse.wbWarehouseName))));
-      await d1.prepare(`
-        UPDATE ff_warehouses
-        SET wb_warehouse_id = 1987385, wb_warehouse_name = 'Волгоград Upakovka'
-        WHERE cabinet_id = 'trusthome'
-          AND lower(city) = 'волгоград'
-          AND lower(name) = 'upakovagvlg'
-          AND wb_warehouse_id IS NULL
-      `).run();
+      `).bind(cabinetId, warehouse.id, warehouse.city, warehouse.name, warehouse.position, warehouse.wbWarehouseId, warehouse.wbWarehouseName))),
+      ]);
       await d1.prepare(`
         INSERT OR IGNORE INTO ff_stock_batches (cabinet_id, product_key, nm_id, sku, location, batch_code, expires_at, quantity, updated_at)
         SELECT cabinet_id, product_key, nm_id, sku, location, '', COALESCE(expires_at, ''), quantity, updated_at

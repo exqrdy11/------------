@@ -2,7 +2,7 @@ const SESSION_COOKIE = "skladno_admin";
 const SESSION_LIFETIME_SECONDS = 12 * 60 * 60;
 const encoder = new TextEncoder();
 
-export const cabinetIds = ["metanutrix", "trusthome"] as const;
+export const cabinetIds = ["metanutrix"] as const;
 export type CabinetId = typeof cabinetIds[number];
 export type CabinetSummary = { id: CabinetId; name: string; configured: boolean };
 export type AdminSession = { ownerId: CabinetId; cabinetId: CabinetId };
@@ -56,13 +56,7 @@ function readCookie(request: Request, name: string) {
   return null;
 }
 
-function cabinetCredentials(id: CabinetId) {
-  if (id === "trusthome") {
-    return {
-      login: process.env.TRUSTHOME_LOGIN?.trim() || "TrustHome",
-      password: process.env.TRUSTHOME_PASSWORD || "1234",
-    };
-  }
+function cabinetCredentials() {
   return {
     login: process.env.ADMIN_LOGIN?.trim() || "admin",
     password: process.env.ADMIN_PASSWORD || "admin",
@@ -71,18 +65,17 @@ function cabinetCredentials(id: CabinetId) {
 
 export function cabinetForCredentials(login: string, password: string): CabinetId | null {
   for (const cabinetId of cabinetIds) {
-    const credentials = cabinetCredentials(cabinetId);
+    const credentials = cabinetCredentials();
     if (constantTimeEqual(login, credentials.login) && constantTimeEqual(password, credentials.password)) return cabinetId;
   }
   return null;
 }
 
 function cabinetsForOwner(ownerId: CabinetId) {
-  return ownerId === "metanutrix" ? cabinetIds : [ownerId];
+  return cabinetIds.filter((cabinetId) => cabinetId === ownerId);
 }
 
 export function cabinetSummary(id: CabinetId): CabinetSummary {
-  if (id === "trusthome") return { id, name: "TrustHome", configured: Boolean(process.env.TRUSTHOME_WB_API_TOKEN?.trim()) };
   return { id, name: "Метанутрикс", configured: Boolean(process.env.WB_API_TOKEN?.trim()) };
 }
 
@@ -91,7 +84,7 @@ export function availableCabinets(ownerId: CabinetId) {
 }
 
 export function cabinetToken(id: CabinetId) {
-  return id === "trusthome" ? process.env.TRUSTHOME_WB_API_TOKEN?.trim() : process.env.WB_API_TOKEN?.trim();
+  return id === "metanutrix" ? process.env.WB_API_TOKEN?.trim() : undefined;
 }
 
 export async function createAdminSession(ownerId: CabinetId, cabinetId: CabinetId = ownerId) {
