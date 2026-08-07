@@ -5,8 +5,7 @@ import * as XLSX from "xlsx";
 
 type StockStatus = "В норме" | "Мало" | "Заканчивается";
 type View = "overview" | "stock" | "fbs" | "sales" | "reports" | "manual";
-type FbsLocationKey = "kazan" | "moscow" | "spb" | "other";
-type FbsBreakdown = Record<FbsLocationKey, number>;
+type FbsBreakdown = Record<string, number>;
 type FfStock = Record<string, number>;
 type FfExpiry = Record<string, string | null>;
 type FfBatch = { location: string; batchCode: string; expiresAt: string | null; quantity: number };
@@ -18,6 +17,8 @@ type ManualWarehouse = {
   city: string;
   name: string;
   position: number;
+  wbWarehouseId: number | null;
+  wbWarehouseName: string | null;
 };
 
 type StockRow = {
@@ -67,16 +68,11 @@ type ImportItem = { sku: string; nmId: number | null; quantity: number; batchCod
 type ImportPreview = { fileName: string; sheetName: string; items: ImportItem[]; skipped: number; hasExpiryColumn: boolean; hasBatchColumn: boolean };
 
 const defaultManualWarehouses: ManualWarehouse[] = [
-  { id: "kazan", city: "Казань", name: "Наш склад", position: 10 },
-  { id: "moscow", city: "Москва", name: "БИК ФФ", position: 20 },
-  { id: "spb", city: "Питер", name: "Rus ФФ", position: 30 },
+  { id: "kazan", city: "Казань", name: "Наш склад", position: 10, wbWarehouseId: 1692397, wbWarehouseName: null },
+  { id: "moscow", city: "Москва", name: "БИК ФФ", position: 20, wbWarehouseId: null, wbWarehouseName: null },
+  { id: "spb", city: "Питер", name: "Rus ФФ", position: 30, wbWarehouseId: null, wbWarehouseName: null },
 ];
-const fbsLocations: Array<{ key: Exclude<FbsLocationKey, "other">; city: string; label: string }> = [
-  { key: "kazan", city: "Казань", label: "Наш склад" },
-  { key: "moscow", city: "Москва", label: "БИК ФФ" },
-  { key: "spb", city: "Питер", label: "Rus ФФ" },
-];
-const emptyFbsBreakdown: FbsBreakdown = { kazan: 0, moscow: 0, spb: 0, other: 0 };
+const emptyFbsBreakdown: FbsBreakdown = {};
 const emptyTotals: DashboardTotals = { available: 0, ffTotal: 0, ffStock: {}, fbs: 0, fbsByLocation: emptyFbsBreakdown, receiving: 0, toSale: 0, risk: 0, activeSupplies: 0 };
 const formatNumber = new Intl.NumberFormat("ru-RU");
 const viewTitles: Record<View, { eyebrow: string; title: string }> = {
@@ -283,6 +279,8 @@ export default function Home() {
   const [warehouseSaving, setWarehouseSaving] = useState(false);
   const [warehouseMessage, setWarehouseMessage] = useState<string | null>(null);
   const [warehouseError, setWarehouseError] = useState<string | null>(null);
+  const [warehouseLinkDrafts, setWarehouseLinkDrafts] = useState<Record<string, { wbWarehouseId: string; wbWarehouseName: string }>>({});
+  const [warehouseLinkSavingId, setWarehouseLinkSavingId] = useState<string | null>(null);
   const [importWarehouseId, setImportWarehouseId] = useState("kazan");
   const [importMode, setImportMode] = useState<"replace" | "add">("replace");
   const [importPreview, setImportPreview] = useState<ImportPreview | null>(null);
@@ -356,6 +354,18 @@ export default function Home() {
   const selectedImportWarehouseId = manualWarehouses.some((item) => item.id === importWarehouseId)
     ? importWarehouseId
     : manualWarehouses[0]?.id ?? "";
+
+  const fbsLocations = useMemo(() => {
+    const locations = manualWarehouses.map((warehouse) => ({
+      id: warehouse.id,
+      city: warehouse.city,
+      label: warehouse.wbWarehouseId
+        ? warehouse.wbWarehouseName || `WB FBS №${warehouse.wbWarehouseId}`
+        : "WB FBS не назначен",
+    }));
+    if ((totals.fbsByLocation.unassigned ?? 0) > 0) locations.push({ id: "unassigned", city: "Не назначено", label: "Выберите склад ФФ" });
+    return locations;
+  }, [manualWarehouses, totals.fbsByLocation.unassigned]);
 
   const filteredRows = useMemo(() => {
     const term = query.trim().toLowerCase();
@@ -533,6 +543,57 @@ export default function Home() {
     }
   };
 
+  const saveWarehouseLink = async (warehouseToUpdate: ManualWarehouse, event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    const draft = warehouseLinkDrafts[warehouseToUpdate.id] ?? {
+      wbWarehouseId: warehouseToUpdate.wbWarehouseId ? String(warehouseToUpdate.wbWarehouseId) : "",
+      wbWarehouseName: warehouseToUpdate.wbWarehouseName ?? "",
+    };
+    const rawWbWarehouseId = draft.wbWarehouseId.trim();
+    const wbWarehouseId = rawWbWarehouseId ? Number(rawWbWarehouseId) : null;
+    if (rawWbWarehouseId && (!Number.isInteger(wbWarehouseId) || wbWarehouseId <= 0 || wbWarehouseId > 2_147_483_647)) {
+      setWarehouseError("ID склада WB должен быть положительным целым числом");
+      return;
+    }
+    setWarehouseLinkSavingId(warehouseToUpdate.id);
+    setWarehouseMessage(null);
+    setWarehouseError(null);
+    try {
+      const response = await fetch("/api/ff-warehouses", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          id: warehouseToUpdate.id,
+          city: warehouseToUpdate.city,
+          name: warehouseToUpdate.name,
+          position: warehouseToUpdate.position,
+          wbWarehouseId,
+          wbWarehouseName: draft.wbWarehouseName.trim() || null,
+        }),
+      });
+      const data = await response.json() as { warehouse?: ManualWarehouse; error?: string };
+      if (response.status === 401) {
+        setAuthState("unauthenticated");
+        return;
+      }
+      if (!response.ok || !data.warehouse) throw new Error(data.error || "Не удалось сохранить привязку к WB");
+      setManualWarehouses((current) => current.map((item) => item.id === warehouseToUpdate.id ? data.warehouse as ManualWarehouse : item));
+      setWarehouseLinkDrafts((current) => ({
+        ...current,
+        [warehouseToUpdate.id]: {
+          wbWarehouseId: data.warehouse?.wbWarehouseId ? String(data.warehouse.wbWarehouseId) : "",
+          wbWarehouseName: data.warehouse?.wbWarehouseName ?? "",
+        },
+      }));
+      setWarehouseMessage(wbWarehouseId ? `${formatManualWarehouse(warehouseToUpdate)} привязан к WB` : `${formatManualWarehouse(warehouseToUpdate)} отвязан от WB`);
+      await loadData(true);
+    } catch (saveError) {
+      setWarehouseError(saveError instanceof Error ? saveError.message : "Не удалось сохранить привязку к WB");
+    } finally {
+      setWarehouseLinkSavingId(null);
+    }
+  };
+
   const chooseImportFile = async (event: ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
     setImportMessage(null);
@@ -603,8 +664,8 @@ export default function Home() {
   };
 
   const downloadCsv = (sourceRows: StockRow[], suffix: string) => {
-    const header = ["Артикул продавца", "Артикул WB", ...warehouseNames, "Всего на WB", ...manualWarehouses.flatMap((item) => [`ФФ ${formatManualWarehouse(item)}`, `Срок годности · ${formatManualWarehouse(item)}`]), "FBS всего", "FBS Казань", "FBS Москва", "FBS Питер", "На приёмке", "Ожидают продажи", "Статус"];
-    const body = sourceRows.map((row) => [row.sku, row.nmId ?? "", ...warehouseNames.map((name) => row.warehouses[name] ?? 0), stockTotal(row), ...manualWarehouses.flatMap((item) => [row.ffStock[item.id] ?? 0, row.ffExpiry?.[item.id] ?? ""]), row.fbs, row.fbsByLocation.kazan, row.fbsByLocation.moscow, row.fbsByLocation.spb, row.receiving, row.toSale, row.status]);
+    const header = ["Артикул продавца", "Артикул WB", ...warehouseNames, "Всего на WB", ...manualWarehouses.flatMap((item) => [`ФФ ${formatManualWarehouse(item)}`, `Срок годности · ${formatManualWarehouse(item)}`]), "FBS всего", ...fbsLocations.map((location) => `FBS ${location.city}`), "На приёмке", "Ожидают продажи", "Статус"];
+    const body = sourceRows.map((row) => [row.sku, row.nmId ?? "", ...warehouseNames.map((name) => row.warehouses[name] ?? 0), stockTotal(row), ...manualWarehouses.flatMap((item) => [row.ffStock[item.id] ?? 0, row.ffExpiry?.[item.id] ?? ""]), row.fbs, ...fbsLocations.map((location) => row.fbsByLocation[location.id] ?? 0), row.receiving, row.toSale, row.status]);
     const content = [header, ...body].map((line) => line.map((cell) => String(cell).replaceAll(";", ",")).join(";")).join("\n");
     const blob = new Blob(["\uFEFF" + content], { type: "text/csv;charset=utf-8" });
     const url = URL.createObjectURL(blob);
@@ -662,7 +723,21 @@ export default function Home() {
               <div className="manual-layout">
                 <article className="manual-card">
                   <h3>Ваши склады</h3>
-                  <div className="manual-warehouse-list">{manualWarehouses.map((item) => <div key={item.id}><span className="warehouse-pin">□</span><div><strong>{item.city}</strong><small>{item.name}</small></div></div>)}</div>
+                  <div className="manual-warehouse-list">{manualWarehouses.map((item) => {
+                    const linkDraft = warehouseLinkDrafts[item.id] ?? {
+                      wbWarehouseId: item.wbWarehouseId ? String(item.wbWarehouseId) : "",
+                      wbWarehouseName: item.wbWarehouseName ?? "",
+                    };
+                    return <div className="manual-warehouse-item" key={item.id}>
+                      <span className="warehouse-pin">□</span>
+                      <div className="manual-warehouse-details"><strong>{item.city}</strong><small>{item.name}</small><em>{item.wbWarehouseId ? `Привязан к WB FBS · ${item.wbWarehouseName || `№${item.wbWarehouseId}`}` : "WB FBS не назначен"}</em></div>
+                      <form className="warehouse-link-form" onSubmit={(event) => void saveWarehouseLink(item, event)}>
+                        <label><span>ID склада WB</span><input value={linkDraft.wbWarehouseId} onChange={(event) => setWarehouseLinkDrafts((current) => ({ ...current, [item.id]: { ...linkDraft, wbWarehouseId: event.target.value } }))} inputMode="numeric" placeholder="Например, 1987385" /></label>
+                        <label><span>Название в WB</span><input value={linkDraft.wbWarehouseName} onChange={(event) => setWarehouseLinkDrafts((current) => ({ ...current, [item.id]: { ...linkDraft, wbWarehouseName: event.target.value } }))} maxLength={120} placeholder="Например, Волгоград Upakovka" /></label>
+                        <button type="submit" disabled={warehouseLinkSavingId === item.id}>{warehouseLinkSavingId === item.id ? "Сохраняем…" : "Связать с WB"}</button>
+                      </form>
+                    </div>;
+                  })}</div>
                   <form className="warehouse-add-form" onSubmit={addWarehouse}>
                     <h4>Добавить склад</h4>
                     <label><span>Город</span><input value={newWarehouseCity} onChange={(event) => setNewWarehouseCity(event.target.value)} placeholder="Например, Екатеринбург" maxLength={80} required /></label>
@@ -696,9 +771,9 @@ export default function Home() {
               <ExpiryManager rows={rows} warehouses={manualWarehouses} />
             </section>
           ) : <>
-            <section className={`metric-grid ${activeView !== "overview" ? "view-hidden" : ""}`} aria-label="Ключевые показатели"><article className="metric-card featured"><div className="metric-top"><span>Остаток на складах WB</span><span className="trend up">● WB API</span></div><strong className="metric-value">{loading ? "—" : formatNumber.format(totals.available)} <small>шт.</small></strong><div className="spark-bars" aria-hidden="true">{[24,31,28,42,38,52,47,62,58,74,69,83].map((height, index) => <i key={index} style={{ height }} />)}</div><p>Фактический остаток · для FBS недоступен</p></article><article className="metric-card"><div className="metric-icon green">□</div><div className="metric-label">Остатки ФФ · вручную</div><strong className="metric-value">{loading ? "—" : formatNumber.format(totals.ffTotal)} <small>шт.</small></strong><p>{manualWarehouses.map((item) => `${item.city} ${totals.ffStock[item.id] ?? 0}`).join(" · ")}</p></article><article className="metric-card"><div className="metric-icon blue">→</div><div className="metric-label">Активные FBS</div><strong className="metric-value">{loading ? "—" : formatNumber.format(totals.fbs)} <small>шт.</small></strong><p>Казань <b>{totals.fbsByLocation.kazan}</b> · Москва <b>{totals.fbsByLocation.moscow}</b> · Питер <b>{totals.fbsByLocation.spb}</b></p></article><article className="metric-card"><div className="metric-icon amber">◷</div><div className="metric-label">Ожидают продажи</div><strong className="metric-value">{loading ? "—" : formatNumber.format(totals.toSale)} <small>шт.</small></strong><p><b>{totals.receiving}</b> ожидают приёмки WB</p></article></section>
+            <section className={`metric-grid ${activeView !== "overview" ? "view-hidden" : ""}`} aria-label="Ключевые показатели"><article className="metric-card featured"><div className="metric-top"><span>Остаток на складах WB</span><span className="trend up">● WB API</span></div><strong className="metric-value">{loading ? "—" : formatNumber.format(totals.available)} <small>шт.</small></strong><div className="spark-bars" aria-hidden="true">{[24,31,28,42,38,52,47,62,58,74,69,83].map((height, index) => <i key={index} style={{ height }} />)}</div><p>Фактический остаток · для FBS недоступен</p></article><article className="metric-card"><div className="metric-icon green">□</div><div className="metric-label">Остатки ФФ · вручную</div><strong className="metric-value">{loading ? "—" : formatNumber.format(totals.ffTotal)} <small>шт.</small></strong><p>{manualWarehouses.map((item) => `${item.city} ${totals.ffStock[item.id] ?? 0}`).join(" · ")}</p></article><article className="metric-card"><div className="metric-icon blue">→</div><div className="metric-label">Активные FBS</div><strong className="metric-value">{loading ? "—" : formatNumber.format(totals.fbs)} <small>шт.</small></strong><p>{fbsLocations.map((location) => <span key={location.id}>{location.city} <b>{totals.fbsByLocation[location.id] ?? 0}</b>{" · "}</span>)}</p></article><article className="metric-card"><div className="metric-icon amber">◷</div><div className="metric-label">Ожидают продажи</div><strong className="metric-value">{loading ? "—" : formatNumber.format(totals.toSale)} <small>шт.</small></strong><p><b>{totals.receiving}</b> ожидают приёмки WB</p></article></section>
 
-            <section className={`movement-card ${activeView !== "overview" && activeView !== "fbs" ? "view-hidden" : ""}`} id="movement"><div className="section-heading"><div><span className="section-kicker">ОСТАТКИ WB, ФФ И ДВИЖЕНИЕ FBS</span><h2>Фактические и ручные остатки отдельно</h2></div><span className="period-pill">Актуальные заказы за 30 дней</span></div><div className="movement-grid"><article className="wb-stock-fact"><span className="wb-stock-mark">WB</span><div><small>ФАКТИЧЕСКИЙ ОСТАТОК НА WB</small><strong>{formatNumber.format(totals.available)} <em>шт.</em></strong><p>Уже находится на складах Wildberries и не является доступным запасом для FBS.</p></div></article><div className="fbs-overview"><div className="movement-subhead"><span>РУЧНЫЕ ОСТАТКИ ФФ</span><button className="text-action" type="button" onClick={() => navigateTo("manual")}>Настроить склады</button></div><div className="fbs-location-grid manual-location-grid dynamic-locations">{manualWarehouses.map((item) => <article className="fbs-location-card manual" key={item.id}><span>{item.city}</span><strong>{formatNumber.format(totals.ffStock[item.id] ?? 0)}</strong><small>{item.name}</small></article>)}</div><div className="movement-subhead orders"><span>АКТИВНЫЕ FBS-ЗАКАЗЫ</span><small>По данным WB API</small></div><div className="fbs-location-grid order-location-grid">{fbsLocations.map((location) => <article className="fbs-location-card" key={location.key}><span>{location.city}</span><strong>{formatNumber.format(totals.fbsByLocation[location.key])}</strong><small>{location.label}</small></article>)}</div><div className="fbs-stage-strip"><span><b>{totals.fbs}</b> активные FBS</span><i>→</i><span><b>{totals.receiving}</b> ожидают WB</span><i>→</i><span className="sale-stage"><b>{totals.toSale}</b> к продаже</span></div></div></div></section>
+            <section className={`movement-card ${activeView !== "overview" && activeView !== "fbs" ? "view-hidden" : ""}`} id="movement"><div className="section-heading"><div><span className="section-kicker">ОСТАТКИ WB, ФФ И ДВИЖЕНИЕ FBS</span><h2>Фактические и ручные остатки отдельно</h2></div><span className="period-pill">Актуальные заказы за 30 дней</span></div><div className="movement-grid"><article className="wb-stock-fact"><span className="wb-stock-mark">WB</span><div><small>ФАКТИЧЕСКИЙ ОСТАТОК НА WB</small><strong>{formatNumber.format(totals.available)} <em>шт.</em></strong><p>Уже находится на складах Wildberries и не является доступным запасом для FBS.</p></div></article><div className="fbs-overview"><div className="movement-subhead"><span>РУЧНЫЕ ОСТАТКИ ФФ</span><button className="text-action" type="button" onClick={() => navigateTo("manual")}>Настроить склады</button></div><div className="fbs-location-grid manual-location-grid dynamic-locations">{manualWarehouses.map((item) => <article className="fbs-location-card manual" key={item.id}><span>{item.city}</span><strong>{formatNumber.format(totals.ffStock[item.id] ?? 0)}</strong><small>{item.name}</small></article>)}</div><div className="movement-subhead orders"><span>АКТИВНЫЕ FBS-ЗАКАЗЫ</span><small>По данным WB API</small></div><div className="fbs-location-grid order-location-grid">{fbsLocations.map((location) => <article className="fbs-location-card" key={location.id}><span>{location.city}</span><strong>{formatNumber.format(totals.fbsByLocation[location.id] ?? 0)}</strong><small>{location.label}</small></article>)}</div><div className="fbs-stage-strip"><span><b>{totals.fbs}</b> активные FBS</span><i>→</i><span><b>{totals.receiving}</b> ожидают WB</span><i>→</i><span className="sale-stage"><b>{totals.toSale}</b> к продаже</span></div></div></div></section>
 
             <section className={`stock-card ${activeView === "reports" ? "view-hidden" : ""}`} id="stock"><div className="stock-header"><div><span className="section-kicker">ОСТАТКИ ПО АРТИКУЛАМ</span><h2>{stockTitle}</h2></div><div className="stock-tools"><label className="search-field"><span>⌕</span><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Артикул или название" aria-label="Поиск по товарам"/></label><label className="select-wrap"><span>Склад:</span><select value={warehouse} onChange={(event) => setWarehouse(event.target.value)} aria-label="Выбрать склад"><option>Все склады</option>{warehouseNames.map((item) => <option key={item}>{item}</option>)}</select></label></div></div><div className="filter-row"><div className="filter-tabs" role="tablist" aria-label="Фильтр остатков">{[{ name: "Все", count: counts.all }, { name: "Дефицит", count: counts.risk }, { name: "Активные FBS", count: counts.transit }].map((item) => <button type="button" key={item.name} className={filter === item.name ? "active" : ""} onClick={() => setFilter(item.name)}>{item.name}<span>{item.count}</span></button>)}</div><span className="result-count">Показано {filteredRows.length} из {viewTotal} артикулов</span></div><div className="table-wrap"><table><thead><tr><th>Товар / артикул</th><th>{warehouse === "Все склады" ? "Остаток WB" : "Выбранный склад WB"}</th>{manualWarehouses.map((item) => <th className="ff-column-head" key={item.id}><span>{item.city}</span><small>{item.name}</small></th>)}<th>Активные FBS</th><th>К продаже</th><th>Статус</th><th /></tr></thead><tbody>{filteredRows.map((row) => <tr key={row.key} onClick={() => openProduct(row)} tabIndex={0} onKeyDown={(event) => { if (event.key === "Enter") openProduct(row); }}><td><div className="product-cell"><span className="product-swatch" style={{ background: row.color }}>{row.name.charAt(0).toUpperCase()}</span><span><strong>{row.name}</strong><small>{row.sku}{row.nmId ? ` · WB ${row.nmId}` : ""} · {row.category}</small></span></div></td><td><b>{formatNumber.format(warehouse === "Все склады" ? stockTotal(row) : row.warehouses[warehouse] ?? 0)}</b><small> шт.</small></td>{manualWarehouses.map((item) => <td key={item.id}><span className={`manual-stock-value ${(row.ffStock[item.id] ?? 0) === 0 ? "zero" : ""}`} title={`Открыть и изменить: ${formatManualWarehouse(item)}`}>{formatNumber.format(row.ffStock[item.id] ?? 0)}<small> шт.</small></span></td>)}<td><span className="number-pill blue-pill">{row.fbs}</span></td><td><span className="number-pill green-pill">{row.toSale}</span></td><td><span className={`status ${row.status === "В норме" ? "ok" : row.status === "Мало" ? "low" : "critical"}`}><i />{row.status}</span></td><td><button type="button" className="row-action" aria-label={`Открыть ${row.name}`}>›</button></td></tr>)}</tbody></table>{loading && <div className="loading-state"><span className="loader"/><strong>Загружаем данные из Wildberries</strong><small>Остатки и статусы FBS собираются в единый отчёт</small></div>}{!loading && !filteredRows.length && <div className="empty-state"><strong>{error ? "Данные пока не загружены" : "Ничего не найдено"}</strong><span>{error ? "Проверьте подключение WB API." : "Попробуйте изменить поиск или фильтры."}</span></div>}</div><footer className="table-footer"><span><i className={error ? "live-dot offline" : "live-dot"} />{updatedAt ? `Остатки обновлены в ${formatSyncTime(updatedAt)} МСК` : "Ожидаем синхронизацию"}</span><button type="button" onClick={() => { setQuery(""); setFilter("Все"); setWarehouse("Все склады"); }}>Сбросить фильтры</button></footer></section>
 
@@ -739,7 +814,7 @@ export default function Home() {
               onDelete={(batch) => void removeBatch(batch)}
             />
             <h3>Активные FBS по складам</h3>
-            <div className="drawer-fbs-locations">{fbsLocations.map((location) => <div key={location.key}><span><strong>{location.city}</strong><small>{location.label}</small></span><b>{selected.fbsByLocation?.[location.key] ?? 0} шт.</b></div>)}</div>
+            <div className="drawer-fbs-locations">{fbsLocations.map((location) => <div key={location.id}><span><strong>{location.city}</strong><small>{location.label}</small></span><b>{selected.fbsByLocation?.[location.id] ?? 0} шт.</b></div>)}</div>
             <h3>Текущее движение FBS</h3>
             <div className="timeline"><div className="timeline-item done"><i>✓</i><div><strong>Отгружено на FBS</strong><span>{selected.fbs} шт. в доставке</span></div></div><div className="timeline-item active"><i>2</i><div><strong>Ожидает приёмки WB</strong><span>{selected.receiving} шт. в статусе waiting</span></div></div><div className="timeline-item"><i>3</i><div><strong>Ожидает продажи</strong><span>{selected.toSale} шт. отсортировано или готово к выдаче</span></div></div></div>
             <p className="drawer-note">Данные Wildberries обновлены в {selected.updated} МСК</p>

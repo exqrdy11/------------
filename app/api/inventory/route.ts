@@ -24,8 +24,7 @@ type WbOrder = {
 };
 
 type OrderStatus = { id: number; supplierStatus?: string; wbStatus?: string };
-type FbsLocationKey = "kazan" | "moscow" | "spb" | "other";
-type FbsBreakdown = Record<FbsLocationKey, number>;
+type FbsBreakdown = Record<string, number>;
 
 type DashboardRow = {
   key: string;
@@ -40,6 +39,7 @@ type DashboardRow = {
   ffBatches: FfBatches;
   fbs: number;
   fbsByLocation: FbsBreakdown;
+  fbsByWbWarehouse: FbsBreakdown;
   receiving: number;
   toSale: number;
   status: "В норме" | "Мало" | "Заканчивается";
@@ -50,7 +50,7 @@ const WB_MARKETPLACE = "https://marketplace-api.wildberries.ru";
 const WB_CONTENT = "https://content-api.wildberries.ru";
 const WB_ANALYTICS = "https://seller-analytics-api.wildberries.ru";
 const palette = ["#ffb45c", "#8ea6ff", "#d7a6cc", "#94c5a6", "#eaa070", "#79b9bd", "#adb1b8", "#d0ad82"];
-const emptyFbsBreakdown = (): FbsBreakdown => ({ kazan: 0, moscow: 0, spb: 0, other: 0 });
+const emptyFbsBreakdown = (): FbsBreakdown => ({});
 
 type DashboardPayload = {
   configured: true;
@@ -137,16 +137,11 @@ async function getWbStocks(token: string) {
   return response.data?.items ?? [];
 }
 
-async function getOrders(token: string): Promise<{ orders: WbOrder[]; statuses: Map<number, OrderStatus>; warehouseNames: Map<number, string> }> {
+async function getOrders(token: string): Promise<{ orders: WbOrder[]; statuses: Map<number, OrderStatus> }> {
   const orders: WbOrder[] = [];
   const now = Math.floor(Date.now() / 1000);
   const dateFrom = now - 30 * 24 * 60 * 60;
   let next = 0;
-  const sellerWarehousesPromise = wbFetch<Array<{ id: number; name: string; isDeleting?: boolean }>>(
-    token,
-    `${WB_MARKETPLACE}/api/v3/warehouses`,
-  );
-
   for (let page = 0; page < 30; page += 1) {
     const params = new URLSearchParams({ limit: "1000", next: String(next), dateFrom: String(dateFrom), dateTo: String(now) });
     const data = await wbFetch<{ next?: number; orders?: WbOrder[] }>(token, `${WB_MARKETPLACE}/api/v3/orders?${params}`);
@@ -166,17 +161,7 @@ async function getOrders(token: string): Promise<{ orders: WbOrder[]; statuses: 
     for (const status of data.orders ?? []) statuses.set(status.id, status);
   }
 
-  const sellerWarehouses = await sellerWarehousesPromise;
-  const warehouseNames = new Map(sellerWarehouses.filter((item) => !item.isDeleting).map((item) => [item.id, item.name]));
-  return { orders, statuses, warehouseNames };
-}
-
-function resolveFbsLocation(warehouseId: number | undefined, warehouseName: string | undefined): FbsLocationKey {
-  const name = (warehouseName ?? "").toLocaleLowerCase("ru-RU");
-  if (warehouseId === 1692397 || name.includes("родины") || name.includes("казан")) return "kazan";
-  if (name.includes("бикпартнер") || name.includes("бик партнер") || name.includes("моск")) return "moscow";
-  if (name.includes("фф rus спб") || name.includes("спб") || name.includes("питер") || name.includes("санкт")) return "spb";
-  return "other";
+  return { orders, statuses };
 }
 
 function getOrCreateRow(map: Map<string, DashboardRow>, input: { nmId?: number; sku?: string; name?: string; category?: string }) {
@@ -197,6 +182,7 @@ function getOrCreateRow(map: Map<string, DashboardRow>, input: { nmId?: number; 
     ffBatches: emptyFfBatches(),
     fbs: 0,
     fbsByLocation: emptyFbsBreakdown(),
+    fbsByWbWarehouse: emptyFbsBreakdown(),
     receiving: 0,
     toSale: 0,
     status: "В норме",
@@ -216,11 +202,21 @@ function warningFor(section: string, error: unknown) {
 async function attachFfStocks(payload: DashboardPayload, cabinetId: CabinetId): Promise<DashboardPayload> {
   try {
     const [manualWarehouses, lookup] = await Promise.all([listFfWarehouses(cabinetId), listFfStocks(cabinetId)]);
+    const wbWarehouseToFfWarehouse = new Map(
+      manualWarehouses
+        .filter((warehouse) => warehouse.wbWarehouseId)
+        .map((warehouse) => [String(warehouse.wbWarehouseId), warehouse.id]),
+    );
     const rows = payload.rows.map((row) => ({
       ...row,
       ffStock: stockForProduct(lookup, { productKey: row.key, sku: row.sku }, manualWarehouses),
       ffExpiry: expiryForProduct(lookup, { productKey: row.key, sku: row.sku }, manualWarehouses),
       ffBatches: batchesForProduct(lookup, { productKey: row.key, sku: row.sku }, manualWarehouses),
+      fbsByLocation: Object.entries(row.fbsByWbWarehouse).reduce<FbsBreakdown>((total, [wbWarehouseId, quantity]) => {
+        const warehouseId = wbWarehouseToFfWarehouse.get(wbWarehouseId) ?? "unassigned";
+        total[warehouseId] = (total[warehouseId] ?? 0) + quantity;
+        return total;
+      }, {}),
     }));
     const ffStock = rows.reduce((total, row) => {
       for (const warehouse of manualWarehouses) total[warehouse.id] = (total[warehouse.id] ?? 0) + (row.ffStock[warehouse.id] ?? 0);
@@ -230,7 +226,15 @@ async function attachFfStocks(payload: DashboardPayload, cabinetId: CabinetId): 
       ...payload,
       rows,
       manualWarehouses,
-      totals: { ...payload.totals, ffStock, ffTotal: Object.values(ffStock).reduce((sum, value) => sum + value, 0) },
+      totals: {
+        ...payload.totals,
+        ffStock,
+        ffTotal: Object.values(ffStock).reduce((sum, value) => sum + value, 0),
+        fbsByLocation: rows.reduce<FbsBreakdown>((total, row) => {
+          for (const [warehouseId, quantity] of Object.entries(row.fbsByLocation)) total[warehouseId] = (total[warehouseId] ?? 0) + quantity;
+          return total;
+        }, {}),
+      },
     };
   } catch (error) {
     return {
@@ -313,8 +317,8 @@ export async function GET(request: Request) {
       const row = getOrCreateRow(rowMap, { nmId: order.nmId, sku: order.article, name: order.article });
       if (status.supplierStatus === "complete") {
         row.fbs += 1;
-        const location = resolveFbsLocation(order.warehouseId, ordersResult.value.warehouseNames.get(order.warehouseId ?? -1));
-        row.fbsByLocation[location] += 1;
+        const warehouseId = order.warehouseId ? String(order.warehouseId) : "unknown";
+        row.fbsByWbWarehouse[warehouseId] = (row.fbsByWbWarehouse[warehouseId] ?? 0) + 1;
         if (order.supplyId) supplies.add(order.supplyId);
       }
       if (status.supplierStatus === "complete" && status.wbStatus === "waiting") row.receiving += 1;
@@ -347,12 +351,7 @@ export async function GET(request: Request) {
     ffTotal: 0,
     ffStock: emptyFfStock(),
     fbs: rows.reduce((sum, row) => sum + row.fbs, 0),
-    fbsByLocation: rows.reduce((total, row) => ({
-      kazan: total.kazan + row.fbsByLocation.kazan,
-      moscow: total.moscow + row.fbsByLocation.moscow,
-      spb: total.spb + row.fbsByLocation.spb,
-      other: total.other + row.fbsByLocation.other,
-    }), emptyFbsBreakdown()),
+    fbsByLocation: emptyFbsBreakdown(),
     receiving: rows.reduce((sum, row) => sum + row.receiving, 0),
     toSale: rows.reduce((sum, row) => sum + row.toSale, 0),
     risk: rows.filter((row) => row.status !== "В норме").length,

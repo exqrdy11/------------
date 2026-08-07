@@ -7,6 +7,8 @@ export const ffWarehouses = sqliteTable("ff_warehouses", {
   city: text("city").notNull(),
   name: text("name").notNull(),
   position: integer("position").notNull().default(0),
+  wbWarehouseId: integer("wb_warehouse_id"),
+  wbWarehouseName: text("wb_warehouse_name"),
   createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
 }, (table) => [primaryKey({ columns: [table.cabinetId, table.id] })]);
 

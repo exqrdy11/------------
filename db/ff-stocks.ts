@@ -6,6 +6,8 @@ export type ManualWarehouse = {
   city: string;
   name: string;
   position: number;
+  wbWarehouseId: number | null;
+  wbWarehouseName: string | null;
 };
 
 export type FfStock = Record<string, number>;
@@ -30,9 +32,9 @@ type FfBatchRow = {
 };
 
 const defaultWarehouses: ManualWarehouse[] = [
-  { id: "kazan", city: "Казань", name: "Наш склад", position: 10 },
-  { id: "moscow", city: "Москва", name: "БИК ФФ", position: 20 },
-  { id: "spb", city: "Питер", name: "Rus ФФ", position: 30 },
+  { id: "kazan", city: "Казань", name: "Наш склад", position: 10, wbWarehouseId: 1692397, wbWarehouseName: null },
+  { id: "moscow", city: "Москва", name: "БИК ФФ", position: 20, wbWarehouseId: null, wbWarehouseName: null },
+  { id: "spb", city: "Питер", name: "Rus ФФ", position: 30, wbWarehouseId: null, wbWarehouseName: null },
 ];
 
 const createStocksTableSql = `
@@ -55,6 +57,8 @@ const createWarehousesTableSql = `
     city TEXT NOT NULL,
     name TEXT NOT NULL,
     position INTEGER NOT NULL DEFAULT 0,
+    wb_warehouse_id INTEGER,
+    wb_warehouse_name TEXT,
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     PRIMARY KEY (cabinet_id, id)
   )
@@ -137,22 +141,38 @@ async function getFfStockDb() {
         await d1.batch([
           d1.prepare("DROP TABLE IF EXISTS ff_warehouses_scoped"),
           d1.prepare(createScopedWarehousesTableSql),
-          d1.prepare("INSERT INTO ff_warehouses_scoped (cabinet_id, id, city, name, position, created_at) SELECT 'metanutrix', id, city, name, position, created_at FROM ff_warehouses"),
+          d1.prepare("INSERT INTO ff_warehouses_scoped (cabinet_id, id, city, name, position, wb_warehouse_id, wb_warehouse_name, created_at) SELECT 'metanutrix', id, city, name, position, NULL, NULL, created_at FROM ff_warehouses"),
           d1.prepare("DROP TABLE ff_warehouses"),
           d1.prepare("ALTER TABLE ff_warehouses_scoped RENAME TO ff_warehouses"),
         ]);
       }
 
-      const currentColumns = await d1.prepare("PRAGMA table_info(ff_stocks)").all<{ name: string }>();
-      if (!(currentColumns.results ?? []).some((column) => column.name === "expires_at")) {
+      const [currentStockColumns, currentWarehouseColumns] = await Promise.all([
+        d1.prepare("PRAGMA table_info(ff_stocks)").all<{ name: string }>(),
+        d1.prepare("PRAGMA table_info(ff_warehouses)").all<{ name: string }>(),
+      ]);
+      if (!(currentStockColumns.results ?? []).some((column) => column.name === "expires_at")) {
         await d1.prepare("ALTER TABLE ff_stocks ADD COLUMN expires_at TEXT").run();
       }
+      const currentWarehouseColumnNames = new Set((currentWarehouseColumns.results ?? []).map((column) => column.name));
+      if (!currentWarehouseColumnNames.has("wb_warehouse_id")) await d1.prepare("ALTER TABLE ff_warehouses ADD COLUMN wb_warehouse_id INTEGER").run();
+      if (!currentWarehouseColumnNames.has("wb_warehouse_name")) await d1.prepare("ALTER TABLE ff_warehouses ADD COLUMN wb_warehouse_name TEXT").run();
 
       await d1.batch(cabinetIds.flatMap((cabinetId) => defaultWarehouses.map((warehouse) => d1.prepare(`
-        INSERT INTO ff_warehouses (cabinet_id, id, city, name, position)
-        VALUES (?, ?, ?, ?, ?)
-        ON CONFLICT(cabinet_id, id) DO NOTHING
-      `).bind(cabinetId, warehouse.id, warehouse.city, warehouse.name, warehouse.position))));
+        INSERT INTO ff_warehouses (cabinet_id, id, city, name, position, wb_warehouse_id, wb_warehouse_name)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(cabinet_id, id) DO UPDATE SET
+          wb_warehouse_id = COALESCE(ff_warehouses.wb_warehouse_id, excluded.wb_warehouse_id),
+          wb_warehouse_name = COALESCE(ff_warehouses.wb_warehouse_name, excluded.wb_warehouse_name)
+      `).bind(cabinetId, warehouse.id, warehouse.city, warehouse.name, warehouse.position, warehouse.wbWarehouseId, warehouse.wbWarehouseName))));
+      await d1.prepare(`
+        UPDATE ff_warehouses
+        SET wb_warehouse_id = 1987385, wb_warehouse_name = 'Волгоград Upakovka'
+        WHERE cabinet_id = 'trusthome'
+          AND lower(city) = 'волгоград'
+          AND lower(name) = 'upakovagvlg'
+          AND wb_warehouse_id IS NULL
+      `).run();
       await d1.prepare(`
         INSERT OR IGNORE INTO ff_stock_batches (cabinet_id, product_key, nm_id, sku, location, batch_code, expires_at, quantity, updated_at)
         SELECT cabinet_id, product_key, nm_id, sku, location, '', COALESCE(expires_at, ''), quantity, updated_at
@@ -167,7 +187,7 @@ async function getFfStockDb() {
 
 export async function listFfWarehouses(cabinetId: CabinetId) {
   const d1 = await getFfStockDb();
-  const result = await d1.prepare("SELECT id, city, name, position FROM ff_warehouses WHERE cabinet_id = ? ORDER BY position, city, name").bind(cabinetId).all<ManualWarehouse>();
+  const result = await d1.prepare("SELECT id, city, name, position, wb_warehouse_id AS wbWarehouseId, wb_warehouse_name AS wbWarehouseName FROM ff_warehouses WHERE cabinet_id = ? ORDER BY position, city, name").bind(cabinetId).all<ManualWarehouse>();
   return result.results ?? [];
 }
 
@@ -179,21 +199,38 @@ export async function createFfWarehouse(input: { cabinetId: CabinetId; city: str
     city: input.city.trim(),
     name: input.name.trim(),
     position: (current.at(-1)?.position ?? 0) + 10,
+    wbWarehouseId: null,
+    wbWarehouseName: null,
   };
-  await d1.prepare("INSERT INTO ff_warehouses (cabinet_id, id, city, name, position) VALUES (?, ?, ?, ?, ?)").bind(
+  await d1.prepare("INSERT INTO ff_warehouses (cabinet_id, id, city, name, position, wb_warehouse_id, wb_warehouse_name) VALUES (?, ?, ?, ?, ?, ?, ?)").bind(
     input.cabinetId,
     warehouse.id,
     warehouse.city,
     warehouse.name,
     warehouse.position,
+    warehouse.wbWarehouseId,
+    warehouse.wbWarehouseName,
   ).run();
   return warehouse;
 }
 
 export async function updateFfWarehouse(input: ManualWarehouse & { cabinetId: CabinetId }) {
   const d1 = await getFfStockDb();
-  await d1.prepare("UPDATE ff_warehouses SET city = ?, name = ? WHERE cabinet_id = ? AND id = ?").bind(input.city.trim(), input.name.trim(), input.cabinetId, input.id).run();
-  return input;
+  const warehouse = {
+    ...input,
+    city: input.city.trim(),
+    name: input.name.trim(),
+    wbWarehouseName: input.wbWarehouseName?.trim() || null,
+  };
+  await d1.prepare("UPDATE ff_warehouses SET city = ?, name = ?, wb_warehouse_id = ?, wb_warehouse_name = ? WHERE cabinet_id = ? AND id = ?").bind(
+    warehouse.city,
+    warehouse.name,
+    warehouse.wbWarehouseId,
+    warehouse.wbWarehouseName,
+    warehouse.cabinetId,
+    warehouse.id,
+  ).run();
+  return warehouse;
 }
 
 function addBatch(target: Map<string, FfBatches>, key: string, row: FfBatchRow) {
