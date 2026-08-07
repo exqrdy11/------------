@@ -15,6 +15,13 @@
       "when": 1786086989799,
       "tag": "0001_stormy_arachne",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "6",
+      "when": 1786094913328,
+      "tag": "0002_bent_brother_voodoo",
+      "breakpoints": true
     }
   ]
 }

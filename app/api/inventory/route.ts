@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { emptyFfStock, listFfStocks, listFfWarehouses, stockForProduct, type FfStock, type ManualWarehouse } from "@/db/ff-stocks";
+import { emptyFfExpiry, emptyFfStock, expiryForProduct, listFfStocks, listFfWarehouses, stockForProduct, type FfExpiry, type FfStock, type ManualWarehouse } from "@/db/ff-stocks";
 import { isAdminRequest } from "@/lib/admin-auth";
 
 export const dynamic = "force-dynamic";
@@ -36,6 +36,7 @@ type DashboardRow = {
   color: string;
   warehouses: Record<string, number>;
   ffStock: FfStock;
+  ffExpiry: FfExpiry;
   fbs: number;
   fbsByLocation: FbsBreakdown;
   receiving: number;
@@ -190,6 +191,7 @@ function getOrCreateRow(map: Map<string, DashboardRow>, input: { nmId?: number; 
     color: palette[Math.abs(seed) % palette.length],
     warehouses: {},
     ffStock: emptyFfStock(),
+    ffExpiry: emptyFfExpiry(),
     fbs: 0,
     fbsByLocation: emptyFbsBreakdown(),
     receiving: 0,
@@ -214,6 +216,7 @@ async function attachFfStocks(payload: DashboardPayload): Promise<DashboardPaylo
     const rows = payload.rows.map((row) => ({
       ...row,
       ffStock: stockForProduct(lookup, { productKey: row.key, sku: row.sku }, manualWarehouses),
+      ffExpiry: expiryForProduct(lookup, { productKey: row.key, sku: row.sku }, manualWarehouses),
     }));
     const ffStock = rows.reduce((total, row) => {
       for (const warehouse of manualWarehouses) total[warehouse.id] = (total[warehouse.id] ?? 0) + (row.ffStock[warehouse.id] ?? 0);
@@ -228,7 +231,7 @@ async function attachFfStocks(payload: DashboardPayload): Promise<DashboardPaylo
   } catch (error) {
     return {
       ...payload,
-      rows: payload.rows.map((row) => ({ ...row, ffStock: emptyFfStock() })),
+      rows: payload.rows.map((row) => ({ ...row, ffStock: emptyFfStock(), ffExpiry: emptyFfExpiry() })),
       manualWarehouses: [],
       warnings: [...payload.warnings, warningFor("Ручные остатки ФФ", error)],
     };

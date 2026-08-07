@@ -15,5 +15,6 @@ export const ffStocks = sqliteTable("ff_stocks", {
   sku: text("sku").notNull().default(""),
   location: text("location").notNull(),
   quantity: integer("quantity").notNull().default(0),
+  expiresAt: text("expires_at"),
   updatedAt: text("updated_at").notNull().default(sql`CURRENT_TIMESTAMP`),
 }, (table) => [primaryKey({ columns: [table.productKey, table.location] })]);

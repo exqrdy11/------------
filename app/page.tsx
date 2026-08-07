@@ -8,6 +8,7 @@ type View = "overview" | "stock" | "fbs" | "sales" | "reports" | "manual";
 type FbsLocationKey = "kazan" | "moscow" | "spb" | "other";
 type FbsBreakdown = Record<FbsLocationKey, number>;
 type FfStock = Record<string, number>;
+type FfExpiry = Record<string, string | null>;
 
 type ManualWarehouse = {
   id: string;
@@ -25,6 +26,7 @@ type StockRow = {
   color: string;
   warehouses: Record<string, number>;
   ffStock: FfStock;
+  ffExpiry: FfExpiry;
   fbs: number;
   fbsByLocation: FbsBreakdown;
   receiving: number;
@@ -56,8 +58,8 @@ type InventoryResponse = {
   error?: string;
 };
 
-type ImportItem = { sku: string; quantity: number };
-type ImportPreview = { fileName: string; sheetName: string; items: ImportItem[]; skipped: number };
+type ImportItem = { sku: string; quantity: number; expiresAt?: string | null };
+type ImportPreview = { fileName: string; sheetName: string; items: ImportItem[]; skipped: number; hasExpiryColumn: boolean };
 
 const defaultManualWarehouses: ManualWarehouse[] = [
   { id: "kazan", city: "Казань", name: "Наш склад", position: 10 },
@@ -98,6 +100,10 @@ function blankFfStock(warehouses: ManualWarehouse[], stock: FfStock = {}) {
   return Object.fromEntries(warehouses.map((warehouse) => [warehouse.id, Math.max(0, Number(stock[warehouse.id]) || 0)]));
 }
 
+function blankFfExpiry(warehouses: ManualWarehouse[], expiry: FfExpiry = {}) {
+  return Object.fromEntries(warehouses.map((warehouse) => [warehouse.id, expiry[warehouse.id] || null]));
+}
+
 function sumFfStock(stock: FfStock) {
   return Object.values(stock).reduce((sum, value) => sum + (Number(value) || 0), 0);
 }
@@ -116,6 +122,19 @@ function parseQuantity(value: unknown) {
   return Number.isFinite(result) ? Math.floor(result) : Number.NaN;
 }
 
+function parseExpiryDate(value: unknown) {
+  const raw = String(value ?? "").trim();
+  if (!raw) return null;
+  const match = raw.match(/^(?:(\d{4})[-./](\d{1,2})[-./](\d{1,2})|(\d{1,2})[-./](\d{1,2})[-./](\d{4}))$/);
+  if (!match) return null;
+  const year = Number(match[1] ?? match[6]);
+  const month = Number(match[2] ?? match[5]);
+  const day = Number(match[3] ?? match[4]);
+  const date = new Date(Date.UTC(year, month - 1, day));
+  if (date.getUTCFullYear() !== year || date.getUTCMonth() !== month - 1 || date.getUTCDate() !== day) return null;
+  return `${year.toString().padStart(4, "0")}-${month.toString().padStart(2, "0")}-${day.toString().padStart(2, "0")}`;
+}
+
 async function parseExcelFile(file: File): Promise<ImportPreview> {
   const workbook = XLSX.read(await file.arrayBuffer(), { type: "array" });
   const sheetName = workbook.SheetNames[0];
@@ -132,26 +151,96 @@ async function parseExcelFile(file: File): Promise<ImportPreview> {
   const headers = rows[headerRowIndex].map(normalizedHeader);
   const skuColumn = headers.findIndex((header) => ["артикул", "артикулпродавца", "sku", "vendorcode"].includes(header));
   const quantityColumn = headers.findIndex((header) => ["количество", "колво", "остаток", "qty", "quantity"].includes(header));
+  const expiryColumn = headers.findIndex((header) => ["срокгодности", "годендо", "датаокончаниясрокагодности", "expiry", "expirydate", "expirationdate"].includes(header));
+  const hasExpiryColumn = expiryColumn >= 0;
   const grouped = new Map<string, ImportItem>();
   let skipped = 0;
 
   for (const row of rows.slice(headerRowIndex + 1)) {
     const sku = String(row[skuColumn] ?? "").trim();
     const quantity = parseQuantity(row[quantityColumn]);
+    const expiryValue = hasExpiryColumn ? String(row[expiryColumn] ?? "").trim() : "";
+    const expiresAt = hasExpiryColumn ? parseExpiryDate(row[expiryColumn]) : undefined;
     if (!sku && !String(row[quantityColumn] ?? "").trim()) continue;
-    if (!sku || !normalizedSku(sku) || !Number.isFinite(quantity) || quantity < 0 || quantity > 10_000_000) {
+    if (!sku || !normalizedSku(sku) || !Number.isFinite(quantity) || quantity < 0 || quantity > 10_000_000 || (hasExpiryColumn && Boolean(expiryValue) && !expiresAt)) {
       skipped += 1;
       continue;
     }
     const key = normalizedSku(sku);
     const previous = grouped.get(key);
-    grouped.set(key, { sku, quantity: (previous?.quantity ?? 0) + quantity });
+    const previousExpiry = previous?.expiresAt;
+    const combinedExpiry = hasExpiryColumn
+      ? [previousExpiry, expiresAt].filter((value): value is string => Boolean(value)).sort()[0] ?? null
+      : undefined;
+    grouped.set(key, { sku, quantity: (previous?.quantity ?? 0) + quantity, ...(hasExpiryColumn ? { expiresAt: combinedExpiry } : {}) });
   }
 
   const items = [...grouped.values()];
   if (!items.length) throw new Error("Не нашли ни одной корректной строки с артикулом и количеством");
   if (items.some((item) => item.quantity > 10_000_000)) throw new Error("Количество по одному артикулу не должно превышать 10 000 000");
-  return { fileName: file.name, sheetName, items, skipped };
+  return { fileName: file.name, sheetName, items, skipped, hasExpiryColumn };
+}
+
+function ExpiryManager({ rows, warehouses, onSaved }: {
+  rows: StockRow[];
+  warehouses: ManualWarehouse[];
+  onSaved: (key: string, stock: FfStock, expiresAt: FfExpiry) => void;
+}) {
+  const [productKey, setProductKey] = useState("");
+  const [warehouseId, setWarehouseId] = useState("");
+  const [expiryOverride, setExpiryOverride] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
+  const [message, setMessage] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const selected = rows.find((row) => row.key === productKey) ?? rows[0] ?? null;
+  const selectedWarehouseId = warehouses.some((warehouse) => warehouse.id === warehouseId) ? warehouseId : warehouses[0]?.id ?? "";
+  const expiresAt = expiryOverride ?? selected?.ffExpiry?.[selectedWarehouseId] ?? "";
+
+  const save = async () => {
+    if (!selected || !selectedWarehouseId) return;
+    setSaving(true);
+    setMessage(null);
+    setError(null);
+    try {
+      const response = await fetch("/api/ff-stock", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          productKey: selected.key,
+          nmId: selected.nmId,
+          sku: selected.sku,
+          stock: selected.ffStock,
+          expiresAt: { ...selected.ffExpiry, [selectedWarehouseId]: expiresAt || null },
+        }),
+      });
+      const data = await response.json() as { stock?: FfStock; expiresAt?: FfExpiry; error?: string };
+      if (!response.ok || !data.stock || !data.expiresAt) throw new Error(data.error || "Не удалось сохранить срок годности");
+      onSaved(selected.key, data.stock, data.expiresAt);
+      setMessage(expiresAt ? "Срок годности сохранён" : "Срок годности очищен");
+    } catch (saveError) {
+      setError(saveError instanceof Error ? saveError.message : "Не удалось сохранить срок годности");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  if (!rows.length || !warehouses.length) return null;
+
+  return <section className="expiry-manager" aria-label="Срок годности товара">
+    <div>
+      <span className="section-kicker">СРОК ГОДНОСТИ</span>
+      <h3>Указать вручную</h3>
+      <p>Срок привязан к товару и складу ФФ. Оставьте дату пустой, чтобы очистить её.</p>
+    </div>
+    <div className="expiry-editor">
+      <label><span>Товар</span><select value={selected?.key ?? ""} onChange={(event) => { setProductKey(event.target.value); setExpiryOverride(null); }}>{rows.map((row) => <option key={row.key} value={row.key}>{row.sku} · {row.name}</option>)}</select></label>
+      <label><span>Склад ФФ</span><select value={selectedWarehouseId} onChange={(event) => { setWarehouseId(event.target.value); setExpiryOverride(null); }}>{warehouses.map((warehouse) => <option key={warehouse.id} value={warehouse.id}>{formatManualWarehouse(warehouse)}</option>)}</select></label>
+      <label><span>Годен до</span><input type="date" value={expiresAt} onChange={(event) => setExpiryOverride(event.target.value)} /></label>
+      <button className="drawer-primary" type="button" onClick={() => void save()} disabled={saving}>{saving ? "Сохраняем…" : "Сохранить срок"}</button>
+    </div>
+    {message && <p className="form-status success">{message}</p>}
+    {error && <p className="form-status error">{error}</p>}
+  </section>;
 }
 
 export default function Home() {
@@ -175,6 +264,7 @@ export default function Home() {
   const [configured, setConfigured] = useState(true);
   const [loading, setLoading] = useState(true);
   const [ffDraft, setFfDraft] = useState<FfStock>({});
+  const [ffExpiryDraft, setFfExpiryDraft] = useState<FfExpiry>({});
   const [ffSaving, setFfSaving] = useState(false);
   const [ffSaveMessage, setFfSaveMessage] = useState<string | null>(null);
   const [ffSaveError, setFfSaveError] = useState<string | null>(null);
@@ -285,6 +375,7 @@ export default function Home() {
   const openProduct = (row: StockRow) => {
     setSelected(row);
     setFfDraft(blankFfStock(manualWarehouses, row.ffStock));
+    setFfExpiryDraft(blankFfExpiry(manualWarehouses, row.ffExpiry));
     setFfSaveMessage(null);
     setFfSaveError(null);
   };
@@ -298,9 +389,9 @@ export default function Home() {
       const response = await fetch("/api/ff-stock", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ productKey: selected.key, nmId: selected.nmId, sku: selected.sku, stock: ffDraft }),
+        body: JSON.stringify({ productKey: selected.key, nmId: selected.nmId, sku: selected.sku, stock: ffDraft, expiresAt: ffExpiryDraft }),
       });
-      const data = await response.json() as { stock?: FfStock; error?: string };
+      const data = await response.json() as { stock?: FfStock; expiresAt?: FfExpiry; error?: string };
       if (response.status === 401) {
         setAuthState("unauthenticated");
         return;
@@ -308,7 +399,7 @@ export default function Home() {
       if (!response.ok || !data.stock) throw new Error(data.error || "Не удалось сохранить остатки ФФ");
       const previous = blankFfStock(manualWarehouses, selected.ffStock);
       const nextStock = blankFfStock(manualWarehouses, data.stock);
-      const nextSelected = { ...selected, ffStock: nextStock };
+      const nextSelected = { ...selected, ffStock: nextStock, ffExpiry: blankFfExpiry(manualWarehouses, data.expiresAt) };
       setRows((current) => current.map((row) => row.key === selected.key ? nextSelected : row));
       setSelected(nextSelected);
       setTotals((current) => {
@@ -316,7 +407,7 @@ export default function Home() {
         for (const manualWarehouse of manualWarehouses) ffStock[manualWarehouse.id] = (ffStock[manualWarehouse.id] ?? 0) - (previous[manualWarehouse.id] ?? 0) + (nextStock[manualWarehouse.id] ?? 0);
         return { ...current, ffStock, ffTotal: sumFfStock(ffStock) };
       });
-      setFfSaveMessage("Остатки ФФ сохранены");
+      setFfSaveMessage("Остатки и срок годности сохранены");
     } catch (saveError) {
       setFfSaveError(saveError instanceof Error ? saveError.message : "Не удалось сохранить остатки ФФ");
     } finally {
@@ -379,18 +470,22 @@ export default function Home() {
         return;
       }
       if (!response.ok) throw new Error(data.error || "Не удалось загрузить остатки");
-      const importedBySku = new Map(importPreview.items.map((item) => [normalizedSku(item.sku), item.quantity]));
+      const importedBySku = new Map(importPreview.items.map((item) => [normalizedSku(item.sku), item]));
       setRows((current) => current.map((row) => {
-        const quantity = importedBySku.get(normalizedSku(row.sku));
-        if (quantity === undefined) return row;
+        const imported = importedBySku.get(normalizedSku(row.sku));
+        if (!imported) return row;
         const previous = row.ffStock[selectedImportWarehouseId] ?? 0;
-        return { ...row, ffStock: { ...row.ffStock, [selectedImportWarehouseId]: importMode === "add" ? previous + quantity : quantity } };
+        return {
+          ...row,
+          ffStock: { ...row.ffStock, [selectedImportWarehouseId]: importMode === "add" ? previous + imported.quantity : imported.quantity },
+          ffExpiry: imported.expiresAt === undefined ? row.ffExpiry : { ...row.ffExpiry, [selectedImportWarehouseId]: imported.expiresAt },
+        };
       }));
       setTotals((current) => {
         const existingRows = rows.filter((row) => importedBySku.has(normalizedSku(row.sku)));
         const previousTotal = existingRows.reduce((sum, row) => sum + (row.ffStock[selectedImportWarehouseId] ?? 0), 0);
         const nextTotal = existingRows.reduce((sum, row) => {
-          const quantity = importedBySku.get(normalizedSku(row.sku)) ?? 0;
+          const quantity = importedBySku.get(normalizedSku(row.sku))?.quantity ?? 0;
           return sum + (importMode === "add" ? (row.ffStock[selectedImportWarehouseId] ?? 0) + quantity : quantity);
         }, 0);
         const ffStock = { ...current.ffStock, [selectedImportWarehouseId]: (current.ffStock[selectedImportWarehouseId] ?? 0) - previousTotal + nextTotal };
@@ -433,8 +528,8 @@ export default function Home() {
   };
 
   const downloadCsv = (sourceRows: StockRow[], suffix: string) => {
-    const header = ["Артикул продавца", "Артикул WB", ...warehouseNames, "Всего на WB", ...manualWarehouses.map((item) => `ФФ ${formatManualWarehouse(item)}`), "FBS всего", "FBS Казань", "FBS Москва", "FBS Питер", "На приёмке", "Ожидают продажи", "Статус"];
-    const body = sourceRows.map((row) => [row.sku, row.nmId ?? "", ...warehouseNames.map((name) => row.warehouses[name] ?? 0), stockTotal(row), ...manualWarehouses.map((item) => row.ffStock[item.id] ?? 0), row.fbs, row.fbsByLocation.kazan, row.fbsByLocation.moscow, row.fbsByLocation.spb, row.receiving, row.toSale, row.status]);
+    const header = ["Артикул продавца", "Артикул WB", ...warehouseNames, "Всего на WB", ...manualWarehouses.flatMap((item) => [`ФФ ${formatManualWarehouse(item)}`, `Срок годности · ${formatManualWarehouse(item)}`]), "FBS всего", "FBS Казань", "FBS Москва", "FBS Питер", "На приёмке", "Ожидают продажи", "Статус"];
+    const body = sourceRows.map((row) => [row.sku, row.nmId ?? "", ...warehouseNames.map((name) => row.warehouses[name] ?? 0), stockTotal(row), ...manualWarehouses.flatMap((item) => [row.ffStock[item.id] ?? 0, row.ffExpiry?.[item.id] ?? ""]), row.fbs, row.fbsByLocation.kazan, row.fbsByLocation.moscow, row.fbsByLocation.spb, row.receiving, row.toSale, row.status]);
     const content = [header, ...body].map((line) => line.map((cell) => String(cell).replaceAll(";", ",")).join(";")).join("\n");
     const blob = new Blob(["\uFEFF" + content], { type: "text/csv;charset=utf-8" });
     const url = URL.createObjectURL(blob);
@@ -477,11 +572,49 @@ export default function Home() {
 
           {activeView === "manual" ? (
             <section className="manual-warehouses-panel">
-              <div className="section-heading"><div><span className="section-kicker">СКЛАДЫ ФУЛФИЛМЕНТА</span><h2>Куда отправляем товар</h2><p className="section-note">Добавляйте свои склады и загружайте остатки из Excel в нужный из них.</p></div></div>
-              <div className="manual-layout">
-                <article className="manual-card"><h3>Ваши склады</h3><div className="manual-warehouse-list">{manualWarehouses.map((item) => <div key={item.id}><span className="warehouse-pin">□</span><div><strong>{item.city}</strong><small>{item.name}</small></div></div>)}</div><form className="warehouse-add-form" onSubmit={addWarehouse}><h4>Добавить склад</h4><label><span>Город</span><input value={newWarehouseCity} onChange={(event) => setNewWarehouseCity(event.target.value)} placeholder="Например, Екатеринбург" maxLength={80} required /></label><label><span>Название</span><input value={newWarehouseName} onChange={(event) => setNewWarehouseName(event.target.value)} placeholder="Например, ФФ Урал" maxLength={120} required /></label><button className="drawer-primary" type="submit" disabled={warehouseSaving}>{warehouseSaving ? "Добавляем…" : "Добавить склад"}</button>{warehouseMessage && <p className="form-status success">{warehouseMessage}</p>}{warehouseError && <p className="form-status error">{warehouseError}</p>}</form></article>
-                <article className="manual-card import-card"><div><span className="section-kicker">EXCEL-ИМПОРТ</span><h3>Загрузить остатки</h3><p>Файл должен содержать столбцы «Артикул» и «Количество». Выберите склад, куда относится файл.</p></div><label className="import-file"><span>Выбрать Excel-файл</span><input type="file" accept=".xlsx,.xls,.csv" onChange={(event) => void chooseImportFile(event)} /></label>{importPreview && <div className="import-preview"><strong>{importPreview.fileName}</strong><span>Лист: {importPreview.sheetName} · {importPreview.items.length} артикулов{importPreview.skipped ? ` · пропущено строк: ${importPreview.skipped}` : ""}</span></div>}<div className="import-controls"><label><span>Склад</span><select value={selectedImportWarehouseId} onChange={(event) => setImportWarehouseId(event.target.value)}>{manualWarehouses.map((item) => <option value={item.id} key={item.id}>{formatManualWarehouse(item)}</option>)}</select></label><label><span>Как применить</span><select value={importMode} onChange={(event) => setImportMode(event.target.value as "replace" | "add")}><option value="replace">Заменить остатки из файла</option><option value="add">Прибавить к текущим остаткам</option></select></label></div><p className="import-hint">«Заменить» обновляет только артикулы из файла. Остальные остатки на складе не меняются.</p><button className="drawer-primary import-button" type="button" onClick={() => void importExcel()} disabled={!importPreview || !selectedImportWarehouseId || importLoading}>{importLoading ? "Загружаем…" : "Загрузить в выбранный склад"}</button>{importMessage && <p className="form-status success">{importMessage}</p>}{importError && <p className="form-status error">{importError}</p>}</article>
+              <div className="section-heading">
+                <div>
+                  <span className="section-kicker">СКЛАДЫ ФУЛФИЛМЕНТА</span>
+                  <h2>Куда отправляем товар</h2>
+                  <p className="section-note">Добавляйте свои склады, сроки годности и загружайте остатки из Excel в нужный из них.</p>
+                </div>
               </div>
+              <div className="manual-layout">
+                <article className="manual-card">
+                  <h3>Ваши склады</h3>
+                  <div className="manual-warehouse-list">{manualWarehouses.map((item) => <div key={item.id}><span className="warehouse-pin">□</span><div><strong>{item.city}</strong><small>{item.name}</small></div></div>)}</div>
+                  <form className="warehouse-add-form" onSubmit={addWarehouse}>
+                    <h4>Добавить склад</h4>
+                    <label><span>Город</span><input value={newWarehouseCity} onChange={(event) => setNewWarehouseCity(event.target.value)} placeholder="Например, Екатеринбург" maxLength={80} required /></label>
+                    <label><span>Название</span><input value={newWarehouseName} onChange={(event) => setNewWarehouseName(event.target.value)} placeholder="Например, ФФ Урал" maxLength={120} required /></label>
+                    <button className="drawer-primary" type="submit" disabled={warehouseSaving}>{warehouseSaving ? "Добавляем…" : "Добавить склад"}</button>
+                    {warehouseMessage && <p className="form-status success">{warehouseMessage}</p>}
+                    {warehouseError && <p className="form-status error">{warehouseError}</p>}
+                  </form>
+                </article>
+                <article className="manual-card import-card">
+                  <div>
+                    <span className="section-kicker">EXCEL-ИМПОРТ</span>
+                    <h3>Загрузить остатки и сроки</h3>
+                    <p>Нужны «Артикул» и «Количество». Необязательный столбец «Срок годности» — в формате 31.12.2026. Выберите склад для файла.</p>
+                  </div>
+                  <label className="import-file"><span>Выбрать Excel-файл</span><input type="file" accept=".xlsx,.xls,.csv" onChange={(event) => void chooseImportFile(event)} /></label>
+                  {importPreview && <div className="import-preview"><strong>{importPreview.fileName}</strong><span>Лист: {importPreview.sheetName} · {importPreview.items.length} артикулов{importPreview.hasExpiryColumn ? " · сроки считаны" : " · без сроков"}{importPreview.skipped ? ` · пропущено строк: ${importPreview.skipped}` : ""}</span></div>}
+                  <div className="import-controls">
+                    <label><span>Склад</span><select value={selectedImportWarehouseId} onChange={(event) => setImportWarehouseId(event.target.value)}>{manualWarehouses.map((item) => <option value={item.id} key={item.id}>{formatManualWarehouse(item)}</option>)}</select></label>
+                    <label><span>Как применить</span><select value={importMode} onChange={(event) => setImportMode(event.target.value as "replace" | "add")}><option value="replace">Заменить остатки из файла</option><option value="add">Прибавить к текущим остаткам</option></select></label>
+                  </div>
+                  <p className="import-hint">Если в файле нет столбца срока годности, сохранённые даты не меняются. «Заменить» обновляет только артикулы из файла.</p>
+                  <button className="drawer-primary import-button" type="button" onClick={() => void importExcel()} disabled={!importPreview || !selectedImportWarehouseId || importLoading}>{importLoading ? "Загружаем…" : "Загрузить в выбранный склад"}</button>
+                  {importMessage && <p className="form-status success">{importMessage}</p>}
+                  {importError && <p className="form-status error">{importError}</p>}
+                </article>
+              </div>
+              <ExpiryManager
+                rows={rows}
+                warehouses={manualWarehouses}
+                onSaved={(key, stock, expiresAt) => setRows((current) => current.map((row) => row.key === key ? { ...row, ffStock: stock, ffExpiry: expiresAt } : row))}
+              />
             </section>
           ) : <>
             <section className={`metric-grid ${activeView !== "overview" ? "view-hidden" : ""}`} aria-label="Ключевые показатели"><article className="metric-card featured"><div className="metric-top"><span>Остаток на складах WB</span><span className="trend up">● WB API</span></div><strong className="metric-value">{loading ? "—" : formatNumber.format(totals.available)} <small>шт.</small></strong><div className="spark-bars" aria-hidden="true">{[24,31,28,42,38,52,47,62,58,74,69,83].map((height, index) => <i key={index} style={{ height }} />)}</div><p>Фактический остаток · для FBS недоступен</p></article><article className="metric-card"><div className="metric-icon green">□</div><div className="metric-label">Остатки ФФ · вручную</div><strong className="metric-value">{loading ? "—" : formatNumber.format(totals.ffTotal)} <small>шт.</small></strong><p>{manualWarehouses.map((item) => `${item.city} ${totals.ffStock[item.id] ?? 0}`).join(" · ")}</p></article><article className="metric-card"><div className="metric-icon blue">→</div><div className="metric-label">Активные FBS</div><strong className="metric-value">{loading ? "—" : formatNumber.format(totals.fbs)} <small>шт.</small></strong><p>Казань <b>{totals.fbsByLocation.kazan}</b> · Москва <b>{totals.fbsByLocation.moscow}</b> · Питер <b>{totals.fbsByLocation.spb}</b></p></article><article className="metric-card"><div className="metric-icon amber">◷</div><div className="metric-label">Ожидают продажи</div><strong className="metric-value">{loading ? "—" : formatNumber.format(totals.toSale)} <small>шт.</small></strong><p><b>{totals.receiving}</b> ожидают приёмки WB</p></article></section>
