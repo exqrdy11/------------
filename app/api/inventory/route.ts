@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { emptyFfStock, listFfStocks, type FfStock } from "@/db/ff-stocks";
+import { emptyFfStock, listFfStocks, listFfWarehouses, stockForProduct, type FfStock, type ManualWarehouse } from "@/db/ff-stocks";
 import { isAdminRequest } from "@/lib/admin-auth";
 
 export const dynamic = "force-dynamic";
@@ -54,6 +54,7 @@ type DashboardPayload = {
   configured: true;
   rows: DashboardRow[];
   warehouseNames: string[];
+  manualWarehouses: ManualWarehouse[];
   totals: {
     available: number;
     ffTotal: number;
@@ -209,22 +210,26 @@ function warningFor(section: string, error: unknown) {
 
 async function attachFfStocks(payload: DashboardPayload): Promise<DashboardPayload> {
   try {
-    const byProduct = await listFfStocks();
-    const rows = payload.rows.map((row) => ({ ...row, ffStock: byProduct.get(row.key) ?? emptyFfStock() }));
-    const ffStock = rows.reduce((total, row) => ({
-      kazan: total.kazan + row.ffStock.kazan,
-      moscow: total.moscow + row.ffStock.moscow,
-      spb: total.spb + row.ffStock.spb,
-    }), emptyFfStock());
+    const [manualWarehouses, lookup] = await Promise.all([listFfWarehouses(), listFfStocks()]);
+    const rows = payload.rows.map((row) => ({
+      ...row,
+      ffStock: stockForProduct(lookup, { productKey: row.key, sku: row.sku }, manualWarehouses),
+    }));
+    const ffStock = rows.reduce((total, row) => {
+      for (const warehouse of manualWarehouses) total[warehouse.id] = (total[warehouse.id] ?? 0) + (row.ffStock[warehouse.id] ?? 0);
+      return total;
+    }, emptyFfStock(manualWarehouses));
     return {
       ...payload,
       rows,
-      totals: { ...payload.totals, ffStock, ffTotal: ffStock.kazan + ffStock.moscow + ffStock.spb },
+      manualWarehouses,
+      totals: { ...payload.totals, ffStock, ffTotal: Object.values(ffStock).reduce((sum, value) => sum + value, 0) },
     };
   } catch (error) {
     return {
       ...payload,
       rows: payload.rows.map((row) => ({ ...row, ffStock: emptyFfStock() })),
+      manualWarehouses: [],
       warnings: [...payload.warnings, warningFor("Ручные остатки ФФ", error)],
     };
   }
@@ -344,7 +349,7 @@ export async function GET(request: Request) {
     activeSupplies,
   };
   const updatedAt = new Date().toISOString();
-  const payload: DashboardPayload = { configured: true, rows, warehouseNames, totals, warnings, updatedAt };
+  const payload: DashboardPayload = { configured: true, rows, warehouseNames, manualWarehouses: [], totals, warnings, updatedAt };
   memoryCache = { createdAt: now, expiresAt: now + CACHE_LIFETIME_MS, payload };
 
   return NextResponse.json(await attachFfStocks(payload), { headers: { "Cache-Control": "private, max-age=0" } });

@@ -1,10 +1,8 @@
 import { NextResponse } from "next/server";
-import { emptyFfStock, saveFfStock, type FfLocationKey } from "@/db/ff-stocks";
+import { listFfWarehouses, saveFfStock, type FfStock } from "@/db/ff-stocks";
 import { isAdminRequest } from "@/lib/admin-auth";
 
 export const dynamic = "force-dynamic";
-
-const locations: FfLocationKey[] = ["kazan", "moscow", "spb"];
 
 export async function POST(request: Request) {
   if (!await isAdminRequest(request)) {
@@ -15,7 +13,7 @@ export async function POST(request: Request) {
       productKey?: string;
       nmId?: number | null;
       sku?: string;
-      stock?: Partial<Record<FfLocationKey, number>>;
+      stock?: Partial<FfStock>;
     };
     const productKey = payload.productKey?.trim() ?? "";
     const sku = payload.sku?.trim().slice(0, 200) ?? "";
@@ -24,13 +22,14 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: "Не удалось определить артикул" }, { status: 400 });
     }
 
-    const stock = emptyFfStock();
-    for (const location of locations) {
-      const value = Number(payload.stock?.[location] ?? 0);
+    const warehouses = await listFfWarehouses();
+    const stock: FfStock = {};
+    for (const warehouse of warehouses) {
+      const value = Number(payload.stock?.[warehouse.id] ?? 0);
       if (!Number.isFinite(value) || value < 0 || value > 10_000_000) {
         return NextResponse.json({ error: "Количество должно быть от 0 до 10 000 000" }, { status: 400 });
       }
-      stock[location] = Math.floor(value);
+      stock[warehouse.id] = Math.floor(value);
     }
 
     await saveFfStock({
