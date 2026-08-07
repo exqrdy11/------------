@@ -90,6 +90,10 @@ function displayExpiry(value: string | null | undefined) {
   return value || null;
 }
 
+function productKeyFor(input: { productKey: string; sku: string }) {
+  return input.productKey || (normalizeSku(input.sku) ? `sku:${normalizeSku(input.sku)}` : "");
+}
+
 export function emptyFfStock(warehouses = defaultWarehouses): FfStock {
   return Object.fromEntries(warehouses.map((warehouse) => [warehouse.id, 0]));
 }
@@ -297,7 +301,7 @@ export async function saveFfStock(input: { cabinetId: CabinetId; productKey: str
   const d1 = await getFfStockDb();
   const warehouses = await listFfWarehouses(input.cabinetId);
   const updatedAt = new Date().toISOString();
-  const productKey = normalizeSku(input.sku) ? `sku:${normalizeSku(input.sku)}` : input.productKey;
+  const productKey = productKeyFor(input);
   const stock = emptyFfStock(warehouses);
   const expiresAt = emptyFfExpiry(warehouses);
   for (const warehouse of warehouses) stock[warehouse.id] = Math.max(0, Math.floor(Number(input.stock[warehouse.id]) || 0));
@@ -320,7 +324,7 @@ export async function saveFfStockBatch(input: { cabinetId: CabinetId; productKey
   const d1 = await getFfStockDb();
   const warehouses = await listFfWarehouses(input.cabinetId);
   if (!warehouses.some((warehouse) => warehouse.id === input.warehouseId)) throw new Error("Склад не найден");
-  const productKey = normalizeSku(input.sku) ? `sku:${normalizeSku(input.sku)}` : input.productKey;
+  const productKey = productKeyFor(input);
   const updatedAt = new Date().toISOString();
   const batchCode = input.batchCode.trim();
   const expiresAt = databaseExpiry(input.expiresAt);
@@ -345,14 +349,15 @@ export async function deleteFfStockBatch(input: { cabinetId: CabinetId; productK
   return saveFfStockBatch({ ...input, quantity: 0 });
 }
 
-export async function importFfStocks(input: { cabinetId: CabinetId; warehouseId: string; mode: "replace" | "add"; items: Array<{ sku: string; quantity: number; batchCode?: string; expiresAt?: string | null }> }) {
+export async function importFfStocks(input: { cabinetId: CabinetId; warehouseId: string; mode: "replace" | "add"; items: Array<{ sku: string; nmId: number | null; quantity: number; batchCode?: string; expiresAt?: string | null }> }) {
   const d1 = await getFfStockDb();
   const warehouses = await listFfWarehouses(input.cabinetId);
   if (!warehouses.some((warehouse) => warehouse.id === input.warehouseId)) throw new Error("Склад не найден");
   const updatedAt = new Date().toISOString();
   const products = [...new Map(input.items.map((item) => {
     const sku = normalizeSku(item.sku);
-    return [sku, { productKey: `sku:${sku}`, sku: item.sku.trim() }];
+    const productKey = item.nmId ? `nm:${item.nmId}` : `sku:${sku}`;
+    return [productKey, { productKey, nmId: item.nmId, sku: item.sku.trim() }];
   })).values()];
 
   if (input.mode === "replace") {
@@ -361,26 +366,27 @@ export async function importFfStocks(input: { cabinetId: CabinetId; warehouseId:
 
   const inserts = input.items.filter((item) => item.quantity > 0).map((item) => {
     const sku = normalizeSku(item.sku);
+    const productKey = item.nmId ? `nm:${item.nmId}` : `sku:${sku}`;
     const statement = input.mode === "add" ? `
       INSERT INTO ff_stock_batches (cabinet_id, product_key, nm_id, sku, location, batch_code, expires_at, quantity, updated_at)
-      VALUES (?, ?, NULL, ?, ?, ?, ?, ?, ?)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(cabinet_id, product_key, location, batch_code, expires_at) DO UPDATE SET
         sku = excluded.sku,
         quantity = ff_stock_batches.quantity + excluded.quantity,
         updated_at = excluded.updated_at
     ` : `
       INSERT INTO ff_stock_batches (cabinet_id, product_key, nm_id, sku, location, batch_code, expires_at, quantity, updated_at)
-      VALUES (?, ?, NULL, ?, ?, ?, ?, ?, ?)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(cabinet_id, product_key, location, batch_code, expires_at) DO UPDATE SET
         sku = excluded.sku,
         quantity = excluded.quantity,
         updated_at = excluded.updated_at
     `;
-    return d1.prepare(statement).bind(input.cabinetId, `sku:${sku}`, item.sku.trim(), input.warehouseId, item.batchCode?.trim() ?? "", databaseExpiry(item.expiresAt), item.quantity, updatedAt);
+    return d1.prepare(statement).bind(input.cabinetId, productKey, item.nmId, item.sku.trim(), input.warehouseId, item.batchCode?.trim() ?? "", databaseExpiry(item.expiresAt), item.quantity, updatedAt);
   });
   if (inserts.length) await d1.batch(inserts);
   for (const product of products) {
-    await syncStockSummary({ d1, cabinetId: input.cabinetId, productKey: product.productKey, nmId: null, sku: product.sku, warehouseId: input.warehouseId, updatedAt });
+    await syncStockSummary({ d1, cabinetId: input.cabinetId, productKey: product.productKey, nmId: product.nmId, sku: product.sku, warehouseId: input.warehouseId, updatedAt });
   }
   return { imported: input.items.length };
 }

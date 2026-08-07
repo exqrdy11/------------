@@ -63,7 +63,7 @@ type InventoryResponse = {
   error?: string;
 };
 
-type ImportItem = { sku: string; quantity: number; batchCode: string; expiresAt?: string | null };
+type ImportItem = { sku: string; nmId: number | null; quantity: number; batchCode: string; expiresAt?: string | null };
 type ImportPreview = { fileName: string; sheetName: string; items: ImportItem[]; skipped: number; hasExpiryColumn: boolean; hasBatchColumn: boolean };
 
 const defaultManualWarehouses: ManualWarehouse[] = [
@@ -130,6 +130,14 @@ function parseQuantity(value: unknown) {
 function parseExpiryDate(value: unknown) {
   const raw = String(value ?? "").trim();
   if (!raw) return null;
+  const usDate = raw.match(/^(\d{1,2})\/(\d{1,2})\/(\d{2}|\d{4})$/);
+  if (usDate) {
+    const month = Number(usDate[1]);
+    const day = Number(usDate[2]);
+    const year = usDate[3].length === 2 ? 2000 + Number(usDate[3]) : Number(usDate[3]);
+    const date = new Date(Date.UTC(year, month - 1, day));
+    if (date.getUTCFullYear() === year && date.getUTCMonth() === month - 1 && date.getUTCDate() === day) return `${year.toString().padStart(4, "0")}-${month.toString().padStart(2, "0")}-${day.toString().padStart(2, "0")}`;
+  }
   const match = raw.match(/^(?:(\d{4})[-./](\d{1,2})[-./](\d{1,2})|(\d{1,2})[-./](\d{1,2})[-./](\d{4}))$/);
   if (!match) return null;
   const year = Number(match[1] ?? match[6]);
@@ -148,13 +156,14 @@ async function parseExcelFile(file: File): Promise<ImportPreview> {
   const rows = XLSX.utils.sheet_to_json<unknown[]>(worksheet, { header: 1, defval: "", raw: false });
   const headerRowIndex = rows.slice(0, 10).findIndex((row) => {
     const headers = row.map(normalizedHeader);
-    return headers.some((header) => ["артикул", "артикулпродавца", "sku", "vendorcode"].includes(header))
+    return headers.some((header) => ["артикул", "артикулпродавца", "sku", "vendorcode", "артикулwb", "nmid", "nm", "номенклатуравб"].includes(header))
       && headers.some((header) => ["количество", "колво", "остаток", "qty", "quantity"].includes(header));
   });
-  if (headerRowIndex < 0) throw new Error("Нужны столбцы «Артикул» и «Количество»");
+  if (headerRowIndex < 0) throw new Error("Нужны столбцы «Артикул WB» или «Артикул продавца», а также «Количество»");
 
   const headers = rows[headerRowIndex].map(normalizedHeader);
   const skuColumn = headers.findIndex((header) => ["артикул", "артикулпродавца", "sku", "vendorcode"].includes(header));
+  const nmIdColumn = headers.findIndex((header) => ["артикулwb", "nmid", "nm", "номенклатуравб"].includes(header));
   const quantityColumn = headers.findIndex((header) => ["количество", "колво", "остаток", "qty", "quantity"].includes(header));
   const expiryColumn = headers.findIndex((header) => ["срокгодности", "годендо", "датаокончаниясрокагодности", "expiry", "expirydate", "expirationdate"].includes(header));
   const batchColumn = headers.findIndex((header) => ["партия", "номерпартии", "batch", "batchcode", "lot", "lotnumber"].includes(header));
@@ -164,23 +173,25 @@ async function parseExcelFile(file: File): Promise<ImportPreview> {
   let skipped = 0;
 
   for (const row of rows.slice(headerRowIndex + 1)) {
-    const sku = String(row[skuColumn] ?? "").trim();
+    const sku = skuColumn >= 0 ? String(row[skuColumn] ?? "").trim() : "";
+    const nmIdValue = nmIdColumn >= 0 ? Number(String(row[nmIdColumn] ?? "").trim()) : Number.NaN;
+    const nmId = Number.isInteger(nmIdValue) && nmIdValue > 0 && nmIdValue <= 2_147_483_647 ? nmIdValue : null;
     const quantity = parseQuantity(row[quantityColumn]);
     const batchCode = hasBatchColumn ? String(row[batchColumn] ?? "").trim().slice(0, 120) : "";
     const expiryValue = hasExpiryColumn ? String(row[expiryColumn] ?? "").trim() : "";
     const expiresAt = hasExpiryColumn ? parseExpiryDate(row[expiryColumn]) : undefined;
-    if (!sku && !String(row[quantityColumn] ?? "").trim()) continue;
-    if (!sku || !normalizedSku(sku) || !Number.isFinite(quantity) || quantity < 0 || quantity > 10_000_000 || (hasExpiryColumn && Boolean(expiryValue) && !expiresAt)) {
+    if (!sku && !nmId && !String(row[quantityColumn] ?? "").trim()) continue;
+    if ((!sku && !nmId) || !Number.isFinite(quantity) || quantity < 0 || quantity > 10_000_000 || (hasExpiryColumn && Boolean(expiryValue) && !expiresAt)) {
       skipped += 1;
       continue;
     }
-    const key = `${normalizedSku(sku)}\u0000${batchCode}\u0000${expiresAt ?? ""}`;
+    const key = `${nmId ? `nm:${nmId}` : `sku:${normalizedSku(sku)}`}\u0000${batchCode}\u0000${expiresAt ?? ""}`;
     const previous = grouped.get(key);
-    grouped.set(key, { sku, batchCode, quantity: (previous?.quantity ?? 0) + quantity, ...(hasExpiryColumn ? { expiresAt: expiresAt ?? null } : {}) });
+    grouped.set(key, { sku, nmId, batchCode, quantity: (previous?.quantity ?? 0) + quantity, ...(hasExpiryColumn ? { expiresAt: expiresAt ?? null } : {}) });
   }
 
   const items = [...grouped.values()];
-  if (!items.length) throw new Error("Не нашли ни одной корректной строки с артикулом и количеством");
+  if (!items.length) throw new Error("Не нашли ни одной корректной строки с артикулом WB или артикулом продавца и количеством");
   if (items.some((item) => item.quantity > 10_000_000)) throw new Error("Количество по одной партии не должно превышать 10 000 000");
   return { fileName: file.name, sheetName, items, skipped, hasExpiryColumn, hasBatchColumn };
 }
@@ -665,7 +676,7 @@ export default function Home() {
                   <div>
                     <span className="section-kicker">EXCEL-ИМПОРТ</span>
                     <h3>Загрузить остатки и сроки</h3>
-                    <p>Нужны «Артикул» и «Количество». Для отдельных партий добавьте «Партия» и «Срок годности» в формате 31.12.2026. Выберите склад для файла.</p>
+                    <p>Укажите «Артикул WB» (nmID) или «Артикул продавца» и «Количество». Для отдельных партий добавьте «Партия» и «Срок годности».</p>
                   </div>
                   <div className="import-file-actions">
                     <a className="import-template-link" href="/ff-stock-import-template.xlsx" download="Шаблон_остатков_ФФ.xlsx">Скачать шаблон Excel ↓</a>
