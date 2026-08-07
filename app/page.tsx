@@ -4,7 +4,7 @@ import { type ChangeEvent, type FormEvent, useCallback, useEffect, useMemo, useS
 import * as XLSX from "xlsx";
 
 type StockStatus = "В норме" | "Мало" | "Заканчивается";
-type View = "overview" | "stock" | "fbs" | "sales" | "reports" | "fulfillment" | "manual";
+type View = "overview" | "stock" | "fbs" | "sales" | "reports" | "fulfillment" | "manual" | "cabinets";
 type FbsBreakdown = Record<string, number>;
 type FfStock = Record<string, number>;
 type FfExpiry = Record<string, string | null>;
@@ -85,6 +85,7 @@ const viewTitles: Record<View, { eyebrow: string; title: string }> = {
   reports: { eyebrow: "ВЫГРУЗКИ · CSV", title: "Отчёты по кабинету" },
   fulfillment: { eyebrow: "ФУЛФИЛМЕНТ · СКЛАДЫ", title: "ФФ — остатки и движение" },
   manual: { eyebrow: "ФУЛФИЛМЕНТ · РУЧНЫЕ ОСТАТКИ", title: "Склады ФФ и импорт Excel" },
+  cabinets: { eyebrow: "КАБИНЕТЫ · МАРКЕТПЛЕЙСЫ", title: "Выберите кабинет" },
 };
 
 function stockTotal(row: StockRow) {
@@ -560,7 +561,7 @@ export default function Home() {
           <button type="button" className={`nav-item ${activeView === "fulfillment" || activeView === "manual" ? "active" : ""}`} onClick={() => navigateTo("fulfillment")}><span className="nav-symbol">▤</span>ФФ</button>
           <button type="button" className={`nav-item ${activeView === "reports" ? "active" : ""}`} onClick={() => navigateTo("reports")}><span className="nav-symbol">≡</span>Отчёты</button>
         </nav>
-        <div className="sidebar-bottom"><div className="connection"><span className={error ? "live-dot offline" : "live-dot"} />{error ? "Нужна проверка подключения" : "Подключено к WB API"}</div><div className="profile"><span className="avatar">WB</span><span><strong>Wildberries</strong><small>{configured ? "Рабочий кабинет" : "Токен не добавлен"}</small></span><span className="chevron">›</span></div></div>
+        <div className="sidebar-bottom"><div className="connection"><span className={error ? "live-dot offline" : "live-dot"} />{error ? "Нужна проверка подключения" : "Подключено к WB API"}</div><button type="button" className="profile" onClick={() => navigateTo("cabinets")}><span className="avatar">WB</span><span><strong>{cabinet?.name ?? "Wildberries"}</strong><small>{configured ? "Кабинеты и подключения" : "Токен не добавлен"}</small></span><span className="chevron">›</span></button></div>
       </aside>
 
       <section className="workspace">
@@ -575,7 +576,37 @@ export default function Home() {
           {error && <section className="api-notice" role="alert"><span className="api-notice-icon">!</span><div><strong>{error}</strong><p>{configured ? "Для полной загрузки токену нужны категории: Контент, Маркетплейс и Аналитика." : "Безопасный токен хранится только на сервере и не передаётся в браузер."}</p></div><button type="button" onClick={() => void loadData(true)}>Проверить снова</button></section>}
           {!error && warnings.length > 0 && <section className="warning-strip"><span>!</span><p>{warnings.join(" · ")}</p></section>}
 
-          {activeView === "fulfillment" ? (
+          {activeView === "cabinets" ? (
+            <section className="cabinet-manager">
+              <div className="section-heading cabinet-manager-heading">
+                <div><span className="section-kicker">МАРКЕТПЛЕЙС → КАБИНЕТ → СВОИ ФФ</span><h2>Кабинеты изолированы друг от друга</h2><p className="section-note">У каждого кабинета свои товары, ФФ-склады, остатки, заказы, поставки и продажи. Данные между кабинетами не смешиваются.</p></div>
+                <button className="secondary-btn cabinet-back-btn" type="button" onClick={() => navigateTo("overview")}>К обзору</button>
+              </div>
+              <div className="cabinet-platform-list">
+                <article className="cabinet-platform-card wb-platform">
+                  <div className="cabinet-platform-head"><span className="platform-mark wb-mark">WB</span><div><strong>Wildberries</strong><small>2 отдельных кабинета</small></div></div>
+                  <div className="cabinet-account-list">
+                    {[{ id: "metanutrix", name: "Metanutrix" }, { id: "trusthome", name: "TrustHome" }].map((account) => {
+                      const current = cabinet?.id === account.id;
+                      return <div className={`cabinet-account ${current ? "current" : ""}`} key={account.id}><span><strong>{account.name}</strong><small>Свои ФФ и остатки</small></span>{current ? <b>Открыт</b> : <button type="button" onClick={() => void logoutAdmin()}>Войти</button>}</div>;
+                    })}
+                  </div>
+                  <p>Нажмите «Войти», затем используйте учётные данные нужного кабинета.</p>
+                </article>
+                <article className="cabinet-platform-card pending-platform">
+                  <div className="cabinet-platform-head"><span className="platform-mark ym-mark">ЯМ</span><div><strong>Яндекс Маркет</strong><small>Кабинет не подключён</small></div></div>
+                  <div className="platform-connect"><strong>Подключим отдельный кабинет</strong><span>Понадобятся API-ключ и ID кампании продавца.</span></div>
+                  <p>После подключения появятся только его ФФ-склады, товары, поставки и продажи.</p>
+                </article>
+                <article className="cabinet-platform-card pending-platform">
+                  <div className="cabinet-platform-head"><span className="platform-mark oz-mark">OZ</span><div><strong>Ozon Seller</strong><small>Кабинет не подключён</small></div></div>
+                  <div className="platform-connect"><strong>Подключим отдельный кабинет</strong><span>Понадобятся Client ID и API-ключ Ozon.</span></div>
+                  <p>После подключения появятся только его ФФ-склады, товары, поставки и продажи.</p>
+                </article>
+              </div>
+              <p className="cabinet-manager-note">При добавлении нового кабинета сначала создаётся его отдельный контур, затем в нём настраиваются собственные ФФ-склады. Никакие остатки не копируются из WB.</p>
+            </section>
+          ) : activeView === "fulfillment" ? (
             <section className="fulfillment-panel">
               {!selectedFulfillmentWarehouse ? <>
                 <div className="section-heading fulfillment-heading">
