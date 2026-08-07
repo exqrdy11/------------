@@ -11,7 +11,7 @@ export async function POST(request: Request) {
     const payload = await request.json() as {
       warehouseId?: unknown;
       mode?: unknown;
-      items?: Array<{ sku?: unknown; quantity?: unknown; expiresAt?: unknown }>;
+      items?: Array<{ sku?: unknown; quantity?: unknown; batchCode?: unknown; expiresAt?: unknown }>;
     };
     if (typeof payload.warehouseId !== "string" || !["replace", "add"].includes(String(payload.mode)) || !Array.isArray(payload.items)) {
       return NextResponse.json({ error: "Проверьте склад и формат импорта" }, { status: 400 });
@@ -20,9 +20,10 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: "В файле должно быть от 1 до 5 000 строк" }, { status: 400 });
     }
 
-    const grouped = new Map<string, { sku: string; quantity: number; expiresAt?: string | null }>();
+    const grouped = new Map<string, { sku: string; quantity: number; batchCode: string; expiresAt?: string | null }>();
     for (const item of payload.items) {
       const sku = typeof item.sku === "string" ? item.sku.trim().slice(0, 200) : "";
+      const batchCode = typeof item.batchCode === "string" ? item.batchCode.trim().slice(0, 120) : "";
       const quantity = Math.floor(Number(item.quantity));
       if (!sku || !normalizeSku(sku) || !Number.isFinite(quantity) || quantity < 0 || quantity > 10_000_000) {
         return NextResponse.json({ error: "Каждая строка должна содержать артикул и количество от 0 до 10 000 000" }, { status: 400 });
@@ -31,14 +32,13 @@ export async function POST(request: Request) {
       if (expiresAt !== undefined && expiresAt !== null && (typeof expiresAt !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(expiresAt))) {
         return NextResponse.json({ error: "Срок годности укажите в формате ГГГГ-ММ-ДД" }, { status: 400 });
       }
-      const key = normalizeSku(sku);
+      const key = `${normalizeSku(sku)}\u0000${batchCode}\u0000${expiresAt ?? ""}`;
       const current = grouped.get(key);
-      const nextExpiry = expiresAt === undefined ? current?.expiresAt : (expiresAt || null);
-      grouped.set(key, { sku, quantity: (current?.quantity ?? 0) + quantity, ...(nextExpiry !== undefined ? { expiresAt: nextExpiry } : {}) });
+      grouped.set(key, { sku, batchCode, quantity: (current?.quantity ?? 0) + quantity, ...(expiresAt !== undefined ? { expiresAt: expiresAt || null } : {}) });
     }
 
     const items = [...grouped.values()];
-    if (items.some((item) => item.quantity > 10_000_000)) return NextResponse.json({ error: "Количество по артикулу не должно превышать 10 000 000" }, { status: 400 });
+    if (items.some((item) => item.quantity > 10_000_000)) return NextResponse.json({ error: "Количество по партии не должно превышать 10 000 000" }, { status: 400 });
     const result = await importFfStocks({ cabinetId: cabinet, warehouseId: payload.warehouseId, mode: payload.mode as "replace" | "add", items });
     return NextResponse.json(result);
   } catch (error) {

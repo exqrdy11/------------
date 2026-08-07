@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { emptyFfExpiry, emptyFfStock, expiryForProduct, listFfStocks, listFfWarehouses, stockForProduct, type FfExpiry, type FfStock, type ManualWarehouse } from "@/db/ff-stocks";
+import { batchesForProduct, emptyFfBatches, emptyFfExpiry, emptyFfStock, expiryForProduct, listFfStocks, listFfWarehouses, stockForProduct, type FfBatches, type FfExpiry, type FfStock, type ManualWarehouse } from "@/db/ff-stocks";
 import { cabinetSummary, cabinetToken, getAdminCabinet, type CabinetId, type CabinetSummary } from "@/lib/admin-auth";
 
 export const dynamic = "force-dynamic";
@@ -37,6 +37,7 @@ type DashboardRow = {
   warehouses: Record<string, number>;
   ffStock: FfStock;
   ffExpiry: FfExpiry;
+  ffBatches: FfBatches;
   fbs: number;
   fbsByLocation: FbsBreakdown;
   receiving: number;
@@ -193,6 +194,7 @@ function getOrCreateRow(map: Map<string, DashboardRow>, input: { nmId?: number; 
     warehouses: {},
     ffStock: emptyFfStock(),
     ffExpiry: emptyFfExpiry(),
+    ffBatches: emptyFfBatches(),
     fbs: 0,
     fbsByLocation: emptyFbsBreakdown(),
     receiving: 0,
@@ -218,6 +220,7 @@ async function attachFfStocks(payload: DashboardPayload, cabinetId: CabinetId): 
       ...row,
       ffStock: stockForProduct(lookup, { productKey: row.key, sku: row.sku }, manualWarehouses),
       ffExpiry: expiryForProduct(lookup, { productKey: row.key, sku: row.sku }, manualWarehouses),
+      ffBatches: batchesForProduct(lookup, { productKey: row.key, sku: row.sku }, manualWarehouses),
     }));
     const ffStock = rows.reduce((total, row) => {
       for (const warehouse of manualWarehouses) total[warehouse.id] = (total[warehouse.id] ?? 0) + (row.ffStock[warehouse.id] ?? 0);
@@ -232,7 +235,7 @@ async function attachFfStocks(payload: DashboardPayload, cabinetId: CabinetId): 
   } catch (error) {
     return {
       ...payload,
-      rows: payload.rows.map((row) => ({ ...row, ffStock: emptyFfStock(), ffExpiry: emptyFfExpiry() })),
+      rows: payload.rows.map((row) => ({ ...row, ffStock: emptyFfStock(), ffExpiry: emptyFfExpiry(), ffBatches: emptyFfBatches() })),
       manualWarehouses: [],
       warnings: [...payload.warnings, warningFor("Ручные остатки ФФ", error)],
     };
