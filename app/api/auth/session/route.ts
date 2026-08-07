@@ -1,9 +1,9 @@
 import { NextResponse } from "next/server";
-import { cabinetSummary, getAdminCabinet } from "@/lib/admin-auth";
+import { availableCabinets, cabinetSummary, getAdminSession } from "@/lib/admin-auth";
 
 export const dynamic = "force-dynamic";
 
 export async function GET(request: Request) {
-  const cabinet = await getAdminCabinet(request);
-  return NextResponse.json({ authenticated: Boolean(cabinet), cabinet: cabinet ? cabinetSummary(cabinet) : null }, { headers: { "Cache-Control": "no-store" } });
+  const session = await getAdminSession(request);
+  return NextResponse.json({ authenticated: Boolean(session), cabinet: session ? cabinetSummary(session.cabinetId) : null, cabinets: session ? availableCabinets(session.ownerId) : [] }, { headers: { "Cache-Control": "no-store" } });
 }

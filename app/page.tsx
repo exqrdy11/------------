@@ -208,6 +208,9 @@ function ExpiryManager({ rows, warehouses }: {
 export default function Home() {
   const [authState, setAuthState] = useState<"checking" | "authenticated" | "unauthenticated">("checking");
   const [cabinet, setCabinet] = useState<CabinetSummary | null>(null);
+  const [availableCabinets, setAvailableCabinets] = useState<CabinetSummary[]>([]);
+  const [cabinetSwitchingId, setCabinetSwitchingId] = useState<CabinetSummary["id"] | null>(null);
+  const [cabinetSwitchError, setCabinetSwitchError] = useState<string | null>(null);
   const [adminLogin, setAdminLogin] = useState("");
   const [adminPassword, setAdminPassword] = useState("");
   const [loginLoading, setLoginLoading] = useState(false);
@@ -285,9 +288,10 @@ export default function Home() {
     void (async () => {
       try {
         const response = await fetch("/api/auth/session", { cache: "no-store" });
-        const data = await response.json() as { authenticated?: boolean; cabinet?: CabinetSummary | null };
+        const data = await response.json() as { authenticated?: boolean; cabinet?: CabinetSummary | null; cabinets?: CabinetSummary[] };
         setAuthState(data.authenticated ? "authenticated" : "unauthenticated");
         setCabinet(data.cabinet ?? null);
+        setAvailableCabinets(data.cabinets ?? []);
       } catch {
         setAuthState("unauthenticated");
       }
@@ -508,10 +512,11 @@ export default function Home() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ login: adminLogin, password: adminPassword }),
       });
-      const data = await response.json() as { authenticated?: boolean; cabinet?: CabinetSummary; error?: string };
+      const data = await response.json() as { authenticated?: boolean; cabinet?: CabinetSummary; cabinets?: CabinetSummary[]; error?: string };
       if (!response.ok || !data.authenticated) throw new Error(data.error || "Не удалось выполнить вход");
       setAdminPassword("");
       setCabinet(data.cabinet ?? null);
+      setAvailableCabinets(data.cabinets ?? []);
       setAuthState("authenticated");
     } catch (authError) {
       setLoginError(authError instanceof Error ? authError.message : "Не удалось выполнить вход");
@@ -525,7 +530,43 @@ export default function Home() {
     setRows([]);
     setSelected(null);
     setCabinet(null);
+    setAvailableCabinets([]);
     setAuthState("unauthenticated");
+  };
+
+  const switchCabinet = async (cabinetId: CabinetSummary["id"]) => {
+    if (cabinetId === cabinet?.id) return;
+    setCabinetSwitchingId(cabinetId);
+    setCabinetSwitchError(null);
+    try {
+      const response = await fetch("/api/auth/switch-cabinet", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ cabinetId }),
+      });
+      const data = await response.json() as { authenticated?: boolean; cabinet?: CabinetSummary; cabinets?: CabinetSummary[]; error?: string };
+      if (response.status === 401) {
+        setAuthState("unauthenticated");
+        return;
+      }
+      if (!response.ok || !data.cabinet) throw new Error(data.error || "Не удалось открыть кампанию");
+      setCabinet(data.cabinet);
+      setAvailableCabinets(data.cabinets ?? []);
+      setRows([]);
+      setWarehouseNames([]);
+      setTotals(emptyTotals);
+      setManualWarehouses(defaultManualWarehouses);
+      setSelected(null);
+      setSelectedFulfillmentWarehouseId(null);
+      setQuery("");
+      setFilter("Все");
+      setActiveView("overview");
+      await Promise.all([loadData(true), loadManualWarehouses()]);
+    } catch (switchError) {
+      setCabinetSwitchError(switchError instanceof Error ? switchError.message : "Не удалось открыть кампанию");
+    } finally {
+      setCabinetSwitchingId(null);
+    }
   };
 
   const downloadCsv = (sourceRows: StockRow[], suffix: string) => {
@@ -569,9 +610,9 @@ export default function Home() {
 
         <div className="content" id="overview">
           {cabinet && <section className={`cabinet-strip ${cabinet.configured ? "ready" : "waiting"}`}>
-            <div><span className="cabinet-strip-mark">WB</span><span><small>ТЕКУЩИЙ КАБИНЕТ</small><strong>{cabinet.name}</strong></span></div>
-            <p>{cabinet.configured ? "Данные, склады ФФ и сроки годности отделены от второго кабинета." : "Ожидает API-токен Wildberries. Вход и отдельные склады уже готовы."}</p>
-            <button type="button" onClick={() => void logoutAdmin()}>Сменить кабинет</button>
+            <div><span className="cabinet-strip-mark">WB</span><span><small>ТЕКУЩАЯ КАМПАНИЯ</small><strong>{cabinet.name}</strong></span></div>
+            <p>{cabinet.configured ? "Свои товары, ФФ-склады и сроки годности. Переключение кампаний не требует нового входа." : "Ожидает API-токен Wildberries. Вход и отдельные склады уже готовы."}</p>
+            <button type="button" onClick={() => navigateTo("cabinets")}>Сменить кампанию</button>
           </section>}
           {error && <section className="api-notice" role="alert"><span className="api-notice-icon">!</span><div><strong>{error}</strong><p>{configured ? "Для полной загрузки токену нужны категории: Контент, Маркетплейс и Аналитика." : "Безопасный токен хранится только на сервере и не передаётся в браузер."}</p></div><button type="button" onClick={() => void loadData(true)}>Проверить снова</button></section>}
           {!error && warnings.length > 0 && <section className="warning-strip"><span>!</span><p>{warnings.join(" · ")}</p></section>}
@@ -579,32 +620,33 @@ export default function Home() {
           {activeView === "cabinets" ? (
             <section className="cabinet-manager">
               <div className="section-heading cabinet-manager-heading">
-                <div><span className="section-kicker">МАРКЕТПЛЕЙС → КАБИНЕТ → СВОИ ФФ</span><h2>Кабинеты изолированы друг от друга</h2><p className="section-note">У каждого кабинета свои товары, ФФ-склады, остатки, заказы, поставки и продажи. Данные между кабинетами не смешиваются.</p></div>
+                <div><span className="section-kicker">МАРКЕТПЛЕЙС → КАМПАНИЯ → СВОИ ФФ</span><h2>Один вход — все ваши кампании</h2><p className="section-note">Внутри одного доступа выберите нужную кампанию. У каждой свои товары, ФФ-склады, остатки, заказы, поставки и продажи — данные не смешиваются.</p></div>
                 <button className="secondary-btn cabinet-back-btn" type="button" onClick={() => navigateTo("overview")}>К обзору</button>
               </div>
               <div className="cabinet-platform-list">
                 <article className="cabinet-platform-card wb-platform">
-                  <div className="cabinet-platform-head"><span className="platform-mark wb-mark">WB</span><div><strong>Wildberries</strong><small>2 отдельных кабинета</small></div></div>
+                  <div className="cabinet-platform-head"><span className="platform-mark wb-mark">WB</span><div><strong>Wildberries</strong><small>{availableCabinets.length} кампании этого доступа</small></div></div>
                   <div className="cabinet-account-list">
-                    {[{ id: "metanutrix", name: "Metanutrix" }, { id: "trusthome", name: "TrustHome" }].map((account) => {
+                    {availableCabinets.map((account) => {
                       const current = cabinet?.id === account.id;
-                      return <div className={`cabinet-account ${current ? "current" : ""}`} key={account.id}><span><strong>{account.name}</strong><small>Свои ФФ и остатки</small></span>{current ? <b>Открыт</b> : <button type="button" onClick={() => void logoutAdmin()}>Войти</button>}</div>;
+                      return <div className={`cabinet-account ${current ? "current" : ""}`} key={account.id}><span><strong>{account.name}</strong><small>Свои ФФ и остатки</small></span>{current ? <b>Открыта</b> : <button type="button" onClick={() => void switchCabinet(account.id)} disabled={cabinetSwitchingId === account.id}>{cabinetSwitchingId === account.id ? "Открываем…" : "Открыть"}</button>}</div>;
                     })}
                   </div>
-                  <p>Нажмите «Войти», затем используйте учётные данные нужного кабинета.</p>
+                  {cabinetSwitchError && <p className="cabinet-switch-error">{cabinetSwitchError}</p>}
+                  {!cabinetSwitchError && <p>Выберите кампанию — повторный логин не нужен.</p>}
                 </article>
                 <article className="cabinet-platform-card pending-platform">
                   <div className="cabinet-platform-head"><span className="platform-mark ym-mark">ЯМ</span><div><strong>Яндекс Маркет</strong><small>Кабинет не подключён</small></div></div>
                   <div className="platform-connect"><strong>Подключим отдельный кабинет</strong><span>Понадобятся API-ключ и ID кампании продавца.</span></div>
-                  <p>После подключения появятся только его ФФ-склады, товары, поставки и продажи.</p>
+                  <p>После подключения это будет ещё одна кампания в этом же входе.</p>
                 </article>
                 <article className="cabinet-platform-card pending-platform">
                   <div className="cabinet-platform-head"><span className="platform-mark oz-mark">OZ</span><div><strong>Ozon Seller</strong><small>Кабинет не подключён</small></div></div>
                   <div className="platform-connect"><strong>Подключим отдельный кабинет</strong><span>Понадобятся Client ID и API-ключ Ozon.</span></div>
-                  <p>После подключения появятся только его ФФ-склады, товары, поставки и продажи.</p>
+                  <p>После подключения это будет ещё одна кампания в этом же входе.</p>
                 </article>
               </div>
-              <p className="cabinet-manager-note">При добавлении нового кабинета сначала создаётся его отдельный контур, затем в нём настраиваются собственные ФФ-склады. Никакие остатки не копируются из WB.</p>
+              <p className="cabinet-manager-note">Новая кампания добавляется в этот же доступ, но получает свой отдельный контур и собственные ФФ-склады. Никакие остатки между кампаниями не копируются.</p>
             </section>
           ) : activeView === "fulfillment" ? (
             <section className="fulfillment-panel">

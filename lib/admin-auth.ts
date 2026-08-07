@@ -5,6 +5,7 @@ const encoder = new TextEncoder();
 export const cabinetIds = ["metanutrix", "trusthome"] as const;
 export type CabinetId = typeof cabinetIds[number];
 export type CabinetSummary = { id: CabinetId; name: string; configured: boolean };
+export type AdminSession = { ownerId: CabinetId; cabinetId: CabinetId };
 
 function constantTimeEqual(left: string, right: string) {
   const leftBytes = encoder.encode(left);
@@ -76,40 +77,65 @@ export function cabinetForCredentials(login: string, password: string): CabinetI
   return null;
 }
 
+function cabinetsForOwner(ownerId: CabinetId) {
+  return ownerId === "metanutrix" ? cabinetIds : [ownerId];
+}
+
 export function cabinetSummary(id: CabinetId): CabinetSummary {
   if (id === "trusthome") return { id, name: "TrustHome", configured: Boolean(process.env.TRUSTHOME_WB_API_TOKEN?.trim()) };
   return { id, name: "Метанутрикс", configured: Boolean(process.env.WB_API_TOKEN?.trim()) };
+}
+
+export function availableCabinets(ownerId: CabinetId) {
+  return cabinetsForOwner(ownerId).map(cabinetSummary);
 }
 
 export function cabinetToken(id: CabinetId) {
   return id === "trusthome" ? process.env.TRUSTHOME_WB_API_TOKEN?.trim() : process.env.WB_API_TOKEN?.trim();
 }
 
-export async function createAdminSession(cabinetId: CabinetId) {
+export async function createAdminSession(ownerId: CabinetId, cabinetId: CabinetId = ownerId) {
+  if (!cabinetsForOwner(ownerId).includes(cabinetId)) throw new Error("Cabinet is not available for this access");
   const expiresAt = Math.floor(Date.now() / 1000) + SESSION_LIFETIME_SECONDS;
-  const payload = `v2.${cabinetId}.${expiresAt}`;
+  const payload = `v3.${ownerId}.${cabinetId}.${expiresAt}`;
   const signature = await crypto.subtle.sign("HMAC", await getSigningKey(), encoder.encode(payload));
   return `${payload}.${toBase64Url(new Uint8Array(signature))}`;
 }
 
-export async function getAdminCabinet(request: Request): Promise<CabinetId | null> {
+export async function getAdminSession(request: Request): Promise<AdminSession | null> {
   const token = readCookie(request, SESSION_COOKIE);
   if (!token) return null;
-  const [version, cabinetValue, expiresAtValue, signatureValue, ...extra] = token.split(".");
-  if (version !== "v2" || !cabinetValue || !expiresAtValue || !signatureValue || extra.length || !cabinetIds.includes(cabinetValue as CabinetId)) return null;
+  const values = token.split(".");
+  const version = values[0];
+  const legacy = version === "v2" && values.length === 4;
+  const current = version === "v3" && values.length === 5;
+  if (!legacy && !current) return null;
+  const ownerValue = values[1];
+  const cabinetValue = legacy ? values[1] : values[2];
+  const expiresAtValue = legacy ? values[2] : values[3];
+  const signatureValue = legacy ? values[3] : values[4];
+  if (!ownerValue || !cabinetValue || !expiresAtValue || !signatureValue || !cabinetIds.includes(ownerValue as CabinetId) || !cabinetIds.includes(cabinetValue as CabinetId)) return null;
+  const ownerId = ownerValue as CabinetId;
+  const cabinetId = cabinetValue as CabinetId;
+  if (!cabinetsForOwner(ownerId).includes(cabinetId)) return null;
   const expiresAt = Number(expiresAtValue);
   if (!Number.isInteger(expiresAt) || expiresAt <= Math.floor(Date.now() / 1000)) return null;
+  const payload = legacy ? `v2.${cabinetValue}.${expiresAtValue}` : `v3.${ownerValue}.${cabinetValue}.${expiresAtValue}`;
   try {
     const verified = await crypto.subtle.verify(
       "HMAC",
       await getSigningKey(),
       fromBase64Url(signatureValue),
-      encoder.encode(`${version}.${cabinetValue}.${expiresAtValue}`),
+      encoder.encode(payload),
     );
-    return verified ? cabinetValue as CabinetId : null;
+    return verified ? { ownerId, cabinetId } : null;
   } catch {
     return null;
   }
+}
+
+export async function getAdminCabinet(request: Request): Promise<CabinetId | null> {
+  return (await getAdminSession(request))?.cabinetId ?? null;
 }
 
 export async function isAdminRequest(request: Request) {
