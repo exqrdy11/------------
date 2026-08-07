@@ -1,0 +1,1 @@
+ALTER TABLE `ff_stocks` ADD `expires_at` text;

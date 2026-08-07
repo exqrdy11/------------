@@ -1,0 +1,403 @@
+import { NextResponse } from "next/server";
+import { batchesForProduct, emptyFfBatches, emptyFfExpiry, emptyFfStock, expiryForProduct, listFfStocks, listFfWarehouses, stockForProduct, type FfBatches, type FfExpiry, type FfStock, type ManualWarehouse } from "@/db/ff-stocks";
+import { cabinetSummary, cabinetToken, getAdminCabinet, type CabinetId, type CabinetSummary } from "@/lib/admin-auth";
+
+export const dynamic = "force-dynamic";
+
+type WbCard = {
+  nmID?: number;
+  nmId?: number;
+  vendorCode?: string;
+  title?: string;
+  subjectName?: string;
+  sizes?: Array<{ chrtID?: number; chrtId?: number }>;
+};
+
+type WbOrder = {
+  id: number;
+  nmId?: number;
+  chrtId?: number;
+  article?: string;
+  supplyId?: string;
+  createdAt?: string;
+  warehouseId?: number;
+};
+
+type OrderStatus = { id: number; supplierStatus?: string; wbStatus?: string };
+type FbsBreakdown = Record<string, number>;
+
+type DashboardRow = {
+  key: string;
+  sku: string;
+  nmId: number | null;
+  name: string;
+  category: string;
+  color: string;
+  warehouses: Record<string, number>;
+  ffStock: FfStock;
+  ffExpiry: FfExpiry;
+  ffBatches: FfBatches;
+  fbs: number;
+  fbsByLocation: FbsBreakdown;
+  fbsByWbWarehouse: FbsBreakdown;
+  sales7d: number;
+  sales7dByLocation: FbsBreakdown;
+  sales7dByWbWarehouse: FbsBreakdown;
+  receiving: number;
+  receivingByLocation: FbsBreakdown;
+  receivingByWbWarehouse: FbsBreakdown;
+  toSale: number;
+  toSaleByLocation: FbsBreakdown;
+  toSaleByWbWarehouse: FbsBreakdown;
+  status: "В норме" | "Мало" | "Заканчивается";
+  updated: string;
+};
+
+const WB_MARKETPLACE = "https://marketplace-api.wildberries.ru";
+const WB_CONTENT = "https://content-api.wildberries.ru";
+const WB_ANALYTICS = "https://seller-analytics-api.wildberries.ru";
+const palette = ["#ffb45c", "#8ea6ff", "#d7a6cc", "#94c5a6", "#eaa070", "#79b9bd", "#adb1b8", "#d0ad82"];
+const emptyFbsBreakdown = (): FbsBreakdown => ({});
+
+type DashboardPayload = {
+  configured: true;
+  cabinet: CabinetSummary;
+  rows: DashboardRow[];
+  warehouseNames: string[];
+  manualWarehouses: ManualWarehouse[];
+  totals: {
+    available: number;
+    ffTotal: number;
+    ffStock: FfStock;
+    fbs: number;
+    fbsByLocation: FbsBreakdown;
+    sales7d: number;
+    receiving: number;
+    toSale: number;
+    risk: number;
+    activeSupplies: number;
+  };
+  warnings: string[];
+  updatedAt: string;
+};
+
+const CACHE_LIFETIME_MS = 2 * 60 * 1000;
+const FORCE_REFRESH_COOLDOWN_MS = 20 * 1000;
+const memoryCache = new Map<CabinetId, { createdAt: number; expiresAt: number; payload: DashboardPayload }>();
+
+function chunks<T>(items: T[], size: number): T[][] {
+  const result: T[][] = [];
+  for (let index = 0; index < items.length; index += size) result.push(items.slice(index, index + size));
+  return result;
+}
+
+async function wbFetch<T>(token: string, url: string, init?: RequestInit): Promise<T> {
+  const response = await fetch(url, {
+    ...init,
+    cache: "no-store",
+    headers: {
+      Authorization: token,
+      "Content-Type": "application/json",
+      ...(init?.headers ?? {}),
+    },
+  });
+
+  if (!response.ok) {
+    const error = new Error(`WB API ${response.status}`);
+    (error as Error & { status?: number }).status = response.status;
+    throw error;
+  }
+
+  return response.json() as Promise<T>;
+}
+
+async function getCards(token: string): Promise<WbCard[]> {
+  const cards: WbCard[] = [];
+  let cursor: { limit: number; updatedAt?: string; nmID?: number } = { limit: 100 };
+
+  for (let page = 0; page < 30; page += 1) {
+    const data = await wbFetch<{ cards?: WbCard[]; cursor?: { total?: number; updatedAt?: string; nmID?: number } }>(
+      token,
+      `${WB_CONTENT}/content/v2/get/cards/list`,
+      {
+        method: "POST",
+        body: JSON.stringify({ settings: { sort: { ascending: true }, cursor, filter: { withPhoto: -1 } } }),
+      },
+    );
+    const batch = data.cards ?? [];
+    cards.push(...batch);
+    if (batch.length < cursor.limit || !data.cursor?.updatedAt || !data.cursor?.nmID) break;
+    cursor = { limit: 100, updatedAt: data.cursor.updatedAt, nmID: data.cursor.nmID };
+  }
+
+  return cards;
+}
+
+async function getWbStocks(token: string) {
+  const response = await wbFetch<{ data?: { items?: Array<{
+    nmId?: number;
+    warehouseName?: string;
+    quantity?: number;
+  }> } }>(token, `${WB_ANALYTICS}/api/analytics/v1/stocks-report/wb-warehouses`, {
+    method: "POST",
+    body: JSON.stringify({ nmIds: [], chrtIds: [], limit: 250000, offset: 0 }),
+  });
+  return response.data?.items ?? [];
+}
+
+async function getOrders(token: string): Promise<{ orders: WbOrder[]; statuses: Map<number, OrderStatus> }> {
+  const orders: WbOrder[] = [];
+  const now = Math.floor(Date.now() / 1000);
+  const dateFrom = now - 30 * 24 * 60 * 60;
+  let next = 0;
+  for (let page = 0; page < 30; page += 1) {
+    const params = new URLSearchParams({ limit: "1000", next: String(next), dateFrom: String(dateFrom), dateTo: String(now) });
+    const data = await wbFetch<{ next?: number; orders?: WbOrder[] }>(token, `${WB_MARKETPLACE}/api/v3/orders?${params}`);
+    const batch = data.orders ?? [];
+    orders.push(...batch);
+    if (batch.length < 1000 || !data.next || data.next === next) break;
+    next = data.next;
+  }
+
+  const statuses = new Map<number, OrderStatus>();
+  for (const batch of chunks(orders.map((order) => order.id), 1000)) {
+    if (!batch.length) continue;
+    const data = await wbFetch<{ orders?: OrderStatus[] }>(token, `${WB_MARKETPLACE}/api/v3/orders/status`, {
+      method: "POST",
+      body: JSON.stringify({ orders: batch }),
+    });
+    for (const status of data.orders ?? []) statuses.set(status.id, status);
+  }
+
+  return { orders, statuses };
+}
+
+function getOrCreateRow(map: Map<string, DashboardRow>, input: { nmId?: number; sku?: string; name?: string; category?: string }) {
+  const key = input.nmId ? `nm:${input.nmId}` : `sku:${input.sku ?? "unknown"}`;
+  const existing = map.get(key);
+  if (existing) return existing;
+  const seed = input.nmId ?? [...(input.sku ?? "")].reduce((sum, char) => sum + char.charCodeAt(0), 0);
+  const row: DashboardRow = {
+    key,
+    sku: input.sku || (input.nmId ? String(input.nmId) : "Без артикула"),
+    nmId: input.nmId ?? null,
+    name: input.name || input.sku || `Товар ${input.nmId ?? ""}`.trim(),
+    category: input.category || "Wildberries",
+    color: palette[Math.abs(seed) % palette.length],
+    warehouses: {},
+    ffStock: emptyFfStock(),
+    ffExpiry: emptyFfExpiry(),
+    ffBatches: emptyFfBatches(),
+    fbs: 0,
+    fbsByLocation: emptyFbsBreakdown(),
+    fbsByWbWarehouse: emptyFbsBreakdown(),
+    sales7d: 0,
+    sales7dByLocation: emptyFbsBreakdown(),
+    sales7dByWbWarehouse: emptyFbsBreakdown(),
+    receiving: 0,
+    receivingByLocation: emptyFbsBreakdown(),
+    receivingByWbWarehouse: emptyFbsBreakdown(),
+    toSale: 0,
+    toSaleByLocation: emptyFbsBreakdown(),
+    toSaleByWbWarehouse: emptyFbsBreakdown(),
+    status: "В норме",
+    updated: new Date().toLocaleTimeString("ru-RU", { hour: "2-digit", minute: "2-digit", timeZone: "Europe/Moscow" }),
+  };
+  map.set(key, row);
+  return row;
+}
+
+function warningFor(section: string, error: unknown) {
+  const status = (error as Error & { status?: number })?.status;
+  if (status === 401 || status === 403) return `${section}: у токена нет нужной категории доступа`;
+  if (status === 429) return `${section}: Wildberries временно ограничил частоту запросов`;
+  return `${section}: данные временно недоступны`;
+}
+
+function mapWbWarehouseBreakdown(input: FbsBreakdown, warehouseMap: Map<string, string>) {
+  return Object.entries(input).reduce<FbsBreakdown>((total, [wbWarehouseId, quantity]) => {
+    const warehouseId = warehouseMap.get(wbWarehouseId) ?? "unassigned";
+    total[warehouseId] = (total[warehouseId] ?? 0) + quantity;
+    return total;
+  }, {});
+}
+
+async function attachFfStocks(payload: DashboardPayload, cabinetId: CabinetId): Promise<DashboardPayload> {
+  try {
+    const [manualWarehouses, lookup] = await Promise.all([listFfWarehouses(cabinetId), listFfStocks(cabinetId)]);
+    const wbWarehouseToFfWarehouse = new Map(
+      manualWarehouses
+        .filter((warehouse) => warehouse.wbWarehouseId)
+        .map((warehouse) => [String(warehouse.wbWarehouseId), warehouse.id]),
+    );
+    const rows = payload.rows.map((row) => ({
+      ...row,
+      ffStock: stockForProduct(lookup, { productKey: row.key, sku: row.sku }, manualWarehouses),
+      ffExpiry: expiryForProduct(lookup, { productKey: row.key, sku: row.sku }, manualWarehouses),
+      ffBatches: batchesForProduct(lookup, { productKey: row.key, sku: row.sku }, manualWarehouses),
+      fbsByLocation: mapWbWarehouseBreakdown(row.fbsByWbWarehouse, wbWarehouseToFfWarehouse),
+      sales7dByLocation: mapWbWarehouseBreakdown(row.sales7dByWbWarehouse, wbWarehouseToFfWarehouse),
+      receivingByLocation: mapWbWarehouseBreakdown(row.receivingByWbWarehouse, wbWarehouseToFfWarehouse),
+      toSaleByLocation: mapWbWarehouseBreakdown(row.toSaleByWbWarehouse, wbWarehouseToFfWarehouse),
+    }));
+    const ffStock = rows.reduce((total, row) => {
+      for (const warehouse of manualWarehouses) total[warehouse.id] = (total[warehouse.id] ?? 0) + (row.ffStock[warehouse.id] ?? 0);
+      return total;
+    }, emptyFfStock(manualWarehouses));
+    return {
+      ...payload,
+      rows,
+      manualWarehouses,
+      totals: {
+        ...payload.totals,
+        ffStock,
+        ffTotal: Object.values(ffStock).reduce((sum, value) => sum + value, 0),
+        fbsByLocation: rows.reduce<FbsBreakdown>((total, row) => {
+          for (const [warehouseId, quantity] of Object.entries(row.fbsByLocation)) total[warehouseId] = (total[warehouseId] ?? 0) + quantity;
+          return total;
+        }, {}),
+        sales7d: rows.reduce((sum, row) => sum + row.sales7d, 0),
+      },
+    };
+  } catch (error) {
+    return {
+      ...payload,
+      rows: payload.rows.map((row) => ({ ...row, ffStock: emptyFfStock(), ffExpiry: emptyFfExpiry(), ffBatches: emptyFfBatches() })),
+      manualWarehouses: [],
+      warnings: [...payload.warnings, warningFor("Ручные остатки ФФ", error)],
+    };
+  }
+}
+
+export async function GET(request: Request) {
+  const cabinetId = await getAdminCabinet(request);
+  if (!cabinetId) {
+    return NextResponse.json({ configured: true, error: "Требуется вход администратора" }, { status: 401, headers: { "Cache-Control": "no-store" } });
+  }
+  const cabinet = cabinetSummary(cabinetId);
+  const token = cabinetToken(cabinetId);
+  if (!token) {
+    return NextResponse.json(
+      { configured: false, cabinet, error: `Токен Wildberries для кабинета «${cabinet.name}» ещё не подключён` },
+      { status: 503, headers: { "Cache-Control": "no-store" } },
+    );
+  }
+
+  const force = new URL(request.url).searchParams.get("refresh") === "1";
+  const now = Date.now();
+  const cached = memoryCache.get(cabinetId);
+  const forceIsTooSoon = force && cached && now - cached.createdAt < FORCE_REFRESH_COOLDOWN_MS;
+  if (cached && cached.expiresAt > now && (!force || forceIsTooSoon)) {
+    return NextResponse.json(await attachFfStocks(cached.payload, cabinetId), { headers: { "Cache-Control": "private, max-age=0" } });
+  }
+
+  const [cardsResult, wbStocksResult, ordersResult] = await Promise.allSettled([
+    getCards(token),
+    getWbStocks(token),
+    getOrders(token),
+  ]);
+  const warnings: string[] = [];
+  const rowMap = new Map<string, DashboardRow>();
+
+  const cards = cardsResult.status === "fulfilled" ? cardsResult.value : [];
+  if (cardsResult.status === "rejected") warnings.push(warningFor("Карточки товаров", cardsResult.reason));
+  for (const card of cards) {
+    getOrCreateRow(rowMap, {
+      nmId: card.nmID ?? card.nmId,
+      sku: card.vendorCode,
+      name: card.title,
+      category: card.subjectName,
+    });
+  }
+
+  if (wbStocksResult.status === "fulfilled") {
+    for (const stock of wbStocksResult.value) {
+      const row = getOrCreateRow(rowMap, {
+        nmId: stock.nmId,
+      });
+      const warehouseName = `WB · ${stock.warehouseName || "Склад WB"}`;
+      row.warehouses[warehouseName] = (row.warehouses[warehouseName] ?? 0) + (stock.quantity ?? 0);
+    }
+  } else {
+    if (cached) {
+      for (const previous of cached.payload.rows) {
+        const row = getOrCreateRow(rowMap, { nmId: previous.nmId ?? undefined, sku: previous.sku, name: previous.name, category: previous.category });
+        row.warehouses = { ...previous.warehouses };
+      }
+      warnings.push(`${warningFor("Остатки на складах WB", wbStocksResult.reason)} — показаны последние корректные данные`);
+    } else {
+      warnings.push(warningFor("Остатки на складах WB", wbStocksResult.reason));
+    }
+  }
+
+  let activeSupplies = 0;
+  if (ordersResult.status === "fulfilled") {
+    const supplies = new Set<string>();
+    const weekStart = Date.now() - 7 * 24 * 60 * 60 * 1000;
+    const terminal = new Set(["sold", "canceled", "canceled_by_client", "declined_by_client", "defect"]);
+    const canceled = new Set(["canceled", "canceled_by_client", "declined_by_client", "defect"]);
+    for (const order of ordersResult.value.orders) {
+      const status = ordersResult.value.statuses.get(order.id);
+      if (!status) continue;
+      const row = getOrCreateRow(rowMap, { nmId: order.nmId, sku: order.article, name: order.article });
+      const warehouseId = order.warehouseId ? String(order.warehouseId) : "unknown";
+      const createdAt = order.createdAt ? Date.parse(order.createdAt) : Number.NaN;
+      if (!canceled.has(status.wbStatus ?? "") && status.supplierStatus !== "cancel" && Number.isFinite(createdAt) && createdAt >= weekStart) {
+        row.sales7d += 1;
+        row.sales7dByWbWarehouse[warehouseId] = (row.sales7dByWbWarehouse[warehouseId] ?? 0) + 1;
+      }
+      if (terminal.has(status.wbStatus ?? "") || status.supplierStatus === "cancel") continue;
+      if (status.supplierStatus === "complete") {
+        row.fbs += 1;
+        row.fbsByWbWarehouse[warehouseId] = (row.fbsByWbWarehouse[warehouseId] ?? 0) + 1;
+        if (order.supplyId) supplies.add(order.supplyId);
+      }
+      if (status.supplierStatus === "complete" && status.wbStatus === "waiting") {
+        row.receiving += 1;
+        row.receivingByWbWarehouse[warehouseId] = (row.receivingByWbWarehouse[warehouseId] ?? 0) + 1;
+      }
+      if (status.wbStatus === "sorted" || status.wbStatus === "ready_for_pickup") {
+        row.toSale += 1;
+        row.toSaleByWbWarehouse[warehouseId] = (row.toSaleByWbWarehouse[warehouseId] ?? 0) + 1;
+      }
+    }
+    activeSupplies = supplies.size;
+  } else {
+    warnings.push(warningFor("FBS-отгрузки", ordersResult.reason));
+  }
+
+  const rows = [...rowMap.values()].map((row) => {
+    const total = Object.values(row.warehouses).reduce((sum, value) => sum + value, 0);
+    row.status = total <= 5 ? "Заканчивается" : total <= 20 ? "Мало" : "В норме";
+    return row;
+  }).sort((a, b) => {
+    const priority = { "Заканчивается": 0, "Мало": 1, "В норме": 2 };
+    return priority[a.status] - priority[b.status] || a.name.localeCompare(b.name, "ru");
+  });
+
+  if (!rows.length && warnings.length) {
+    return NextResponse.json(
+      { configured: true, error: "Wildberries не вернул данные. Проверьте категории токена: Контент, Маркетплейс и Аналитика.", warnings },
+      { status: 502, headers: { "Cache-Control": "no-store" } },
+    );
+  }
+
+  const warehouseNames = [...new Set(rows.flatMap((row) => Object.keys(row.warehouses)))].sort((a, b) => a.localeCompare(b, "ru"));
+  const totals = {
+    available: rows.reduce((sum, row) => sum + Object.values(row.warehouses).reduce((inner, value) => inner + value, 0), 0),
+    ffTotal: 0,
+    ffStock: emptyFfStock(),
+    fbs: rows.reduce((sum, row) => sum + row.fbs, 0),
+    fbsByLocation: emptyFbsBreakdown(),
+    sales7d: rows.reduce((sum, row) => sum + row.sales7d, 0),
+    receiving: rows.reduce((sum, row) => sum + row.receiving, 0),
+    toSale: rows.reduce((sum, row) => sum + row.toSale, 0),
+    risk: rows.filter((row) => row.status !== "В норме").length,
+    activeSupplies,
+  };
+  const updatedAt = new Date().toISOString();
+  const payload: DashboardPayload = { configured: true, cabinet, rows, warehouseNames, manualWarehouses: [], totals, warnings, updatedAt };
+  memoryCache.set(cabinetId, { createdAt: now, expiresAt: now + CACHE_LIFETIME_MS, payload });
+
+  return NextResponse.json(await attachFfStocks(payload, cabinetId), { headers: { "Cache-Control": "private, max-age=0" } });
+}
