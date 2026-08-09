@@ -4,7 +4,7 @@ import { type ChangeEvent, type FormEvent, useCallback, useEffect, useMemo, useS
 import * as XLSX from "xlsx";
 
 type StockStatus = "В норме" | "Мало" | "Заканчивается";
-type View = "overview" | "stock" | "fbs" | "sales" | "reports" | "fulfillment" | "manual" | "cabinets";
+type View = "overview" | "stock" | "fbs" | "sales" | "analytics" | "reports" | "fulfillment" | "manual" | "cabinets";
 type FbsBreakdown = Record<string, number>;
 type FfStock = Record<string, number>;
 type FfExpiry = Record<string, string | null>;
@@ -69,6 +69,19 @@ type InventoryResponse = {
   error?: string;
 };
 
+type AnalyticsPoint = { date: string; fbs: number; fbo: number };
+type AnalyticsWarehouse = { id: string; name: string; sublabel: string; value: number };
+type AnalyticsResponse = {
+  from: string;
+  to: string;
+  summary: { fbs: number; fbo: number; total: number; fbsShare: number; fboShare: number };
+  daily: AnalyticsPoint[];
+  fbsWarehouses: AnalyticsWarehouse[];
+  source: { fbs: "sales" | "orders"; fboAvailable: boolean };
+  warnings: string[];
+  updatedAt: string;
+};
+
 type ImportItem = { sku: string; nmId: number | null; quantity: number; batchCode: string; expiresAt?: string | null };
 type ImportPreview = { fileName: string; sheetName: string; items: ImportItem[]; skipped: number; hasExpiryColumn: boolean; hasBatchColumn: boolean };
 
@@ -85,6 +98,7 @@ const viewTitles: Record<View, { eyebrow: string; title: string }> = {
   stock: { eyebrow: "СКЛАДЫ · АРТИКУЛЫ", title: "Остатки по всем складам" },
   fbs: { eyebrow: "FBS · ПОСЛЕДНИЕ 30 ДНЕЙ", title: "Отгрузки и приёмка" },
   sales: { eyebrow: "ПРОДАЖИ · ПОТРЕБНОСТЬ", title: "Продажи и потребность ФФ" },
+  analytics: { eyebrow: "АНАЛИТИКА · РУКОВОДИТЕЛЮ", title: "Продажи FBS и FBO" },
   reports: { eyebrow: "ВЫГРУЗКИ · CSV", title: "Отчёты по кабинету" },
   fulfillment: { eyebrow: "ФУЛФИЛМЕНТ · СКЛАДЫ", title: "ФФ — остатки и движение" },
   manual: { eyebrow: "ФУЛФИЛМЕНТ · РУЧНЫЕ ОСТАТКИ", title: "Склады ФФ и импорт Excel" },
@@ -126,6 +140,14 @@ function parseQuantity(value: unknown) {
   const normalized = String(value ?? "").trim().replace(/\s/g, "").replace(",", ".");
   const result = Number(normalized);
   return Number.isFinite(result) ? Math.floor(result) : Number.NaN;
+}
+
+function isoDate(daysAgo = 0) {
+  return new Date(Date.now() - daysAgo * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+}
+
+function shortDate(value: string) {
+  return new Intl.DateTimeFormat("ru-RU", { day: "numeric", month: "short", timeZone: "Europe/Moscow" }).format(new Date(`${value}T12:00:00Z`));
 }
 
 function parseExpiryDate(value: unknown) {
@@ -231,6 +253,12 @@ export default function Home() {
   const [warehouse, setWarehouse] = useState("Все склады");
   const [salesWarehouseId, setSalesWarehouseId] = useState("all");
   const [salesProductScope, setSalesProductScope] = useState<"ff" | "all">("ff");
+  const [analyticsPeriod, setAnalyticsPeriod] = useState<"7d" | "14d" | "30d" | "custom">("7d");
+  const [analyticsRange, setAnalyticsRange] = useState({ from: isoDate(6), to: isoDate(0) });
+  const [analyticsDraft, setAnalyticsDraft] = useState({ from: isoDate(6), to: isoDate(0) });
+  const [analytics, setAnalytics] = useState<AnalyticsResponse | null>(null);
+  const [analyticsLoading, setAnalyticsLoading] = useState(false);
+  const [analyticsError, setAnalyticsError] = useState<string | null>(null);
   const [filter, setFilter] = useState("Все");
   const [selectedFulfillmentWarehouseId, setSelectedFulfillmentWarehouseId] = useState<string | null>(null);
   const [selected, setSelected] = useState<StockRow | null>(null);
@@ -293,6 +321,26 @@ export default function Home() {
     }
   }, []);
 
+  const loadAnalytics = useCallback(async (range = analyticsRange) => {
+    setAnalyticsLoading(true);
+    setAnalyticsError(null);
+    try {
+      const params = new URLSearchParams(range);
+      const response = await fetch(`/api/analytics?${params}`, { cache: "no-store" });
+      const data = await response.json() as AnalyticsResponse & { error?: string };
+      if (response.status === 401) {
+        setAuthState("unauthenticated");
+        return;
+      }
+      if (!response.ok) throw new Error(data.error || "Не удалось получить аналитику Wildberries");
+      setAnalytics(data);
+    } catch (analyticsLoadError) {
+      setAnalyticsError(analyticsLoadError instanceof Error ? analyticsLoadError.message : "Не удалось получить аналитику Wildberries");
+    } finally {
+      setAnalyticsLoading(false);
+    }
+  }, [analyticsRange]);
+
   useEffect(() => {
     void (async () => {
       try {
@@ -316,6 +364,12 @@ export default function Home() {
       return () => window.clearTimeout(timer);
     }
   }, [authState, loadData, loadManualWarehouses]);
+
+  useEffect(() => {
+    if (authState !== "authenticated" || activeView !== "analytics") return;
+    const timer = window.setTimeout(() => void loadAnalytics(), 0);
+    return () => window.clearTimeout(timer);
+  }, [activeView, authState, analyticsRange, loadAnalytics]);
 
   const selectedImportWarehouseId = manualWarehouses.some((item) => item.id === importWarehouseId)
     ? importWarehouseId
@@ -407,6 +461,25 @@ export default function Home() {
   }), [rows]);
   const viewTotal = activeView === "fbs" ? rows.filter((row) => row.fbs > 0).length : rows.length;
   const stockTitle = activeView === "fbs" ? "Артикулы в FBS-движении" : "Все товары Wildberries";
+  const analyticsChartMax = useMemo(() => Math.max(1, ...(analytics?.daily.map((item) => item.fbs + item.fbo) ?? [0])), [analytics]);
+  const strongestFbsWarehouse = useMemo(() => analytics?.fbsWarehouses.find((warehouse) => warehouse.value > 0) ?? null, [analytics]);
+
+  const chooseAnalyticsPeriod = (period: "7d" | "14d" | "30d" | "custom") => {
+    setAnalyticsPeriod(period);
+    if (period === "custom") return;
+    const days = period === "7d" ? 7 : period === "14d" ? 14 : 30;
+    const range = { from: isoDate(days - 1), to: isoDate(0) };
+    setAnalyticsDraft(range);
+    setAnalyticsRange(range);
+  };
+
+  const applyAnalyticsCustomPeriod = () => {
+    if (!analyticsDraft.from || !analyticsDraft.to || analyticsDraft.from > analyticsDraft.to) {
+      setAnalyticsError("Проверьте даты периода");
+      return;
+    }
+    setAnalyticsRange(analyticsDraft);
+  };
 
   const navigateTo = (view: View) => {
     setActiveView(view);
@@ -639,6 +712,7 @@ export default function Home() {
           <button type="button" className={`nav-item ${activeView === "stock" ? "active" : ""}`} onClick={() => navigateTo("stock")}><span className="nav-symbol">□</span>Остатки</button>
           <button type="button" className={`nav-item ${activeView === "fbs" ? "active" : ""}`} onClick={() => navigateTo("fbs")}><span className="nav-symbol">→</span>FBS-отгрузки<span className="nav-badge">{totals.fbs}</span></button>
           <button type="button" className={`nav-item ${activeView === "sales" ? "active" : ""}`} onClick={() => navigateTo("sales")}><span className="nav-symbol">↗</span>Продажи</button>
+          <button type="button" className={`nav-item ${activeView === "analytics" ? "active" : ""}`} onClick={() => navigateTo("analytics")}><span className="nav-symbol">⌁</span>Анализ</button>
           <button type="button" className={`nav-item ${activeView === "fulfillment" || activeView === "manual" ? "active" : ""}`} onClick={() => navigateTo("fulfillment")}><span className="nav-symbol">▤</span>ФФ</button>
           <button type="button" className={`nav-item ${activeView === "reports" ? "active" : ""}`} onClick={() => navigateTo("reports")}><span className="nav-symbol">≡</span>Отчёты</button>
         </nav>
@@ -765,6 +839,29 @@ export default function Home() {
                 </article>
               </div>
               <ExpiryManager rows={rows} warehouses={manualWarehouses} />
+            </section>
+          ) : activeView === "analytics" ? (
+            <section className="analytics-panel">
+              <div className="analytics-heading">
+                <div><span className="section-kicker">УПРАВЛЕНЧЕСКИЙ ОБЗОР · WILDBERRIES</span><h2>Продажи по каналам</h2><p>Сравнение FBS и FBO, а также эффективность каждого вашего ФФ за выбранный период.</p></div>
+                <button className="secondary-btn analytics-refresh" type="button" onClick={() => void loadAnalytics()} disabled={analyticsLoading}><span className={analyticsLoading ? "spin" : ""}>↻</span>{analyticsLoading ? "Считаем" : "Обновить"}</button>
+              </div>
+
+              <div className="analytics-controls"><div className="analytics-periods" role="group" aria-label="Период аналитики">{[{ id: "7d", label: "Неделя" }, { id: "14d", label: "2 недели" }, { id: "30d", label: "Месяц" }, { id: "custom", label: "Свои даты" }].map((item) => <button type="button" key={item.id} className={analyticsPeriod === item.id ? "active" : ""} onClick={() => chooseAnalyticsPeriod(item.id as "7d" | "14d" | "30d" | "custom")}>{item.label}</button>)}</div><span className="analytics-period-label">{shortDate(analyticsRange.from)} — {shortDate(analyticsRange.to)}</span></div>
+              {analyticsPeriod === "custom" && <div className="analytics-custom-dates"><label><span>С</span><input type="date" value={analyticsDraft.from} min={isoDate(89)} max={isoDate(0)} onChange={(event) => setAnalyticsDraft((value) => ({ ...value, from: event.target.value }))} /></label><label><span>По</span><input type="date" value={analyticsDraft.to} min={isoDate(89)} max={isoDate(0)} onChange={(event) => setAnalyticsDraft((value) => ({ ...value, to: event.target.value }))} /></label><button type="button" onClick={applyAnalyticsCustomPeriod}>Применить</button><small>Максимум 90 дней</small></div>}
+              {analytics?.warnings.length ? <div className="analytics-warning">{analytics.warnings.map((warning) => <span key={warning}>! {warning}</span>)}</div> : null}
+
+              {analyticsLoading && !analytics ? <div className="analytics-loading"><span className="loader"/><strong>Собираем аналитику Wildberries</strong><small>Сверяем продажи и каналы за выбранный период</small></div> : analyticsError && !analytics ? <div className="empty-state"><strong>Аналитика пока недоступна</strong><span>{analyticsError}</span></div> : analytics ? <>
+                <div className="analytics-kpi-grid"><article className="analytics-kpi total"><span>Продажи за период</span><strong>{formatNumber.format(analytics.summary.total)} <small>шт.</small></strong><p>FBS и FBO вместе</p></article><article className="analytics-kpi fbo"><span>Продажи FBO</span><strong>{formatNumber.format(analytics.summary.fbo)} <small>шт.</small></strong><p>{analytics.source.fboAvailable ? `${analytics.summary.fboShare}% от продаж` : "Нужен доступ «Статистика»"}</p></article><article className="analytics-kpi fbs"><span>{analytics.source.fbs === "sales" ? "Продажи FBS" : "Заказы FBS"}</span><strong>{formatNumber.format(analytics.summary.fbs)} <small>шт.</small></strong><p>{analytics.summary.fbsShare}% от продаж</p></article><article className="analytics-kpi share"><span>Доля FBS</span><strong>{analytics.summary.fbsShare}<small>%</small></strong><p>{analytics.source.fbs === "sales" ? "По факту продаж" : "По созданным заказам"}</p></article></div>
+
+                <div className="analytics-grid">
+                  <section className="analytics-card analytics-trend-card"><div className="analytics-card-heading"><div><span className="section-kicker">ДИНАМИКА</span><h3>FBS и FBO по дням</h3></div><div className="analytics-legend"><span><i className="fbo"/>FBO</span><span><i className="fbs"/>FBS</span></div></div><div className="analytics-bars" aria-label="График FBS и FBO по дням">{analytics.daily.map((point, index) => { const labelEvery = analytics.daily.length > 14 ? 5 : 1; const total = point.fbs + point.fbo; return <div className="analytics-day" key={point.date} title={`${shortDate(point.date)}: FBO ${point.fbo}, FBS ${point.fbs}`}><div className="analytics-bar-stack"><i className="analytics-bar-fbs" style={{ height: point.fbs ? `${Math.max(6, (point.fbs / analyticsChartMax) * 100)}%` : 0 }} /><i className="analytics-bar-fbo" style={{ height: point.fbo ? `${Math.max(6, (point.fbo / analyticsChartMax) * 100)}%` : 0 }} /></div><b>{total || ""}</b><span>{index === 0 || index === analytics.daily.length - 1 || index % labelEvery === 0 ? shortDate(point.date) : ""}</span></div>; })}</div><p className="analytics-card-note">Наведите на столбик, чтобы увидеть количество за день.</p></section>
+                  <section className="analytics-card analytics-channel-card"><div className="analytics-card-heading"><div><span className="section-kicker">СТРУКТУРА</span><h3>Соотношение каналов</h3></div><span className="analytics-total-badge">{formatNumber.format(analytics.summary.total)} шт.</span></div><div className="analytics-channel-body"><div className="analytics-donut" style={{ background: `conic-gradient(#365df2 0 ${analytics.summary.fbsShare}%, #20a16d ${analytics.summary.fbsShare}% 100%)` }}><span><b>{analytics.summary.fbsShare}%</b><small>FBS</small></span></div><div className="analytics-channel-list"><div><span><i className="fbs"/>FBS</span><strong>{formatNumber.format(analytics.summary.fbs)} <small>шт.</small></strong></div><div><span><i className="fbo"/>FBO</span><strong>{formatNumber.format(analytics.summary.fbo)} <small>шт.</small></strong></div></div></div><p className="analytics-card-note">{analytics.source.fboAvailable ? "Факт продаж: возвраты не включены." : "FBO появится после выдачи категории «Статистика» токену."}</p></section>
+                </div>
+
+                <section className="analytics-card analytics-ff-card"><div className="analytics-card-heading"><div><span className="section-kicker">СРАВНЕНИЕ ФФ</span><h3>Продажи FBS между складами</h3></div><span className="analytics-total-badge">{analytics.source.fbs === "sales" ? "Факт продаж" : "Заказы FBS"}</span></div><div className="analytics-ff-bars">{analytics.fbsWarehouses.map((warehouse) => { const max = Math.max(1, ...analytics.fbsWarehouses.map((item) => item.value)); return <div className="analytics-ff-row" key={warehouse.id}><div><strong>{warehouse.name}</strong><small>{warehouse.sublabel}</small></div><span className="analytics-ff-track"><i style={{ width: `${(warehouse.value / max) * 100}%` }} /></span><b>{formatNumber.format(warehouse.value)} <small>шт.</small></b></div>; })}</div><div className="analytics-insight"><span>Итог периода</span><strong>{strongestFbsWarehouse ? `${strongestFbsWarehouse.name} лидирует среди ФФ: ${formatNumber.format(strongestFbsWarehouse.value)} ${analytics.source.fbs === "sales" ? "продаж" : "заказов"} FBS.` : "За выбранный период продаж FBS по привязанным ФФ пока нет."}</strong></div></section>
+                <p className="analytics-source-note">FBO и FBS считаются по оперативной статистике WB. Если категория «Статистика» недоступна, для FBS показываются созданные заказы из Marketplace API.</p>
+              </> : null}
             </section>
           ) : activeView === "sales" ? (
             <section className="sales-panel">
