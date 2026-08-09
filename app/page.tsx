@@ -393,8 +393,12 @@ export default function Home() {
     return locations;
   }, [manualWarehouses, totals.fbsByLocation.unassigned]);
 
-  const ffReservedTotal = useMemo(() => manualWarehouses.reduce((sum, warehouse) => sum + (totals.fbsByLocation[warehouse.id] ?? 0), 0), [manualWarehouses, totals.fbsByLocation]);
-  const ffAvailableTotal = Math.max(0, totals.ffTotal - ffReservedTotal);
+  const ffReservedFromStockTotal = useMemo(() => manualWarehouses.reduce((sum, warehouse) => {
+    const physicalStock = totals.ffStock[warehouse.id] ?? 0;
+    const reserved = totals.fbsByLocation[warehouse.id] ?? 0;
+    return sum + Math.min(physicalStock, reserved);
+  }, 0), [manualWarehouses, totals.ffStock, totals.fbsByLocation]);
+  const ffAvailableTotal = Math.max(0, totals.ffTotal - ffReservedFromStockTotal);
 
   const fulfillmentWarehouses = useMemo(() => manualWarehouses.map((warehouse) => {
     const products = rows.filter((row) => (row.ffStock[warehouse.id] ?? 0) > 0 || (row.fbsByLocation[warehouse.id] ?? 0) > 0 || (row.receivingByLocation[warehouse.id] ?? 0) > 0 || (row.toSaleByLocation[warehouse.id] ?? 0) > 0);
@@ -947,7 +951,7 @@ export default function Home() {
           ) : <>
             <section className={`metric-grid ${activeView !== "overview" ? "view-hidden" : ""}`} aria-label="Ключевые показатели">
               <article className="metric-card featured"><div className="metric-top"><span>Остаток на складах WB</span><span className="trend up">● WB API</span></div><strong className="metric-value">{loading ? "—" : formatNumber.format(totals.available)} <small>шт.</small></strong><div className="spark-bars" aria-hidden="true">{[24,31,28,42,38,52,47,62,58,74,69,83].map((height, index) => <i key={index} style={{ height }} />)}</div><p>Фактический остаток · для FBS недоступен</p></article>
-              <article className="metric-card"><div className="metric-icon green">□</div><div className="metric-label">Доступно на ФФ</div><strong className="metric-value">{loading ? "—" : formatNumber.format(ffAvailableTotal)} <small>шт.</small></strong><p>В базе {formatNumber.format(totals.ffTotal)} · резерв FBS {formatNumber.format(ffReservedTotal)}</p></article>
+              <article className="metric-card"><div className="metric-icon green">□</div><div className="metric-label">Доступно на ФФ</div><strong className="metric-value">{loading ? "—" : formatNumber.format(ffAvailableTotal)} <small>шт.</small></strong><p>В базе {formatNumber.format(totals.ffTotal)} · вычтено FBS {formatNumber.format(ffReservedFromStockTotal)}</p></article>
               <article className="metric-card"><div className="metric-icon blue">→</div><div className="metric-label">Активные FBS</div><strong className="metric-value">{loading ? "—" : formatNumber.format(totals.fbs)} <small>шт.</small></strong><p>{fbsLocations.map((location) => <span key={location.id}>{location.city} <b>{totals.fbsByLocation[location.id] ?? 0}</b>{" · "}</span>)}</p></article>
               <article className="metric-card"><div className="metric-icon amber">◷</div><div className="metric-label">Ожидают продажи</div><strong className="metric-value">{loading ? "—" : formatNumber.format(totals.toSale)} <small>шт.</small></strong><p><b>{totals.receiving}</b> ожидают приёмки WB</p></article>
             </section>
