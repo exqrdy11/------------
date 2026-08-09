@@ -134,9 +134,10 @@ export async function GET(request: Request) {
     return NextResponse.json({ error: error instanceof Error ? error.message : "Некорректный период" }, { status: 400, headers: { "Cache-Control": "no-store" } });
   }
 
+  const refresh = new URL(request.url).searchParams.get("refresh") === "1";
   const key = `${cabinetId}:${period.from}:${period.to}`;
   const cached = cache.get(key);
-  if (cached && cached.expiresAt > Date.now()) return NextResponse.json(cached.payload, { headers: { "Cache-Control": "private, max-age=0" } });
+  if (!refresh && cached && cached.expiresAt > Date.now()) return NextResponse.json(cached.payload, { headers: { "Cache-Control": "private, max-age=0" } });
 
   const [manualWarehouses, salesResult] = await Promise.all([listFfWarehouses(cabinetId), wbFetch<WbSale[]>(token, `${WB_STATISTICS}/api/v1/supplier/sales?${new URLSearchParams({ dateFrom: `${period.from}T00:00:00`, flag: "0" })}`).then((items) => ({ ok: true as const, items })).catch((error) => ({ ok: false as const, error }))]);
   const daily = new Map(daysBetween(period.from, period.to).map((date) => [date, { date, fbs: 0, fbo: 0 }]));
@@ -199,6 +200,6 @@ export async function GET(request: Request) {
     warnings,
     updatedAt: new Date().toISOString(),
   };
-  cache.set(key, { expiresAt: Date.now() + CACHE_MS, payload });
+  cache.set(key, { expiresAt: Date.now() + (source.fboAvailable ? CACHE_MS : 30 * 1000), payload });
   return NextResponse.json(payload, { headers: { "Cache-Control": "private, max-age=0" } });
 }
