@@ -79,7 +79,7 @@ type AnalyticsResponse = {
   summary: { fbs: number; fbo: number; total: number; fbsShare: number; fboShare: number };
   daily: AnalyticsPoint[];
   fbsWarehouses: AnalyticsWarehouse[];
-  source: { fbs: "sales" | "orders"; fboAvailable: boolean };
+  source: { fbs: "sales" | "orders"; fboAvailable: boolean; retryAt: string | null; retryExact: boolean };
   warnings: string[];
   updatedAt: string;
 };
@@ -124,6 +124,12 @@ function fulfillmentStockStatus(quantity: number): StockStatus {
 function formatSyncTime(value: string | null) {
   if (!value) return "ожидаем данные";
   return new Intl.DateTimeFormat("ru-RU", { hour: "2-digit", minute: "2-digit", timeZone: "Europe/Moscow" }).format(new Date(value));
+}
+
+function formatCountdown(seconds: number) {
+  const minutes = Math.floor(seconds / 60);
+  const remainder = seconds % 60;
+  return `${minutes.toString().padStart(2, "0")}:${remainder.toString().padStart(2, "0")}`;
 }
 
 function formatManualWarehouse(warehouse: ManualWarehouse) {
@@ -264,6 +270,7 @@ export default function Home() {
   const [analyticsError, setAnalyticsError] = useState<string | null>(null);
   const [analyticsChannel, setAnalyticsChannel] = useState<AnalyticsChannel>("all");
   const [analyticsHoverDate, setAnalyticsHoverDate] = useState<string | null>(null);
+  const [analyticsClock, setAnalyticsClock] = useState(() => Date.now());
   const [filter, setFilter] = useState("Все");
   const [selectedFulfillmentWarehouseId, setSelectedFulfillmentWarehouseId] = useState<string | null>(null);
   const [fulfillmentList, setFulfillmentList] = useState<FulfillmentList>("available");
@@ -348,6 +355,13 @@ export default function Home() {
     }
   }, [analyticsRange]);
 
+  const analyticsRetryAt = analytics?.source.retryAt ?? null;
+  const analyticsRetrySeconds = useMemo(() => {
+    if (!analyticsRetryAt) return null;
+    const milliseconds = Date.parse(analyticsRetryAt) - analyticsClock;
+    return Number.isFinite(milliseconds) ? Math.max(0, Math.ceil(milliseconds / 1000)) : null;
+  }, [analyticsRetryAt, analyticsClock]);
+
   useEffect(() => {
     void (async () => {
       try {
@@ -377,6 +391,19 @@ export default function Home() {
     const timer = window.setTimeout(() => void loadAnalytics(), 0);
     return () => window.clearTimeout(timer);
   }, [activeView, authState, analyticsRange, loadAnalytics]);
+
+  useEffect(() => {
+    if (!analyticsRetryAt) return;
+    const timer = window.setInterval(() => setAnalyticsClock(Date.now()), 1_000);
+    return () => window.clearInterval(timer);
+  }, [analyticsRetryAt]);
+
+  useEffect(() => {
+    if (authState !== "authenticated" || activeView !== "analytics" || !analyticsRetryAt) return;
+    const delay = Math.max(0, Date.parse(analyticsRetryAt) - Date.now()) + 250;
+    const timer = window.setTimeout(() => void loadAnalytics(analyticsRange, true), delay);
+    return () => window.clearTimeout(timer);
+  }, [activeView, analyticsRange, analyticsRetryAt, authState, loadAnalytics]);
 
   const selectedImportWarehouseId = manualWarehouses.some((item) => item.id === importWarehouseId)
     ? importWarehouseId
@@ -900,12 +927,13 @@ export default function Home() {
             <section className="analytics-panel">
               <div className="analytics-heading">
                 <div><span className="section-kicker">УПРАВЛЕНЧЕСКИЙ ОБЗОР · WILDBERRIES</span><h2>Продажи по каналам</h2><p>Сравнение FBS и FBO, а также эффективность каждого вашего ФФ за выбранный период.</p></div>
-                <button className="secondary-btn analytics-refresh" type="button" onClick={() => void loadAnalytics(analyticsRange, true)} disabled={analyticsLoading}><span className={analyticsLoading ? "spin" : ""}>↻</span>{analyticsLoading ? "Считаем" : "Обновить"}</button>
+                <button className="secondary-btn analytics-refresh" type="button" onClick={() => void loadAnalytics(analyticsRange, true)} disabled={analyticsLoading || Boolean(analyticsRetrySeconds)} title={analyticsRetrySeconds ? "WB временно ограничил запросы" : undefined}><span className={analyticsLoading ? "spin" : ""}>↻</span>{analyticsLoading ? "Считаем" : analyticsRetrySeconds ? `Через ${formatCountdown(analyticsRetrySeconds)}` : "Обновить"}</button>
               </div>
 
               <div className="analytics-controls"><div className="analytics-periods" role="group" aria-label="Период аналитики">{[{ id: "7d", label: "Неделя" }, { id: "14d", label: "2 недели" }, { id: "30d", label: "Месяц" }, { id: "custom", label: "Свои даты" }].map((item) => <button type="button" key={item.id} className={analyticsPeriod === item.id ? "active" : ""} onClick={() => chooseAnalyticsPeriod(item.id as "7d" | "14d" | "30d" | "custom")}>{item.label}</button>)}</div><span className="analytics-period-label">{shortDate(analyticsRange.from)} — {shortDate(analyticsRange.to)}</span></div>
               {analyticsPeriod === "custom" && <div className="analytics-custom-dates"><label><span>С</span><input type="date" value={analyticsDraft.from} min={isoDate(89)} max={isoDate(0)} onChange={(event) => setAnalyticsDraft((value) => ({ ...value, from: event.target.value }))} /></label><label><span>По</span><input type="date" value={analyticsDraft.to} min={isoDate(89)} max={isoDate(0)} onChange={(event) => setAnalyticsDraft((value) => ({ ...value, to: event.target.value }))} /></label><button type="button" onClick={applyAnalyticsCustomPeriod}>Применить</button><small>Максимум 90 дней</small></div>}
               {analytics?.warnings.length ? <div className="analytics-warning">{analytics.warnings.map((warning) => <span key={warning}>! {warning}</span>)}</div> : null}
+              {analyticsRetrySeconds !== null && analyticsRetrySeconds > 0 && <div className="analytics-retry-timer" role="status"><span>↻</span><div><strong>WB разрешит повторный запрос через {formatCountdown(analyticsRetrySeconds)}</strong><p>{analytics?.source.retryExact ? "Повторим автоматически, когда закончится ограничение WB." : "WB не прислал точное время — повторим автоматически по безопасному интервалу."}</p></div></div>}
 
               {analyticsLoading && !analytics ? <div className="analytics-loading"><span className="loader"/><strong>Собираем аналитику Wildberries</strong><small>Сверяем продажи и каналы за выбранный период</small></div> : analyticsError && !analytics ? <div className="empty-state"><strong>Аналитика пока недоступна</strong><span>{analyticsError}</span></div> : analytics ? <>
                 <div className="analytics-kpi-grid">{analyticsFactAvailable ? <><article className="analytics-kpi total"><span>Продажи за период</span><strong>{formatNumber.format(analytics.summary.total)} <small>шт.</small></strong><p>FBS и FBO вместе</p></article><article className="analytics-kpi fbo"><span>Продажи FBO</span><strong>{formatNumber.format(analytics.summary.fbo)} <small>шт.</small></strong><p>{analytics.summary.fboShare}% от продаж</p></article><article className="analytics-kpi fbs"><span>Продажи FBS</span><strong>{formatNumber.format(analytics.summary.fbs)} <small>шт.</small></strong><p>{analytics.summary.fbsShare}% от продаж</p></article><article className="analytics-kpi share"><span>Доля FBS</span><strong>{analytics.summary.fbsShare}<small>%</small></strong><p>По факту продаж</p></article></> : <><article className="analytics-kpi total unavailable"><span>Факт продаж</span><strong>—</strong><p>WB временно не отдал статистику</p></article><article className="analytics-kpi fbo unavailable"><span>Продажи FBO</span><strong>—</strong><p>Не подменяем нулём</p></article><article className="analytics-kpi fbs orders"><span>Создано FBS-заказов</span><strong>{formatNumber.format(analytics.summary.fbs)} <small>шт.</small></strong><p>Это заказы, не продажи</p></article><article className="analytics-kpi share unavailable"><span>Сравнение каналов</span><strong>—</strong><p>Нет факта FBO для сравнения</p></article></>}</div>

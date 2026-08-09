@@ -25,12 +25,36 @@ type AnalyticsPayload = {
   summary: { fbs: number; fbo: number; total: number; fbsShare: number; fboShare: number };
   daily: Array<{ date: string; fbs: number; fbo: number }>;
   fbsWarehouses: Array<{ id: string; name: string; sublabel: string; value: number }>;
-  source: { fbs: "sales" | "orders"; fboAvailable: boolean };
+  source: { fbs: "sales" | "orders"; fboAvailable: boolean; retryAt: string | null; retryExact: boolean };
   warnings: string[];
   updatedAt: string;
 };
 
 const cache = new Map<string, { expiresAt: number; payload: AnalyticsPayload }>();
+
+type WbApiError = Error & { status?: number; retryAfterSeconds?: number; retryExact?: boolean };
+
+function secondsFromHeader(value: string | null) {
+  const seconds = Number(value);
+  return Number.isFinite(seconds) && seconds > 0 ? Math.ceil(seconds) : null;
+}
+
+function rateLimitRetry(response: Response) {
+  const retry = secondsFromHeader(response.headers.get("X-Ratelimit-Retry") ?? response.headers.get("Retry-After"));
+  if (retry !== null) return { seconds: retry, exact: true };
+  const reset = secondsFromHeader(response.headers.get("X-Ratelimit-Reset"));
+  if (reset !== null) return { seconds: reset, exact: true };
+  return { seconds: 30, exact: false };
+}
+
+function retryDetails(error: unknown) {
+  const apiError = error as WbApiError;
+  if (apiError.status !== 429 || !apiError.retryAfterSeconds) return null;
+  return {
+    retryAt: new Date(Date.now() + apiError.retryAfterSeconds * 1000).toISOString(),
+    retryExact: apiError.retryExact ?? false,
+  };
+}
 
 async function wbFetch<T>(token: string, url: string, init?: RequestInit): Promise<T> {
   const response = await fetch(url, {
@@ -39,8 +63,13 @@ async function wbFetch<T>(token: string, url: string, init?: RequestInit): Promi
     headers: { Authorization: token, "Content-Type": "application/json", ...(init?.headers ?? {}) },
   });
   if (!response.ok) {
-    const error = new Error(`WB API ${response.status}`) as Error & { status?: number };
+    const error = new Error(`WB API ${response.status}`) as WbApiError;
     error.status = response.status;
+    if (response.status === 429) {
+      const retry = rateLimitRetry(response);
+      error.retryAfterSeconds = retry.seconds;
+      error.retryExact = retry.exact;
+    }
     throw error;
   }
   return response.json() as Promise<T>;
@@ -145,7 +174,7 @@ export async function GET(request: Request) {
   const warehouseByName = new Map(manualWarehouses.filter((warehouse) => warehouse.wbWarehouseName).map((warehouse) => [warehouse.wbWarehouseName!.trim().toLocaleLowerCase("ru-RU"), warehouse.id]));
   let unassigned = 0;
   const warnings: string[] = [];
-  let source: AnalyticsPayload["source"] = { fbs: "sales", fboAvailable: true };
+  let source: AnalyticsPayload["source"] = { fbs: "sales", fboAvailable: true, retryAt: null, retryExact: true };
 
   if (salesResult.ok) {
     for (const sale of salesResult.items) {
@@ -165,7 +194,8 @@ export async function GET(request: Request) {
     }
   } else {
     warnings.push(warningFor("Факт продаж FBO", salesResult.error));
-    source = { fbs: "orders", fboAvailable: false };
+    const retry = retryDetails(salesResult.error);
+    source = { fbs: "orders", fboAvailable: false, retryAt: retry?.retryAt ?? null, retryExact: retry?.retryExact ?? true };
     try {
       const fallback = await getFbsOrdersFallback(token, period.fromMs, period.toMs);
       const canceled = new Set(["canceled", "canceled_by_client", "declined_by_client", "defect"]);
@@ -183,6 +213,8 @@ export async function GET(request: Request) {
       }
     } catch (error) {
       warnings.push(warningFor("Заказы FBS", error));
+      const retry = retryDetails(error);
+      if (retry && !source.retryAt) source = { ...source, retryAt: retry.retryAt, retryExact: retry.retryExact };
     }
   }
 
@@ -200,6 +232,7 @@ export async function GET(request: Request) {
     warnings,
     updatedAt: new Date().toISOString(),
   };
-  cache.set(key, { expiresAt: Date.now() + (source.fboAvailable ? CACHE_MS : 30 * 1000), payload });
+  const retryCacheMs = source.retryAt ? Math.max(1_000, Date.parse(source.retryAt) - Date.now()) : 0;
+  cache.set(key, { expiresAt: Date.now() + (retryCacheMs || (source.fboAvailable ? CACHE_MS : 30 * 1000)), payload });
   return NextResponse.json(payload, { headers: { "Cache-Control": "private, max-age=0" } });
 }
