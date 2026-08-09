@@ -5,6 +5,7 @@ import * as XLSX from "xlsx";
 
 type StockStatus = "В норме" | "Мало" | "Заканчивается";
 type View = "overview" | "stock" | "fbs" | "sales" | "analytics" | "reports" | "fulfillment" | "manual" | "cabinets";
+type FulfillmentList = "available" | "reserved" | "receiving" | "toSale";
 type FbsBreakdown = Record<string, number>;
 type FfStock = Record<string, number>;
 type FfExpiry = Record<string, string | null>;
@@ -261,6 +262,7 @@ export default function Home() {
   const [analyticsError, setAnalyticsError] = useState<string | null>(null);
   const [filter, setFilter] = useState("Все");
   const [selectedFulfillmentWarehouseId, setSelectedFulfillmentWarehouseId] = useState<string | null>(null);
+  const [fulfillmentList, setFulfillmentList] = useState<FulfillmentList>("available");
   const [selected, setSelected] = useState<StockRow | null>(null);
   const [updatedAt, setUpdatedAt] = useState<string | null>(null);
   const [warnings, setWarnings] = useState<string[]>([]);
@@ -411,12 +413,26 @@ export default function Home() {
     if (!selectedFulfillmentWarehouse) return [];
     const warehouseId = selectedFulfillmentWarehouse.warehouse.id;
     const term = query.trim().toLowerCase();
+    const selectedQuantity = (row: StockRow) => {
+      if (fulfillmentList === "reserved") return row.fbsByLocation[warehouseId] ?? 0;
+      if (fulfillmentList === "receiving") return row.receivingByLocation[warehouseId] ?? 0;
+      if (fulfillmentList === "toSale") return row.toSaleByLocation[warehouseId] ?? 0;
+      return availableFfStock(row, warehouseId);
+    };
     return rows.filter((row) => {
       const matchesWarehouse = (row.ffStock[warehouseId] ?? 0) > 0 || (row.fbsByLocation[warehouseId] ?? 0) > 0 || (row.receivingByLocation[warehouseId] ?? 0) > 0 || (row.toSaleByLocation[warehouseId] ?? 0) > 0;
       const matchesQuery = !term || row.name.toLowerCase().includes(term) || row.sku.toLowerCase().includes(term) || String(row.nmId ?? "").includes(term);
-      return matchesWarehouse && matchesQuery;
-    });
-  }, [selectedFulfillmentWarehouse, rows, query]);
+      return matchesWarehouse && selectedQuantity(row) > 0 && matchesQuery;
+    }).sort((left, right) => selectedQuantity(right) - selectedQuantity(left) || left.name.localeCompare(right.name, "ru"));
+  }, [selectedFulfillmentWarehouse, rows, query, fulfillmentList]);
+
+  const fulfillmentListMeta: Record<FulfillmentList, { kicker: string; title: string; empty: string; primary: string; footer: string }> = {
+    available: { kicker: "ОСТАТКИ НА ФФ", title: "Доступный остаток по артикулам", empty: "На этом ФФ нет доступного остатка", primary: "Доступно ФФ", footer: "Товары, которые можно отгружать прямо сейчас" },
+    reserved: { kicker: "FBS В РЕЗЕРВЕ", title: "Заказы FBS в резерве", empty: "Нет товаров в резерве FBS", primary: "FBS в резерве", footer: "Эти единицы уже вычтены из доступного остатка" },
+    receiving: { kicker: "ОЖИДАЮТ WB", title: "Товары, ожидающие приёмку WB", empty: "Нет товаров со статусом waiting", primary: "Ожидают WB", footer: "Заказы отгружены и ожидают приёмки Wildberries" },
+    toSale: { kicker: "ОЖИДАЮТ ПРОДАЖИ", title: "Товары, ожидающие продажи", empty: "Нет заказов, готовых к продаже", primary: "Ожидают продажи", footer: "Статусы WB: sorted / ready for pickup" },
+  };
+  const activeFulfillmentListMeta = fulfillmentListMeta[fulfillmentList];
 
   const selectedSalesWarehouse = manualWarehouses.find((item) => item.id === salesWarehouseId) ?? null;
   const salesRows = useMemo(() => {
@@ -492,6 +508,7 @@ export default function Home() {
 
   const openFulfillmentWarehouse = (warehouseId: string) => {
     setSelectedFulfillmentWarehouseId(warehouseId);
+    setFulfillmentList("available");
     setQuery("");
     window.scrollTo({ top: 0, behavior: "smooth" });
   };
@@ -777,8 +794,13 @@ export default function Home() {
                   <div><button className="back-link" type="button" onClick={() => { setSelectedFulfillmentWarehouseId(null); setQuery(""); }}>‹ Все склады ФФ</button><span className="section-kicker">ФФ · СКЛАД В РАБОТЕ</span><h2>{formatManualWarehouse(selectedFulfillmentWarehouse.warehouse)}</h2><p className="section-note">Остатки на этом ФФ и FBS-заказы, отгруженные с привязанного склада WB.</p></div>
                   <button className="secondary-btn" type="button" onClick={() => navigateTo("manual")}>Настроить склад</button>
                 </div>
-                <div className="fulfillment-metric-grid"><article><span>Доступно на ФФ</span><strong>{formatNumber.format(selectedFulfillmentWarehouse.stock)} <small>шт.</small></strong><p>В базе {formatNumber.format(selectedFulfillmentWarehouse.physicalStock)} · резерв FBS {selectedFulfillmentWarehouse.fbs}</p></article><article><span>FBS в резерве</span><strong>{formatNumber.format(selectedFulfillmentWarehouse.fbs)} <small>шт.</small></strong><p>Вычтено из доступного остатка</p></article><article><span>Ожидают WB</span><strong>{formatNumber.format(selectedFulfillmentWarehouse.receiving)} <small>шт.</small></strong><p>Статус waiting</p></article><article><span>Ожидают продажи</span><strong>{formatNumber.format(selectedFulfillmentWarehouse.toSale)} <small>шт.</small></strong><p>sorted / ready for pickup</p></article></div>
-                <section className="stock-card fulfillment-stock-card"><div className="stock-header"><div><span className="section-kicker">ПО АРТИКУЛАМ</span><h2>Доступный остаток и FBS-резерв</h2></div><label className="search-field"><span>⌕</span><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Артикул или название" aria-label="Поиск по выбранному складу ФФ" /></label></div><div className="fulfillment-table-wrap"><table><thead><tr><th>Товар / артикул</th><th>Доступно ФФ</th><th>FBS в резерве</th><th>Ожидают продажи</th><th>Статус ФФ</th><th /></tr></thead><tbody>{fulfillmentRows.map((row) => { const availableStock = availableFfStock(row, selectedFulfillmentWarehouse.warehouse.id); const status = fulfillmentStockStatus(availableStock); return <tr key={row.key} onClick={() => openProduct(row)} tabIndex={0} onKeyDown={(event) => { if (event.key === "Enter") openProduct(row); }}><td><div className="product-cell"><span className="product-swatch" style={{ background: row.color }}>{row.name.charAt(0).toUpperCase()}</span><span><strong>{row.name}</strong><small>{row.sku}{row.nmId ? ` · WB ${row.nmId}` : ""} · {row.category}</small></span></div></td><td><span className={`manual-stock-value ${availableStock === 0 ? "zero" : ""}`}>{formatNumber.format(availableStock)}<small> шт.</small></span></td><td><span className="number-pill blue-pill">{formatNumber.format(row.fbsByLocation[selectedFulfillmentWarehouse.warehouse.id] ?? 0)}</span></td><td><span className="number-pill green-pill">{formatNumber.format(row.toSaleByLocation[selectedFulfillmentWarehouse.warehouse.id] ?? 0)}</span></td><td><span className={`status ${status === "В норме" ? "ok" : status === "Мало" ? "low" : "critical"}`}><i />{status}</span></td><td><button type="button" className="row-action" aria-label={`Открыть ${row.name}`}>›</button></td></tr>; })}</tbody></table>{!loading && !fulfillmentRows.length && <div className="empty-state"><strong>На этом складе пока нет движения</strong><span>Загрузите остатки Excel или свяжите склад с FBS WB.</span></div>}</div><footer className="table-footer"><span><i className={error ? "live-dot offline" : "live-dot"} />{fulfillmentRows.length} артикулов на выбранном ФФ</span><span>Активные FBS вычтены из доступного остатка</span></footer></section>
+                <div className="fulfillment-metric-grid" role="group" aria-label="Списки по статусу товара">
+                  <button type="button" className={`fulfillment-metric ${fulfillmentList === "available" ? "active" : ""}`} aria-pressed={fulfillmentList === "available"} onClick={() => { setFulfillmentList("available"); setQuery(""); }}><span>Доступно на ФФ</span><strong>{formatNumber.format(selectedFulfillmentWarehouse.stock)} <small>шт.</small></strong><p>В базе {formatNumber.format(selectedFulfillmentWarehouse.physicalStock)} · резерв FBS {selectedFulfillmentWarehouse.fbs}</p></button>
+                  <button type="button" className={`fulfillment-metric ${fulfillmentList === "reserved" ? "active" : ""}`} aria-pressed={fulfillmentList === "reserved"} onClick={() => { setFulfillmentList("reserved"); setQuery(""); }}><span>FBS в резерве</span><strong>{formatNumber.format(selectedFulfillmentWarehouse.fbs)} <small>шт.</small></strong><p>Вычтено из доступного остатка</p></button>
+                  <button type="button" className={`fulfillment-metric ${fulfillmentList === "receiving" ? "active" : ""}`} aria-pressed={fulfillmentList === "receiving"} onClick={() => { setFulfillmentList("receiving"); setQuery(""); }}><span>Ожидают WB</span><strong>{formatNumber.format(selectedFulfillmentWarehouse.receiving)} <small>шт.</small></strong><p>Статус waiting</p></button>
+                  <button type="button" className={`fulfillment-metric ${fulfillmentList === "toSale" ? "active" : ""}`} aria-pressed={fulfillmentList === "toSale"} onClick={() => { setFulfillmentList("toSale"); setQuery(""); }}><span>Ожидают продажи</span><strong>{formatNumber.format(selectedFulfillmentWarehouse.toSale)} <small>шт.</small></strong><p>sorted / ready for pickup</p></button>
+                </div>
+                <section className="stock-card fulfillment-stock-card"><div className="stock-header"><div><span className="section-kicker">{activeFulfillmentListMeta.kicker}</span><h2 aria-live="polite">{activeFulfillmentListMeta.title}</h2><p className="fulfillment-list-note">Нажмите на карточку выше, чтобы переключить список.</p></div><label className="search-field"><span>⌕</span><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Артикул или название" aria-label="Поиск по выбранному списку склада ФФ" /></label></div><div className="fulfillment-table-wrap"><table><thead><tr><th>Товар / артикул</th><th>{activeFulfillmentListMeta.primary}</th><th>{fulfillmentList === "available" ? "FBS в резерве" : "Доступно ФФ"}</th><th>{fulfillmentList === "receiving" ? "FBS в резерве" : "Ожидают WB"}</th><th>Статус ФФ</th><th /></tr></thead><tbody>{fulfillmentRows.map((row) => { const warehouseId = selectedFulfillmentWarehouse.warehouse.id; const availableStock = availableFfStock(row, warehouseId); const fbsReserve = row.fbsByLocation[warehouseId] ?? 0; const waitingForWb = row.receivingByLocation[warehouseId] ?? 0; const waitingForSale = row.toSaleByLocation[warehouseId] ?? 0; const primaryValue = fulfillmentList === "reserved" ? fbsReserve : fulfillmentList === "receiving" ? waitingForWb : fulfillmentList === "toSale" ? waitingForSale : availableStock; const secondaryValue = fulfillmentList === "available" ? fbsReserve : availableStock; const thirdValue = fulfillmentList === "receiving" ? fbsReserve : waitingForWb; const status = fulfillmentStockStatus(availableStock); const primaryClass = fulfillmentList === "available" ? `manual-stock-value ${availableStock === 0 ? "zero" : ""}` : fulfillmentList === "reserved" ? "number-pill blue-pill" : fulfillmentList === "receiving" ? "number-pill amber-pill" : "number-pill green-pill"; const secondaryClass = fulfillmentList === "available" ? "number-pill blue-pill" : `manual-stock-value ${availableStock === 0 ? "zero" : ""}`; const thirdClass = fulfillmentList === "receiving" ? "number-pill blue-pill" : "number-pill amber-pill"; return <tr key={row.key} onClick={() => openProduct(row)} tabIndex={0} onKeyDown={(event) => { if (event.key === "Enter") openProduct(row); }}><td><div className="product-cell"><span className="product-swatch" style={{ background: row.color }}>{row.name.charAt(0).toUpperCase()}</span><span><strong>{row.name}</strong><small>{row.sku}{row.nmId ? ` · WB ${row.nmId}` : ""} · {row.category}</small></span></div></td><td><span className={primaryClass}>{formatNumber.format(primaryValue)}{fulfillmentList === "available" && <small> шт.</small>}</span></td><td><span className={secondaryClass}>{formatNumber.format(secondaryValue)}{fulfillmentList !== "available" && <small> шт.</small>}</span></td><td><span className={thirdClass}>{formatNumber.format(thirdValue)}</span></td><td><span className={`status ${status === "В норме" ? "ok" : status === "Мало" ? "low" : "critical"}`}><i />{status}</span></td><td><button type="button" className="row-action" aria-label={`Открыть ${row.name}`}>›</button></td></tr>; })}</tbody></table>{!loading && !fulfillmentRows.length && <div className="empty-state"><strong>{activeFulfillmentListMeta.empty}</strong><span>Выберите другую карточку или проверьте привязку ФФ к складу WB.</span></div>}</div><footer className="table-footer"><span><i className={error ? "live-dot offline" : "live-dot"} />{fulfillmentRows.length} артикулов в выбранном списке</span><span>{activeFulfillmentListMeta.footer}</span></footer></section>
               </>}
             </section>
           ) : activeView === "manual" ? (
