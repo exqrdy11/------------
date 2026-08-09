@@ -6,6 +6,7 @@ import * as XLSX from "xlsx";
 type StockStatus = "В норме" | "Мало" | "Заканчивается";
 type View = "overview" | "stock" | "fbs" | "sales" | "analytics" | "reports" | "fulfillment" | "manual" | "cabinets";
 type FulfillmentList = "available" | "reserved" | "receiving" | "toSale";
+type AnalyticsChannel = "all" | "fbs" | "fbo";
 type FbsBreakdown = Record<string, number>;
 type FfStock = Record<string, number>;
 type FfExpiry = Record<string, string | null>;
@@ -260,6 +261,8 @@ export default function Home() {
   const [analytics, setAnalytics] = useState<AnalyticsResponse | null>(null);
   const [analyticsLoading, setAnalyticsLoading] = useState(false);
   const [analyticsError, setAnalyticsError] = useState<string | null>(null);
+  const [analyticsChannel, setAnalyticsChannel] = useState<AnalyticsChannel>("all");
+  const [analyticsHoverDate, setAnalyticsHoverDate] = useState<string | null>(null);
   const [filter, setFilter] = useState("Все");
   const [selectedFulfillmentWarehouseId, setSelectedFulfillmentWarehouseId] = useState<string | null>(null);
   const [fulfillmentList, setFulfillmentList] = useState<FulfillmentList>("available");
@@ -477,11 +480,32 @@ export default function Home() {
   }), [rows]);
   const viewTotal = activeView === "fbs" ? rows.filter((row) => row.fbs > 0).length : rows.length;
   const stockTitle = activeView === "fbs" ? "Артикулы в FBS-движении" : "Все товары Wildberries";
-  const analyticsChartMax = useMemo(() => Math.max(1, ...(analytics?.daily.map((item) => item.fbs + item.fbo) ?? [0])), [analytics]);
+  const analyticsTrend = useMemo(() => {
+    const daily = analytics?.daily ?? [];
+    const channels: Array<"fbs" | "fbo"> = analyticsChannel === "all" ? ["fbs", "fbo"] : [analyticsChannel];
+    const max = Math.max(1, ...daily.flatMap((point) => channels.map((channel) => point[channel])));
+    const width = 1000;
+    const height = 250;
+    const left = 18;
+    const right = 18;
+    const top = 17;
+    const bottom = 36;
+    const plotHeight = height - top - bottom;
+    const pointX = (index: number) => daily.length < 2 ? width / 2 : left + (index / (daily.length - 1)) * (width - left - right);
+    const valueY = (value: number) => top + (1 - value / max) * plotHeight;
+    const points = daily.map((point, index) => ({ ...point, x: pointX(index), fbsY: valueY(point.fbs), fboY: valueY(point.fbo) }));
+    const path = (channel: "fbs" | "fbo") => points.map((point, index) => `${index === 0 ? "M" : "L"}${point.x.toFixed(2)} ${channel === "fbs" ? point.fbsY.toFixed(2) : point.fboY.toFixed(2)}`).join(" ");
+    const labelEvery = daily.length > 30 ? 7 : daily.length > 14 ? 4 : 1;
+    return { max, width, height, top, bottom, plotHeight, points, fbsPath: path("fbs"), fboPath: path("fbo"), labelEvery };
+  }, [analytics, analyticsChannel]);
+  const activeAnalyticsPoint = useMemo(() => analyticsHoverDate ? analytics?.daily.find((point) => point.date === analyticsHoverDate) ?? null : null, [analytics, analyticsHoverDate]);
+  const activeAnalyticsTrendPoint = useMemo(() => analyticsHoverDate ? analyticsTrend.points.find((point) => point.date === analyticsHoverDate) ?? null : null, [analyticsHoverDate, analyticsTrend.points]);
+  const analyticsChannelTitle = analyticsChannel === "all" ? "FBS и FBO" : analyticsChannel.toUpperCase();
   const strongestFbsWarehouse = useMemo(() => analytics?.fbsWarehouses.find((warehouse) => warehouse.value > 0) ?? null, [analytics]);
 
   const chooseAnalyticsPeriod = (period: "7d" | "14d" | "30d" | "custom") => {
     setAnalyticsPeriod(period);
+    setAnalyticsHoverDate(null);
     if (period === "custom") return;
     const days = period === "7d" ? 7 : period === "14d" ? 14 : 30;
     const range = { from: isoDate(days - 1), to: isoDate(0) };
@@ -494,6 +518,7 @@ export default function Home() {
       setAnalyticsError("Проверьте даты периода");
       return;
     }
+    setAnalyticsHoverDate(null);
     setAnalyticsRange(analyticsDraft);
   };
 
@@ -877,7 +902,7 @@ export default function Home() {
                 <div className="analytics-kpi-grid"><article className="analytics-kpi total"><span>Продажи за период</span><strong>{formatNumber.format(analytics.summary.total)} <small>шт.</small></strong><p>FBS и FBO вместе</p></article><article className="analytics-kpi fbo"><span>Продажи FBO</span><strong>{formatNumber.format(analytics.summary.fbo)} <small>шт.</small></strong><p>{analytics.source.fboAvailable ? `${analytics.summary.fboShare}% от продаж` : "Нужен доступ «Статистика»"}</p></article><article className="analytics-kpi fbs"><span>{analytics.source.fbs === "sales" ? "Продажи FBS" : "Заказы FBS"}</span><strong>{formatNumber.format(analytics.summary.fbs)} <small>шт.</small></strong><p>{analytics.summary.fbsShare}% от продаж</p></article><article className="analytics-kpi share"><span>Доля FBS</span><strong>{analytics.summary.fbsShare}<small>%</small></strong><p>{analytics.source.fbs === "sales" ? "По факту продаж" : "По созданным заказам"}</p></article></div>
 
                 <div className="analytics-grid">
-                  <section className="analytics-card analytics-trend-card"><div className="analytics-card-heading"><div><span className="section-kicker">ДИНАМИКА</span><h3>FBS и FBO по дням</h3></div><div className="analytics-legend"><span><i className="fbo"/>FBO</span><span><i className="fbs"/>FBS</span></div></div><div className="analytics-bars" aria-label="График FBS и FBO по дням">{analytics.daily.map((point, index) => { const labelEvery = analytics.daily.length > 14 ? 5 : 1; const total = point.fbs + point.fbo; return <div className="analytics-day" key={point.date} title={`${shortDate(point.date)}: FBO ${point.fbo}, FBS ${point.fbs}`}><div className="analytics-bar-stack"><i className="analytics-bar-fbs" style={{ height: point.fbs ? `${Math.max(6, (point.fbs / analyticsChartMax) * 100)}%` : 0 }} /><i className="analytics-bar-fbo" style={{ height: point.fbo ? `${Math.max(6, (point.fbo / analyticsChartMax) * 100)}%` : 0 }} /></div><b>{total || ""}</b><span>{index === 0 || index === analytics.daily.length - 1 || index % labelEvery === 0 ? shortDate(point.date) : ""}</span></div>; })}</div><p className="analytics-card-note">Наведите на столбик, чтобы увидеть количество за день.</p></section>
+                  <section className="analytics-card analytics-trend-card"><div className="analytics-card-heading"><div><span className="section-kicker">ДИНАМИКА</span><h3>{analyticsChannelTitle} по дням</h3></div><div className="analytics-channel-toggle" role="group" aria-label="Канал на графике"><button type="button" className={analyticsChannel === "all" ? "active" : ""} aria-pressed={analyticsChannel === "all"} onClick={() => { setAnalyticsChannel("all"); setAnalyticsHoverDate(null); }}>Вместе</button><button type="button" className={analyticsChannel === "fbs" ? "active fbs" : "fbs"} aria-pressed={analyticsChannel === "fbs"} onClick={() => { setAnalyticsChannel("fbs"); setAnalyticsHoverDate(null); }}>FBS</button><button type="button" className={analyticsChannel === "fbo" ? "active fbo" : "fbo"} aria-pressed={analyticsChannel === "fbo"} onClick={() => { setAnalyticsChannel("fbo"); setAnalyticsHoverDate(null); }}>FBO</button></div></div><div className="analytics-line-chart" onMouseLeave={() => setAnalyticsHoverDate(null)}><svg viewBox={`0 0 ${analyticsTrend.width} ${analyticsTrend.height}`} role="img" aria-label={`Линейный график ${analyticsChannelTitle} по дням`} preserveAspectRatio="none"><g className="analytics-line-grid">{[0, 1, 2, 3, 4].map((index) => { const y = analyticsTrend.top + (analyticsTrend.plotHeight / 4) * index; const value = Math.round(analyticsTrend.max * (1 - index / 4)); return <g key={index}><line x1="18" x2="982" y1={y} y2={y}/><text x="2" y={y + 3}>{value}</text></g>; })}</g>{analyticsChannel !== "fbs" && <path className="analytics-line fbo" d={analyticsTrend.fboPath}/>} {analyticsChannel !== "fbo" && <path className="analytics-line fbs" d={analyticsTrend.fbsPath}/>} {analyticsTrend.points.map((point, index) => <g key={point.date}>{analyticsChannel !== "fbs" && <circle className={`analytics-line-point fbo ${analyticsHoverDate === point.date ? "active" : ""}`} cx={point.x} cy={point.fboY} r={analyticsHoverDate === point.date ? 5 : 2.6}/>} {analyticsChannel !== "fbo" && <circle className={`analytics-line-point fbs ${analyticsHoverDate === point.date ? "active" : ""}`} cx={point.x} cy={point.fbsY} r={analyticsHoverDate === point.date ? 5 : 2.6}/>} {(index === 0 || index === analyticsTrend.points.length - 1 || index % analyticsTrend.labelEvery === 0) && <text className="analytics-line-label" x={point.x} y={analyticsTrend.height - 8}>{shortDate(point.date)}</text>}</g>)}</svg><div className="analytics-line-hit-zones">{analyticsTrend.points.map((point) => <button type="button" key={point.date} className={analyticsHoverDate === point.date ? "active" : ""} style={{ left: `${(point.x / analyticsTrend.width) * 100}%`, width: `${Math.max(4, 100 / Math.max(1, analyticsTrend.points.length))}%` }} onMouseEnter={() => setAnalyticsHoverDate(point.date)} onFocus={() => setAnalyticsHoverDate(point.date)} onClick={() => setAnalyticsHoverDate(point.date)} aria-label={`${shortDate(point.date)}: FBS ${point.fbs}, FBO ${point.fbo}`} />)}</div>{activeAnalyticsPoint && activeAnalyticsTrendPoint && <div className="analytics-line-tooltip" style={{ left: `${Math.min(88, Math.max(12, (activeAnalyticsTrendPoint.x / analyticsTrend.width) * 100))}%` }}><strong>{shortDate(activeAnalyticsPoint.date)}</strong><span><i className="fbs"/>FBS <b>{formatNumber.format(activeAnalyticsPoint.fbs)} шт.</b></span><span><i className="fbo"/>FBO <b>{formatNumber.format(activeAnalyticsPoint.fbo)} шт.</b></span></div>}</div><p className="analytics-card-note">Наведите на точку или дату — увидите продажи FBS и FBO за конкретный день.</p></section>
                   <section className="analytics-card analytics-channel-card"><div className="analytics-card-heading"><div><span className="section-kicker">СТРУКТУРА</span><h3>Соотношение каналов</h3></div><span className="analytics-total-badge">{formatNumber.format(analytics.summary.total)} шт.</span></div><div className="analytics-channel-body"><div className="analytics-donut" style={{ background: `conic-gradient(#365df2 0 ${analytics.summary.fbsShare}%, #20a16d ${analytics.summary.fbsShare}% 100%)` }}><span><b>{analytics.summary.fbsShare}%</b><small>FBS</small></span></div><div className="analytics-channel-list"><div><span><i className="fbs"/>FBS</span><strong>{formatNumber.format(analytics.summary.fbs)} <small>шт.</small></strong></div><div><span><i className="fbo"/>FBO</span><strong>{formatNumber.format(analytics.summary.fbo)} <small>шт.</small></strong></div></div></div><p className="analytics-card-note">{analytics.source.fboAvailable ? "Факт продаж: возвраты не включены." : "FBO появится после выдачи категории «Статистика» токену."}</p></section>
                 </div>
 
