@@ -465,7 +465,11 @@ export async function GET(request: Request) {
         row.sales7dByWbWarehouse[warehouseId] = (row.sales7dByWbWarehouse[warehouseId] ?? 0) + 1;
       }
       if (terminal.has(status.wbStatus ?? "") || status.supplierStatus === "cancel") continue;
-      if (status.supplierStatus === "complete") {
+
+      // WB keeps a delivery sticker on the same assembly order after it moves
+      // from `confirm` (being assembled) to `complete` (in delivery). These
+      // are successive statuses, not two different units of stock.
+      if (status.supplierStatus === "confirm") {
         row.fbs += 1;
         row.fbsByWbWarehouse[warehouseId] = (row.fbsByWbWarehouse[warehouseId] ?? 0) + 1;
         if (order.supplyId) supplies.add(order.supplyId);
@@ -473,10 +477,12 @@ export async function GET(request: Request) {
       if (status.supplierStatus === "complete" && status.wbStatus === "waiting") {
         row.receiving += 1;
         row.receivingByWbWarehouse[warehouseId] = (row.receivingByWbWarehouse[warehouseId] ?? 0) + 1;
+        if (order.supplyId) supplies.add(order.supplyId);
       }
       if (status.wbStatus === "sorted" || status.wbStatus === "ready_for_pickup") {
         row.toSale += 1;
         row.toSaleByWbWarehouse[warehouseId] = (row.toSaleByWbWarehouse[warehouseId] ?? 0) + 1;
+        if (order.supplyId) supplies.add(order.supplyId);
       }
     }
     activeSupplies = supplies.size;
