@@ -1,6 +1,7 @@
 "use client";
 
 import { type ChangeEvent, type FormEvent, useCallback, useEffect, useMemo, useState } from "react";
+import * as CFB from "cfb";
 import * as XLSX from "xlsx";
 
 type StockStatus = "В норме" | "Мало" | "Заканчивается";
@@ -86,6 +87,13 @@ type AnalyticsResponse = {
 
 type ImportItem = { sku: string; nmId: number | null; quantity: number; batchCode: string; expiresAt?: string | null };
 type ImportPreview = { fileName: string; sheetName: string; items: ImportItem[]; skipped: number; hasExpiryColumn: boolean; hasBatchColumn: boolean };
+type FfOrderExport = { orderId: number; article: string; quantity: number; sticker: string | null };
+type FfOrdersExportResponse = {
+  warehouse?: { id: string; city: string; name: string };
+  orders?: FfOrderExport[];
+  missingStickers?: number;
+  error?: string;
+};
 
 const defaultManualWarehouses: ManualWarehouse[] = [
   { id: "kazan", city: "Казань", name: "Наш склад", position: 10, wbWarehouseId: 1692397, wbWarehouseName: null },
@@ -177,6 +185,59 @@ function parseExpiryDate(value: unknown) {
   const date = new Date(Date.UTC(year, month - 1, day));
   if (date.getUTCFullYear() !== year || date.getUTCMonth() !== month - 1 || date.getUTCDate() !== day) return null;
   return `${year.toString().padStart(4, "0")}-${month.toString().padStart(2, "0")}-${day.toString().padStart(2, "0")}`;
+}
+
+function base64ToBytes(value: string) {
+  const binary = atob(value);
+  const bytes = new Uint8Array(binary.length);
+  for (let index = 0; index < binary.length; index += 1) bytes[index] = binary.charCodeAt(index);
+  return bytes;
+}
+
+function downloadFfOrdersWorkbook(warehouse: { city: string; name: string }, orders: FfOrderExport[]) {
+  const workbook = XLSX.utils.book_new();
+  const worksheet = XLSX.utils.aoa_to_sheet([
+    ["Артикул продавца", "Кол-во", "Стикер WB"],
+    ...orders.map((order) => [order.article, order.quantity, order.sticker ? "" : "Стикер не получен"]),
+  ]);
+  worksheet["!cols"] = [{ wch: 31 }, { wch: 10 }, { wch: 48 }];
+  worksheet["!rows"] = [{ hpt: 24 }, ...orders.map(() => ({ hpt: 180 }))];
+  XLSX.utils.book_append_sheet(workbook, worksheet, "Заказы ФФ");
+
+  const root = "Root Entry/";
+  const encoder = new TextEncoder();
+  const decoder = new TextDecoder();
+  const archive = CFB.read(new Uint8Array(XLSX.write(workbook, { type: "array", bookType: "xlsx" })), { type: "array" });
+  const readText = (path: string) => {
+    const entry = CFB.find(archive, `${root}${path}`);
+    if (!entry?.content) throw new Error(`Не удалось подготовить Excel: ${path}`);
+    return decoder.decode(entry.content);
+  };
+  const put = (path: string, value: string | Uint8Array) => {
+    CFB.utils.cfb_del(archive, `${root}${path}`);
+    CFB.utils.cfb_add(archive, `${root}${path}`, typeof value === "string" ? encoder.encode(value) : value, { unsafe: true });
+  };
+
+  const images = orders.flatMap((order, orderIndex) => order.sticker ? [{ orderIndex, data: base64ToBytes(order.sticker) }] : []);
+  if (images.length) {
+    const sheetXml = readText("xl/worksheets/sheet1.xml");
+    put("xl/worksheets/sheet1.xml", sheetXml.replace("</worksheet>", "<drawing r:id=\"rId1\"/></worksheet>"));
+    put("xl/worksheets/_rels/sheet1.xml.rels", "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?><Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\"><Relationship Id=\"rId1\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/drawing\" Target=\"../drawings/drawing1.xml\"/></Relationships>");
+    put("xl/drawings/_rels/drawing1.xml.rels", `<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?><Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\">${images.map((_, imageIndex) => `<Relationship Id=\"rId${imageIndex + 1}\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/image\" Target=\"../media/image${imageIndex + 1}.png\"/>`).join("")}</Relationships>`);
+    put("xl/drawings/drawing1.xml", `<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?><xdr:wsDr xmlns:xdr=\"http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing\" xmlns:a=\"http://schemas.openxmlformats.org/drawingml/2006/main\" xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\">${images.map((image, imageIndex) => `<xdr:twoCellAnchor editAs=\"oneCell\"><xdr:from><xdr:col>2</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>${image.orderIndex + 1}</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:from><xdr:to><xdr:col>2</xdr:col><xdr:colOff>3200000</xdr:colOff><xdr:row>${image.orderIndex + 1}</xdr:row><xdr:rowOff>2200000</xdr:rowOff></xdr:to><xdr:pic><xdr:nvPicPr><xdr:cNvPr id=\"${imageIndex + 1}\" name=\"Стикер ${imageIndex + 1}\"/><xdr:cNvPicPr/></xdr:nvPicPr><xdr:blipFill><a:blip r:embed=\"rId${imageIndex + 1}\"/><a:stretch><a:fillRect/></a:stretch></xdr:blipFill><xdr:spPr><a:xfrm><a:off x=\"0\" y=\"0\"/><a:ext cx=\"3200000\" cy=\"2200000\"/></a:xfrm><a:prstGeom prst=\"rect\"><a:avLst/></a:prstGeom></xdr:spPr></xdr:pic><xdr:clientData/></xdr:twoCellAnchor>`).join("")}</xdr:wsDr>`);
+    images.forEach((image, imageIndex) => put(`xl/media/image${imageIndex + 1}.png`, image.data));
+    const contentTypes = readText("[Content_Types].xml");
+    if (!contentTypes.includes("/xl/drawings/drawing1.xml")) put("[Content_Types].xml", contentTypes.replace("</Types>", "<Override PartName=\"/xl/drawings/drawing1.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.drawing+xml\"/></Types>"));
+  }
+
+  const output = CFB.write(archive, { type: "array", fileType: "zip", compression: true });
+  const blob = new Blob([output], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = `FBS-заказы-${warehouse.city.replace(/[^\\p{L}\\p{N}-]+/gu, "-")}-${new Date().toISOString().slice(0, 10)}.xlsx`;
+  link.click();
+  window.setTimeout(() => URL.revokeObjectURL(url), 1_000);
 }
 
 async function parseExcelFile(file: File): Promise<ImportPreview> {
@@ -274,6 +335,9 @@ export default function Home() {
   const [filter, setFilter] = useState("Все");
   const [selectedFulfillmentWarehouseId, setSelectedFulfillmentWarehouseId] = useState<string | null>(null);
   const [fulfillmentList, setFulfillmentList] = useState<FulfillmentList>("available");
+  const [ffOrdersExportLoading, setFfOrdersExportLoading] = useState(false);
+  const [ffOrdersExportMessage, setFfOrdersExportMessage] = useState<string | null>(null);
+  const [ffOrdersExportError, setFfOrdersExportError] = useState<string | null>(null);
   const [selected, setSelected] = useState<StockRow | null>(null);
   const [updatedAt, setUpdatedAt] = useState<string | null>(null);
   const [warnings, setWarnings] = useState<string[]>([]);
@@ -773,6 +837,36 @@ export default function Home() {
     URL.revokeObjectURL(url);
   };
 
+  const downloadFfOrders = async (warehouse: ManualWarehouse) => {
+    setFfOrdersExportMessage(null);
+    setFfOrdersExportError(null);
+    if (!warehouse.wbWarehouseId) {
+      setFfOrdersExportError("Сначала привяжите этот ФФ к складу WB — укажите ID склада в настройках.");
+      return;
+    }
+    setFfOrdersExportLoading(true);
+    try {
+      const response = await fetch(`/api/ff-orders?warehouseId=${encodeURIComponent(warehouse.id)}`, { cache: "no-store" });
+      const data = await response.json() as FfOrdersExportResponse;
+      if (response.status === 401) {
+        setAuthState("unauthenticated");
+        return;
+      }
+      if (!response.ok) throw new Error(data.error || "Не удалось получить FBS-заказы из Wildberries");
+      const orders = data.orders ?? [];
+      if (!orders.length) {
+        setFfOrdersExportMessage("Для этого ФФ нет актуальных FBS-заказов на сборке или в доставке.");
+        return;
+      }
+      downloadFfOrdersWorkbook(warehouse, orders);
+      setFfOrdersExportMessage(data.missingStickers ? `Скачано ${orders.length} заказов. Для ${data.missingStickers} WB пока не вернул стикер.` : `Скачано ${orders.length} актуальных FBS-заказов со стикерами WB.`);
+    } catch (downloadError) {
+      setFfOrdersExportError(downloadError instanceof Error ? downloadError.message : "Не удалось подготовить Excel");
+    } finally {
+      setFfOrdersExportLoading(false);
+    }
+  };
+
   if (authState === "checking") {
     return <main className="admin-login-shell"><section className="admin-login-card checking"><span className="login-brand-mark">С</span><div className="loader"/><strong>Проверяем доступ</strong></section></main>;
   }
@@ -853,8 +947,9 @@ export default function Home() {
               </> : <>
                 <div className="section-heading fulfillment-heading">
                   <div><button className="back-link" type="button" onClick={() => { setSelectedFulfillmentWarehouseId(null); setQuery(""); }}>‹ Все склады ФФ</button><span className="section-kicker">ФФ · СКЛАД В РАБОТЕ</span><h2>{formatManualWarehouse(selectedFulfillmentWarehouse.warehouse)}</h2><p className="section-note">Остатки на этом ФФ и FBS-заказы, отгруженные с привязанного склада WB.</p></div>
-                  <button className="secondary-btn" type="button" onClick={() => navigateTo("manual")}>Настроить склад</button>
+                  <div className="fulfillment-heading-actions"><button className="secondary-btn fulfillment-export-btn" type="button" onClick={() => void downloadFfOrders(selectedFulfillmentWarehouse.warehouse)} disabled={ffOrdersExportLoading || !selectedFulfillmentWarehouse.warehouse.wbWarehouseId}>{ffOrdersExportLoading ? "Собираем стикеры…" : "Excel: заказы + стикеры ↓"}</button><button className="secondary-btn" type="button" onClick={() => navigateTo("manual")}>Настроить склад</button></div>
                 </div>
+                <div className="fulfillment-export-note"><span>Только актуальные FBS-заказы этого ФФ. Одна строка — один заказ: артикул, количество и стикер WB.</span>{ffOrdersExportMessage && <strong className="success">{ffOrdersExportMessage}</strong>}{ffOrdersExportError && <strong className="error">{ffOrdersExportError}</strong>}</div>
                 <div className="fulfillment-metric-grid" role="group" aria-label="Списки по статусу товара">
                   <button type="button" className={`fulfillment-metric ${fulfillmentList === "available" ? "active" : ""}`} aria-pressed={fulfillmentList === "available"} onClick={() => { setFulfillmentList("available"); setQuery(""); }}><span>Доступно на ФФ</span><strong>{formatNumber.format(selectedFulfillmentWarehouse.stock)} <small>шт.</small></strong><p>В базе {formatNumber.format(selectedFulfillmentWarehouse.physicalStock)} · резерв FBS {selectedFulfillmentWarehouse.fbs}</p></button>
                   <button type="button" className={`fulfillment-metric ${fulfillmentList === "reserved" ? "active" : ""}`} aria-pressed={fulfillmentList === "reserved"} onClick={() => { setFulfillmentList("reserved"); setQuery(""); }}><span>FBS в резерве</span><strong>{formatNumber.format(selectedFulfillmentWarehouse.fbs)} <small>шт.</small></strong><p>Вычтено из доступного остатка</p></button>
