@@ -69,6 +69,7 @@ type InventoryResponse = {
   manualWarehouses?: ManualWarehouse[];
   totals?: DashboardTotals;
   warnings?: string[];
+  retryAt?: string | null;
   updatedAt?: string;
   error?: string;
 };
@@ -345,6 +346,9 @@ export default function Home() {
   const [error, setError] = useState<string | null>(null);
   const [configured, setConfigured] = useState(true);
   const [loading, setLoading] = useState(true);
+  const [inventoryRetryAt, setInventoryRetryAt] = useState<string | null>(null);
+  const [inventoryClock, setInventoryClock] = useState(() => Date.now());
+  const [inventoryLoadingStartedAt, setInventoryLoadingStartedAt] = useState<number | null>(null);
   const [newWarehouseCity, setNewWarehouseCity] = useState("");
   const [newWarehouseName, setNewWarehouseName] = useState("");
   const [warehouseSaving, setWarehouseSaving] = useState(false);
@@ -375,6 +379,7 @@ export default function Home() {
 
   const loadData = useCallback(async (force = false) => {
     setLoading(true);
+    setInventoryLoadingStartedAt(Date.now());
     setError(null);
     try {
       const response = await fetch(`/api/inventory${force ? "?refresh=1" : ""}`, { cache: "no-store" });
@@ -385,6 +390,7 @@ export default function Home() {
       }
       setConfigured(data.configured);
       setWarnings(data.warnings ?? []);
+      setInventoryRetryAt(data.retryAt ?? null);
       if (data.cabinet) setCabinet(data.cabinet);
       if (data.manualWarehouses?.length) setManualWarehouses(data.manualWarehouses);
       if (!response.ok) throw new Error(data.error || "Не удалось получить данные Wildberries");
@@ -396,6 +402,7 @@ export default function Home() {
       setError(loadError instanceof Error ? loadError.message : "Не удалось получить данные Wildberries");
     } finally {
       setLoading(false);
+      setInventoryLoadingStartedAt(null);
     }
   }, []);
 
@@ -426,6 +433,17 @@ export default function Home() {
     const milliseconds = Date.parse(analyticsRetryAt) - analyticsClock;
     return Number.isFinite(milliseconds) ? Math.max(0, Math.ceil(milliseconds / 1000)) : null;
   }, [analyticsRetryAt, analyticsClock]);
+
+  const inventoryRetrySeconds = useMemo(() => {
+    if (!inventoryRetryAt) return null;
+    const milliseconds = Date.parse(inventoryRetryAt) - inventoryClock;
+    return Number.isFinite(milliseconds) ? Math.max(0, Math.ceil(milliseconds / 1000)) : null;
+  }, [inventoryRetryAt, inventoryClock]);
+
+  const inventoryRefreshSeconds = useMemo(() => {
+    if (!loading || !inventoryLoadingStartedAt) return null;
+    return Math.min(25, Math.max(0, Math.floor((inventoryClock - inventoryLoadingStartedAt) / 1000)));
+  }, [inventoryClock, inventoryLoadingStartedAt, loading]);
 
   useEffect(() => {
     void (async () => {
@@ -462,6 +480,19 @@ export default function Home() {
     const timer = window.setInterval(() => setAnalyticsClock(Date.now()), 1_000);
     return () => window.clearInterval(timer);
   }, [analyticsRetryAt]);
+
+  useEffect(() => {
+    if (!loading && !inventoryRetryAt) return;
+    const timer = window.setInterval(() => setInventoryClock(Date.now()), 1_000);
+    return () => window.clearInterval(timer);
+  }, [inventoryRetryAt, loading]);
+
+  useEffect(() => {
+    if (authState !== "authenticated" || !inventoryRetryAt) return;
+    const delay = Math.max(0, Date.parse(inventoryRetryAt) - Date.now()) + 250;
+    const timer = window.setTimeout(() => void loadData(true), delay);
+    return () => window.clearTimeout(timer);
+  }, [authState, inventoryRetryAt, loadData]);
 
   useEffect(() => {
     if (authState !== "authenticated" || activeView !== "analytics" || !analyticsRetryAt) return;
@@ -926,7 +957,7 @@ export default function Home() {
       </aside>
 
       <section className="workspace">
-        <header className="topbar"><div><p className="eyebrow">{viewTitles[activeView].eyebrow}</p><h1>{viewTitles[activeView].title}</h1></div><div className="header-actions"><div className="sync-state"><span className={error ? "live-dot offline" : "live-dot"} /><span>Последнее обновление<br/><strong>{formatSyncTime(updatedAt)} МСК</strong></span></div><button className="logout-btn" type="button" onClick={() => void logoutAdmin()}>Выйти</button><button className="secondary-btn" type="button" onClick={() => void loadData(true)} disabled={loading}><span className={loading ? "spin" : ""}>↻</span>{loading ? "Обновляем" : "Обновить"}</button><button className="primary-btn" type="button" onClick={() => downloadCsv(filteredRows, "ostatki-wb")} disabled={!rows.length}>Экспорт<span>↓</span></button></div></header>
+        <header className="topbar"><div><p className="eyebrow">{viewTitles[activeView].eyebrow}</p><h1>{viewTitles[activeView].title}</h1></div><div className="header-actions"><div className="sync-state"><span className={error ? "live-dot offline" : "live-dot"} /><span>Последнее обновление<br/><strong>{formatSyncTime(updatedAt)} МСК</strong></span></div><button className="logout-btn" type="button" onClick={() => void logoutAdmin()}>Выйти</button><button className="secondary-btn" type="button" onClick={() => void loadData(true)} disabled={loading || Boolean(inventoryRetrySeconds)} title={inventoryRetrySeconds ? "WB временно ограничил запросы" : loading ? "Обновление займёт не больше 25 секунд" : undefined}><span className={loading ? "spin" : ""}>↻</span>{loading ? `Обновляем ${inventoryRefreshSeconds ?? 0}/25 с` : inventoryRetrySeconds ? `Через ${formatCountdown(inventoryRetrySeconds)}` : "Обновить"}</button><button className="primary-btn" type="button" onClick={() => downloadCsv(filteredRows, "ostatki-wb")} disabled={!rows.length}>Экспорт<span>↓</span></button></div></header>
 
         <div className="content" id="overview">
           {cabinet && <section className={`cabinet-strip ${cabinet.configured ? "ready" : "waiting"}`}>
@@ -936,6 +967,7 @@ export default function Home() {
           </section>}
           {error && <section className="api-notice" role="alert"><span className="api-notice-icon">!</span><div><strong>{error}</strong><p>{configured ? "Для полной загрузки токену нужны категории: Контент, Маркетплейс и Аналитика." : "Безопасный токен хранится только на сервере и не передаётся в браузер."}</p></div><button type="button" onClick={() => void loadData(true)}>Проверить снова</button></section>}
           {!error && warnings.length > 0 && <section className="warning-strip"><span>!</span><p>{warnings.join(" · ")}</p></section>}
+          {inventoryRetrySeconds !== null && inventoryRetrySeconds > 0 && <section className="inventory-retry-timer" role="status"><span>↻</span><div><strong>WB разрешит повторную загрузку через {formatCountdown(inventoryRetrySeconds)}</strong><p>Пока показываем последние корректные данные. Повторим автоматически.</p></div></section>}
 
           {activeView === "cabinets" ? (
             <section className="cabinet-manager">

@@ -83,11 +83,14 @@ type DashboardPayload = {
     activeSupplies: number;
   };
   warnings: string[];
+  retryAt: string | null;
   updatedAt: string;
 };
 
 const CACHE_LIFETIME_MS = 2 * 60 * 1000;
 const FORCE_REFRESH_COOLDOWN_MS = 20 * 1000;
+const INVENTORY_REFRESH_TIMEOUT_MS = 25 * 1000;
+const WB_RATE_LIMIT_RETRY_MS = 20 * 1000;
 const memoryCache = new Map<CabinetId, { createdAt: number; expiresAt: number; payload: DashboardPayload }>();
 
 function chunks<T>(items: T[], size: number): T[][] {
@@ -96,9 +99,10 @@ function chunks<T>(items: T[], size: number): T[][] {
   return result;
 }
 
-async function wbFetch<T>(token: string, url: string, init?: RequestInit): Promise<T> {
+async function wbFetch<T>(token: string, url: string, init?: RequestInit, signal?: AbortSignal): Promise<T> {
   const response = await fetch(url, {
     ...init,
+    signal,
     cache: "no-store",
     headers: {
       Authorization: token,
@@ -116,7 +120,7 @@ async function wbFetch<T>(token: string, url: string, init?: RequestInit): Promi
   return response.json() as Promise<T>;
 }
 
-async function getCards(token: string): Promise<WbCard[]> {
+async function getCards(token: string, signal?: AbortSignal): Promise<WbCard[]> {
   const cards: WbCard[] = [];
   let cursor: { limit: number; updatedAt?: string; nmID?: number } = { limit: 100 };
 
@@ -128,6 +132,7 @@ async function getCards(token: string): Promise<WbCard[]> {
         method: "POST",
         body: JSON.stringify({ settings: { sort: { ascending: true }, cursor, filter: { withPhoto: -1 } } }),
       },
+      signal,
     );
     const batch = data.cards ?? [];
     cards.push(...batch);
@@ -138,7 +143,7 @@ async function getCards(token: string): Promise<WbCard[]> {
   return cards;
 }
 
-async function getWbStocks(token: string) {
+async function getWbStocks(token: string, signal?: AbortSignal) {
   const response = await wbFetch<{ data?: { items?: Array<{
     nmId?: number;
     warehouseName?: string;
@@ -146,18 +151,18 @@ async function getWbStocks(token: string) {
   }> } }>(token, `${WB_ANALYTICS}/api/analytics/v1/stocks-report/wb-warehouses`, {
     method: "POST",
     body: JSON.stringify({ nmIds: [], chrtIds: [], limit: 250000, offset: 0 }),
-  });
+  }, signal);
   return response.data?.items ?? [];
 }
 
-async function getSellerWarehouses(token: string): Promise<Array<{ id: number; name: string }>> {
-  const warehouses = await wbFetch<WbSellerWarehouse[]>(token, `${WB_MARKETPLACE}/api/v3/warehouses`);
+async function getSellerWarehouses(token: string, signal?: AbortSignal): Promise<Array<{ id: number; name: string }>> {
+  const warehouses = await wbFetch<WbSellerWarehouse[]>(token, `${WB_MARKETPLACE}/api/v3/warehouses`, undefined, signal);
   return warehouses
     .filter((warehouse) => Number.isInteger(warehouse.id) && (warehouse.id ?? 0) > 0 && !warehouse.isDeleting)
     .map((warehouse) => ({ id: warehouse.id!, name: warehouse.name?.trim() || `Склад WB FBS №${warehouse.id}` }));
 }
 
-async function getFbsStocks(token: string, cards: WbCard[], warehouses: Array<{ id: number; name: string }>) {
+async function getFbsStocks(token: string, cards: WbCard[], warehouses: Array<{ id: number; name: string }>, signal?: AbortSignal) {
   const chrtToNmId = new Map<number, number>();
   for (const card of cards) {
     const nmId = card.nmID ?? card.nmId;
@@ -177,7 +182,7 @@ async function getFbsStocks(token: string, cards: WbCard[], warehouses: Array<{ 
         const response = await wbFetch<{ stocks?: WbFbsStock[] }>(token, `${WB_MARKETPLACE}/api/v3/stocks/${warehouse.id}`, {
           method: "POST",
           body: JSON.stringify({ chrtIds: chunk }),
-        });
+        }, signal);
         for (const item of response.stocks ?? []) {
           const nmId = chrtToNmId.get(item.chrtId ?? item.chrtID ?? 0);
           if (!nmId) continue;
@@ -197,14 +202,14 @@ async function getFbsStocks(token: string, cards: WbCard[], warehouses: Array<{ 
   };
 }
 
-async function getOrders(token: string): Promise<{ orders: WbOrder[]; statuses: Map<number, OrderStatus> }> {
+async function getOrders(token: string, signal?: AbortSignal): Promise<{ orders: WbOrder[]; statuses: Map<number, OrderStatus> }> {
   const orders: WbOrder[] = [];
   const now = Math.floor(Date.now() / 1000);
   const dateFrom = now - 30 * 24 * 60 * 60;
   let next = 0;
   for (let page = 0; page < 30; page += 1) {
     const params = new URLSearchParams({ limit: "1000", next: String(next), dateFrom: String(dateFrom), dateTo: String(now) });
-    const data = await wbFetch<{ next?: number; orders?: WbOrder[] }>(token, `${WB_MARKETPLACE}/api/v3/orders?${params}`);
+    const data = await wbFetch<{ next?: number; orders?: WbOrder[] }>(token, `${WB_MARKETPLACE}/api/v3/orders?${params}`, undefined, signal);
     const batch = data.orders ?? [];
     orders.push(...batch);
     if (batch.length < 1000 || !data.next || data.next === next) break;
@@ -217,7 +222,7 @@ async function getOrders(token: string): Promise<{ orders: WbOrder[]; statuses: 
     const data = await wbFetch<{ orders?: OrderStatus[] }>(token, `${WB_MARKETPLACE}/api/v3/orders/status`, {
       method: "POST",
       body: JSON.stringify({ orders: batch }),
-    });
+    }, signal);
     for (const status of data.orders ?? []) statuses.set(status.id, status);
   }
 
@@ -262,6 +267,7 @@ function getOrCreateRow(map: Map<string, DashboardRow>, input: { nmId?: number; 
 
 function warningFor(section: string, error: unknown) {
   const status = (error as Error & { status?: number })?.status;
+  if ((error as Error)?.name === "AbortError") return `${section}: Wildberries отвечает дольше 25 секунд`;
   if (status === 401 || status === 403) return `${section}: у токена нет нужной категории доступа`;
   if (status === 429) return `${section}: Wildberries временно ограничил частоту запросов`;
   return `${section}: данные временно недоступны`;
@@ -348,17 +354,37 @@ export async function GET(request: Request) {
   const force = new URL(request.url).searchParams.get("refresh") === "1";
   const now = Date.now();
   const cached = memoryCache.get(cabinetId);
-  const forceIsTooSoon = force && cached && now - cached.createdAt < FORCE_REFRESH_COOLDOWN_MS;
+  const cachedRetryAt = cached?.payload.retryAt ? Date.parse(cached.payload.retryAt) : Number.NaN;
+  const cacheIsWaitingForWb = Number.isFinite(cachedRetryAt) && cachedRetryAt > now;
+  const retryWindowExpired = Number.isFinite(cachedRetryAt) && cachedRetryAt <= now;
+  const forceIsTooSoon = force && cached && now - cached.createdAt < FORCE_REFRESH_COOLDOWN_MS && !retryWindowExpired;
   if (cached && cached.expiresAt > now && (!force || forceIsTooSoon)) {
-    return NextResponse.json(await attachFfStocks(cached.payload, cabinetId), { headers: { "Cache-Control": "private, max-age=0" } });
+    return NextResponse.json(await attachFfStocks({ ...cached.payload, retryAt: cacheIsWaitingForWb ? cached.payload.retryAt : null }, cabinetId), { headers: { "Cache-Control": "private, max-age=0" } });
   }
 
-  const [cardsResult, wbStocksResult, ordersResult, sellerWarehousesResult] = await Promise.allSettled([
-    getCards(token),
-    getWbStocks(token),
-    getOrders(token),
-    getSellerWarehouses(token),
-  ]);
+  const refreshController = new AbortController();
+  let refreshTimedOut = false;
+  const refreshTimeout = setTimeout(() => {
+    refreshTimedOut = true;
+    refreshController.abort();
+  }, INVENTORY_REFRESH_TIMEOUT_MS);
+
+  try {
+    const [cardsResult, wbStocksResult, ordersResult, sellerWarehousesResult] = await Promise.allSettled([
+      getCards(token, refreshController.signal),
+      getWbStocks(token, refreshController.signal),
+      getOrders(token, refreshController.signal),
+      getSellerWarehouses(token, refreshController.signal),
+    ]);
+
+    if (refreshTimedOut && cached) {
+      const fallback = {
+        ...cached.payload,
+        retryAt: null,
+        warnings: [...new Set([...cached.payload.warnings, "WB отвечает дольше 25 секунд — показаны последние корректные данные"])],
+      };
+      return NextResponse.json(await attachFfStocks(fallback, cabinetId), { headers: { "Cache-Control": "private, max-age=0" } });
+    }
   const warnings: string[] = [];
   const rowMap = new Map<string, DashboardRow>();
 
@@ -384,8 +410,16 @@ export async function GET(request: Request) {
   }
 
   const fbsStockResult = cardsResult.status === "fulfilled" && sellerWarehousesResult.status === "fulfilled"
-    ? await getFbsStocks(token, cards, sellerWarehouses)
+    ? await getFbsStocks(token, cards, sellerWarehouses, refreshController.signal)
     : { stockByWarehouse: new Map<string, Map<number, number>>(), syncedWarehouseIds: [] as string[], errors: [] as Array<{ warehouse: string; reason: unknown }> };
+  if (refreshTimedOut && cached) {
+    const fallback = {
+      ...cached.payload,
+      retryAt: null,
+      warnings: [...new Set([...cached.payload.warnings, "WB отвечает дольше 25 секунд — показаны последние корректные данные"])],
+    };
+    return NextResponse.json(await attachFfStocks(fallback, cabinetId), { headers: { "Cache-Control": "private, max-age=0" } });
+  }
   for (const failure of fbsStockResult.errors) warnings.push(warningFor(`Остатки FBS · ${failure.warehouse}`, failure.reason));
   for (const [warehouseId, stock] of fbsStockResult.stockByWarehouse) {
     for (const [nmId, quantity] of stock) {
@@ -459,9 +493,14 @@ export async function GET(request: Request) {
     return priority[a.status] - priority[b.status] || a.name.localeCompare(b.name, "ru");
   });
 
+  const rateLimited = [cardsResult, wbStocksResult, ordersResult, sellerWarehousesResult]
+    .some((result) => result.status === "rejected" && (result.reason as Error & { status?: number })?.status === 429)
+    || fbsStockResult.errors.some((failure) => (failure.reason as Error & { status?: number })?.status === 429);
+  const retryAt = rateLimited ? new Date(now + WB_RATE_LIMIT_RETRY_MS).toISOString() : null;
+
   if (!rows.length && warnings.length) {
     return NextResponse.json(
-      { configured: true, error: "Wildberries не вернул данные. Проверьте категории токена: Контент, Маркетплейс и Аналитика.", warnings },
+      { configured: true, error: "Wildberries не вернул данные. Проверьте категории токена: Контент, Маркетплейс и Аналитика.", warnings, retryAt },
       { status: 502, headers: { "Cache-Control": "no-store" } },
     );
   }
@@ -480,8 +519,11 @@ export async function GET(request: Request) {
     activeSupplies,
   };
   const updatedAt = new Date().toISOString();
-  const payload: DashboardPayload = { configured: true, cabinet, rows, warehouseNames, manualWarehouses: [], fbsStockSyncedWarehouseIds: fbsStockResult.syncedWarehouseIds, totals, warnings, updatedAt };
+  const payload: DashboardPayload = { configured: true, cabinet, rows, warehouseNames, manualWarehouses: [], fbsStockSyncedWarehouseIds: fbsStockResult.syncedWarehouseIds, totals, warnings, retryAt, updatedAt };
   memoryCache.set(cabinetId, { createdAt: now, expiresAt: now + CACHE_LIFETIME_MS, payload });
 
   return NextResponse.json(await attachFfStocks(payload, cabinetId), { headers: { "Cache-Control": "private, max-age=0" } });
+  } finally {
+    clearTimeout(refreshTimeout);
+  }
 }
