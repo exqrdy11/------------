@@ -464,24 +464,27 @@ export async function GET(request: Request) {
         row.sales7d += 1;
         row.sales7dByWbWarehouse[warehouseId] = (row.sales7dByWbWarehouse[warehouseId] ?? 0) + 1;
       }
+      // `sold` is the only final state that means the buyer actually redeemed
+      // the item. Cancellations are intentionally not included here.
+      if (status.wbStatus === "sold") {
+        row.toSale += 1;
+        row.toSaleByWbWarehouse[warehouseId] = (row.toSaleByWbWarehouse[warehouseId] ?? 0) + 1;
+        continue;
+      }
       if (terminal.has(status.wbStatus ?? "") || status.supplierStatus === "cancel") continue;
 
-      // WB keeps a delivery sticker on the same assembly order after it moves
-      // from `confirm` (being assembled) to `complete` (in delivery). These
-      // are successive statuses, not two different units of stock.
-      if (status.supplierStatus === "confirm") {
+      // New and confirmed orders are the same pre-handover stage for stock
+      // planning: they still occupy a unit at the FBS warehouse.
+      if (status.supplierStatus === "new" || status.supplierStatus === "confirm") {
         row.fbs += 1;
         row.fbsByWbWarehouse[warehouseId] = (row.fbsByWbWarehouse[warehouseId] ?? 0) + 1;
         if (order.supplyId) supplies.add(order.supplyId);
       }
-      if (status.supplierStatus === "complete" && status.wbStatus === "waiting") {
+      // A delivery sticker stays on the same order after handover. All WB
+      // delivery states are one stage and must not be deducted twice.
+      if (status.supplierStatus === "complete" && ["waiting", "sorted", "ready_for_pickup"].includes(status.wbStatus ?? "")) {
         row.receiving += 1;
         row.receivingByWbWarehouse[warehouseId] = (row.receivingByWbWarehouse[warehouseId] ?? 0) + 1;
-        if (order.supplyId) supplies.add(order.supplyId);
-      }
-      if (status.wbStatus === "sorted" || status.wbStatus === "ready_for_pickup") {
-        row.toSale += 1;
-        row.toSaleByWbWarehouse[warehouseId] = (row.toSaleByWbWarehouse[warehouseId] ?? 0) + 1;
         if (order.supplyId) supplies.add(order.supplyId);
       }
     }

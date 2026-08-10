@@ -16,6 +16,7 @@ type WbOrder = {
 type WbOrderStatus = {
   id: number;
   supplierStatus?: string;
+  wbStatus?: string;
 };
 
 type WbSticker = {
@@ -98,8 +99,12 @@ export async function GET(request: Request) {
   try {
     const { orders, statuses } = await getRecentOrders(token);
     const activeOrders = orders.filter((order) => {
-      const supplierStatus = statuses.get(order.id)?.supplierStatus;
-      return order.warehouseId === warehouse.wbWarehouseId && (supplierStatus === "confirm" || supplierStatus === "complete");
+      const status = statuses.get(order.id);
+      const supplierStatus = status?.supplierStatus;
+      const terminal = ["sold", "canceled", "canceled_by_client", "declined_by_client", "defect"];
+      return order.warehouseId === warehouse.wbWarehouseId
+        && (supplierStatus === "confirm" || supplierStatus === "complete")
+        && !terminal.includes(status?.wbStatus ?? "");
     });
     const stickers = new Map<number, WbSticker>();
 
