@@ -9,6 +9,7 @@ export const ffWarehouses = sqliteTable("ff_warehouses", {
   position: integer("position").notNull().default(0),
   wbWarehouseId: integer("wb_warehouse_id"),
   wbWarehouseName: text("wb_warehouse_name"),
+  isHidden: integer("is_hidden", { mode: "boolean" }).notNull().default(false),
   createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
 }, (table) => [primaryKey({ columns: [table.cabinetId, table.id] })]);
 

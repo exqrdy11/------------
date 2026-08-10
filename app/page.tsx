@@ -22,6 +22,7 @@ type ManualWarehouse = {
   position: number;
   wbWarehouseId: number | null;
   wbWarehouseName: string | null;
+  isHidden: boolean;
 };
 
 type StockRow = {
@@ -96,9 +97,9 @@ type FfOrdersExportResponse = {
 };
 
 const defaultManualWarehouses: ManualWarehouse[] = [
-  { id: "kazan", city: "Казань", name: "Наш склад", position: 10, wbWarehouseId: 1692397, wbWarehouseName: null },
-  { id: "moscow", city: "Москва", name: "БИК ФФ", position: 20, wbWarehouseId: null, wbWarehouseName: null },
-  { id: "spb", city: "Питер", name: "Rus ФФ", position: 30, wbWarehouseId: null, wbWarehouseName: null },
+  { id: "kazan", city: "Казань", name: "Наш склад", position: 10, wbWarehouseId: 1692397, wbWarehouseName: null, isHidden: false },
+  { id: "moscow", city: "Москва", name: "БИК ФФ", position: 20, wbWarehouseId: null, wbWarehouseName: null, isHidden: false },
+  { id: "spb", city: "Питер", name: "Rus ФФ", position: 30, wbWarehouseId: null, wbWarehouseName: null, isHidden: false },
 ];
 const emptyFbsBreakdown: FbsBreakdown = {};
 const emptyTotals: DashboardTotals = { available: 0, ffTotal: 0, ffStock: {}, fbs: 0, fbsByLocation: emptyFbsBreakdown, sales7d: 0, receiving: 0, toSale: 0, risk: 0, activeSupplies: 0 };
@@ -469,12 +470,14 @@ export default function Home() {
     return () => window.clearTimeout(timer);
   }, [activeView, analyticsRange, analyticsRetryAt, authState, loadAnalytics]);
 
+  const visibleManualWarehouses = useMemo(() => manualWarehouses.filter((warehouse) => !warehouse.isHidden), [manualWarehouses]);
+
   const selectedImportWarehouseId = manualWarehouses.some((item) => item.id === importWarehouseId)
     ? importWarehouseId
     : manualWarehouses[0]?.id ?? "";
 
   const fbsLocations = useMemo(() => {
-    const locations = manualWarehouses.map((warehouse) => ({
+    const locations = visibleManualWarehouses.map((warehouse) => ({
       id: warehouse.id,
       city: warehouse.city,
       label: warehouse.wbWarehouseId
@@ -483,16 +486,16 @@ export default function Home() {
     }));
     if ((totals.fbsByLocation.unassigned ?? 0) > 0) locations.push({ id: "unassigned", city: "Не назначено", label: "Выберите склад ФФ" });
     return locations;
-  }, [manualWarehouses, totals.fbsByLocation.unassigned]);
+  }, [visibleManualWarehouses, totals.fbsByLocation.unassigned]);
 
-  const ffReservedFromStockTotal = useMemo(() => manualWarehouses.reduce((sum, warehouse) => {
+  const ffReservedFromStockTotal = useMemo(() => visibleManualWarehouses.reduce((sum, warehouse) => {
     const physicalStock = totals.ffStock[warehouse.id] ?? 0;
     const reserved = totals.fbsByLocation[warehouse.id] ?? 0;
     return sum + Math.min(physicalStock, reserved);
-  }, 0), [manualWarehouses, totals.ffStock, totals.fbsByLocation]);
+  }, 0), [visibleManualWarehouses, totals.ffStock, totals.fbsByLocation]);
   const ffAvailableTotal = Math.max(0, totals.ffTotal - ffReservedFromStockTotal);
 
-  const fulfillmentWarehouses = useMemo(() => manualWarehouses.map((warehouse) => {
+  const fulfillmentWarehouses = useMemo(() => visibleManualWarehouses.map((warehouse) => {
     const products = rows.filter((row) => (row.ffStock[warehouse.id] ?? 0) > 0 || (row.fbsByLocation[warehouse.id] ?? 0) > 0 || (row.receivingByLocation[warehouse.id] ?? 0) > 0 || (row.toSaleByLocation[warehouse.id] ?? 0) > 0);
     const physicalStock = totals.ffStock[warehouse.id] ?? 0;
     const fbs = totals.fbsByLocation[warehouse.id] ?? 0;
@@ -505,7 +508,7 @@ export default function Home() {
       receiving: products.reduce((sum, row) => sum + (row.receivingByLocation[warehouse.id] ?? 0), 0),
       toSale: products.reduce((sum, row) => sum + (row.toSaleByLocation[warehouse.id] ?? 0), 0),
     };
-  }), [manualWarehouses, rows, totals.ffStock, totals.fbsByLocation]);
+  }), [visibleManualWarehouses, rows, totals.ffStock, totals.fbsByLocation]);
 
   const selectedFulfillmentWarehouse = fulfillmentWarehouses.find((item) => item.warehouse.id === selectedFulfillmentWarehouseId) ?? null;
 
@@ -534,13 +537,13 @@ export default function Home() {
   };
   const activeFulfillmentListMeta = fulfillmentListMeta[fulfillmentList];
 
-  const selectedSalesWarehouse = manualWarehouses.find((item) => item.id === salesWarehouseId) ?? null;
+  const selectedSalesWarehouse = visibleManualWarehouses.find((item) => item.id === salesWarehouseId) ?? null;
   const salesRows = useMemo(() => {
     const term = query.trim().toLowerCase();
     return rows.map((row) => {
       const stock = selectedSalesWarehouse
         ? availableFfStock(row, selectedSalesWarehouse.id)
-        : manualWarehouses.reduce((sum, warehouse) => sum + availableFfStock(row, warehouse.id), 0);
+        : visibleManualWarehouses.reduce((sum, warehouse) => sum + availableFfStock(row, warehouse.id), 0);
       const sales = selectedSalesWarehouse
         ? row.sales7dByLocation[selectedSalesWarehouse.id] ?? 0
         : row.sales7d;
@@ -555,7 +558,7 @@ export default function Home() {
       const matchesQuery = !term || row.name.toLowerCase().includes(term) || row.sku.toLowerCase().includes(term) || String(row.nmId ?? "").includes(term);
       return matchesScope && matchesQuery;
     }).sort((left, right) => right.need - left.need || right.sales - left.sales || left.row.name.localeCompare(right.row.name, "ru"));
-  }, [rows, query, selectedSalesWarehouse, salesProductScope, salesTargetDays, manualWarehouses]);
+  }, [rows, query, selectedSalesWarehouse, salesProductScope, salesTargetDays, visibleManualWarehouses]);
 
   const salesTotals = useMemo(() => salesRows.reduce((total, item) => ({ sales: total.sales + item.sales, stock: total.stock + item.stock, need: total.need + item.need }), { sales: 0, stock: 0, need: 0 }), [salesRows]);
 
@@ -693,6 +696,7 @@ export default function Home() {
           position: warehouseToUpdate.position,
           wbWarehouseId,
           wbWarehouseName: draft.wbWarehouseName.trim() || null,
+          isHidden: warehouseToUpdate.isHidden,
         }),
       });
       const data = await response.json() as { warehouse?: ManualWarehouse; error?: string };
@@ -713,6 +717,36 @@ export default function Home() {
       await loadData(true);
     } catch (saveError) {
       setWarehouseError(saveError instanceof Error ? saveError.message : "Не удалось сохранить привязку к WB");
+    } finally {
+      setWarehouseLinkSavingId(null);
+    }
+  };
+
+  const toggleWarehouseVisibility = async (warehouseToUpdate: ManualWarehouse) => {
+    setWarehouseLinkSavingId(warehouseToUpdate.id);
+    setWarehouseMessage(null);
+    setWarehouseError(null);
+    try {
+      const response = await fetch("/api/ff-warehouses", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          id: warehouseToUpdate.id,
+          city: warehouseToUpdate.city,
+          name: warehouseToUpdate.name,
+          position: warehouseToUpdate.position,
+          wbWarehouseId: warehouseToUpdate.wbWarehouseId,
+          wbWarehouseName: warehouseToUpdate.wbWarehouseName,
+          isHidden: !warehouseToUpdate.isHidden,
+        }),
+      });
+      const data = await response.json() as { warehouse?: ManualWarehouse; error?: string };
+      if (!response.ok || !data.warehouse) throw new Error(data.error || "Не удалось изменить видимость склада");
+      setManualWarehouses((current) => current.map((item) => item.id === warehouseToUpdate.id ? data.warehouse as ManualWarehouse : item));
+      setWarehouseMessage(data.warehouse.isHidden ? `${formatManualWarehouse(data.warehouse)} скрыт из витрины` : `${formatManualWarehouse(data.warehouse)} снова показан`);
+      await loadData(true);
+    } catch (saveError) {
+      setWarehouseError(saveError instanceof Error ? saveError.message : "Не удалось изменить видимость склада");
     } finally {
       setWarehouseLinkSavingId(null);
     }
@@ -825,8 +859,8 @@ export default function Home() {
   };
 
   const downloadCsv = (sourceRows: StockRow[], suffix: string) => {
-    const header = ["Артикул продавца", "Артикул WB", ...warehouseNames, "Всего на WB", ...manualWarehouses.flatMap((item) => [`ФФ ${formatManualWarehouse(item)}`, `Срок годности · ${formatManualWarehouse(item)}`]), "FBS всего", ...fbsLocations.map((location) => `FBS ${location.city}`), "На приёмке", "Ожидают продажи", "Статус"];
-    const body = sourceRows.map((row) => [row.sku, row.nmId ?? "", ...warehouseNames.map((name) => row.warehouses[name] ?? 0), stockTotal(row), ...manualWarehouses.flatMap((item) => [row.ffStock[item.id] ?? 0, row.ffExpiry?.[item.id] ?? ""]), row.fbs, ...fbsLocations.map((location) => row.fbsByLocation[location.id] ?? 0), row.receiving, row.toSale, row.status]);
+    const header = ["Артикул продавца", "Артикул WB", ...warehouseNames, "Всего на WB", ...visibleManualWarehouses.flatMap((item) => [`ФФ ${formatManualWarehouse(item)}`, `Срок годности · ${formatManualWarehouse(item)}`]), "FBS всего", ...fbsLocations.map((location) => `FBS ${location.city}`), "На приёмке", "Ожидают продажи", "Статус"];
+    const body = sourceRows.map((row) => [row.sku, row.nmId ?? "", ...warehouseNames.map((name) => row.warehouses[name] ?? 0), stockTotal(row), ...visibleManualWarehouses.flatMap((item) => [row.ffStock[item.id] ?? 0, row.ffExpiry?.[item.id] ?? ""]), row.fbs, ...fbsLocations.map((location) => row.fbsByLocation[location.id] ?? 0), row.receiving, row.toSale, row.status]);
     const content = [header, ...body].map((line) => line.map((cell) => String(cell).replaceAll(";", ",")).join(";")).join("\n");
     const blob = new Blob(["\uFEFF" + content], { type: "text/csv;charset=utf-8" });
     const url = URL.createObjectURL(blob);
@@ -965,7 +999,7 @@ export default function Home() {
                 <div>
                   <span className="section-kicker">СКЛАДЫ ФУЛФИЛМЕНТА</span>
                   <h2>Куда отправляем товар</h2>
-                  <p className="section-note">Добавляйте свои склады, сроки годности и загружайте остатки из Excel в нужный из них.</p>
+                  <p className="section-note">Склады FBS подтягиваются из WB автоматически. Excel и партии остаются резервным ручным учётом, если склад не ведётся в WB.</p>
                 </div>
               </div>
               <div className="manual-layout">
@@ -978,12 +1012,13 @@ export default function Home() {
                     };
                     return <div className="manual-warehouse-item" key={item.id}>
                       <span className="warehouse-pin">□</span>
-                      <div className="manual-warehouse-details"><strong>{item.city}</strong><small>{item.name}</small><em>{item.wbWarehouseId ? `Привязан к WB FBS · ${item.wbWarehouseName || `№${item.wbWarehouseId}`}` : "WB FBS не назначен"}</em></div>
+                      <div className="manual-warehouse-details"><strong>{item.city}</strong><small>{item.name}</small><em>{item.isHidden ? "Скрыт из витрины" : item.wbWarehouseId ? `Привязан к WB FBS · ${item.wbWarehouseName || `№${item.wbWarehouseId}`}` : "WB FBS не назначен"}</em></div>
                       <form className="warehouse-link-form" onSubmit={(event) => void saveWarehouseLink(item, event)}>
                         <label><span>ID склада WB</span><input value={linkDraft.wbWarehouseId} onChange={(event) => setWarehouseLinkDrafts((current) => ({ ...current, [item.id]: { ...linkDraft, wbWarehouseId: event.target.value } }))} inputMode="numeric" placeholder="Например, 1987385" /></label>
                         <label><span>Название в WB</span><input value={linkDraft.wbWarehouseName} onChange={(event) => setWarehouseLinkDrafts((current) => ({ ...current, [item.id]: { ...linkDraft, wbWarehouseName: event.target.value } }))} maxLength={120} placeholder="Например, Волгоград Upakovka" /></label>
                         <button type="submit" disabled={warehouseLinkSavingId === item.id}>{warehouseLinkSavingId === item.id ? "Сохраняем…" : "Связать с WB"}</button>
                       </form>
+                      <button className="warehouse-visibility-btn" type="button" onClick={() => void toggleWarehouseVisibility(item)} disabled={warehouseLinkSavingId === item.id}>{item.isHidden ? "Показать" : "Скрыть"}</button>
                     </div>;
                   })}</div>
                   <form className="warehouse-add-form" onSubmit={addWarehouse}>
@@ -1054,7 +1089,7 @@ export default function Home() {
 
               <div className="sales-toolbar">
                 <label className="search-field"><span>⌕</span><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Артикул или название" aria-label="Поиск по продажам" /></label>
-                <label className="sales-warehouse-select"><span>Склад ФФ</span><select value={salesWarehouseId} onChange={(event) => setSalesWarehouseId(event.target.value)} aria-label="Выбрать склад ФФ для продаж"><option value="all">Все склады ФФ</option>{manualWarehouses.map((item) => <option value={item.id} key={item.id}>{formatManualWarehouse(item)}</option>)}</select></label>
+                <label className="sales-warehouse-select"><span>Склад ФФ</span><select value={salesWarehouseId} onChange={(event) => setSalesWarehouseId(event.target.value)} aria-label="Выбрать склад ФФ для продаж"><option value="all">Все склады ФФ</option>{visibleManualWarehouses.map((item) => <option value={item.id} key={item.id}>{formatManualWarehouse(item)}</option>)}</select></label>
                 <label className="sales-turnover-control"><span>Запас на</span><input type="number" min="1" max="999" value={salesTargetDays} onChange={(event) => setSalesTargetDays(Math.max(1, Math.min(999, Number(event.target.value) || 1)))} aria-label="Целевой запас в днях" /><small>дн.</small></label>
               </div>
               <div className="sales-scope" role="group" aria-label="Какие товары показывать"><span>Показывать</span><div><button type="button" className={salesProductScope === "ff" ? "active" : ""} onClick={() => setSalesProductScope("ff")}>{selectedSalesWarehouse ? "Только есть на этом ФФ" : "Только есть на ФФ"}</button><button type="button" className={salesProductScope === "all" ? "active" : ""} onClick={() => setSalesProductScope("all")}>Все товары</button></div></div>
@@ -1081,11 +1116,11 @@ export default function Home() {
               <article className="metric-card"><div className="metric-icon amber">◷</div><div className="metric-label">Ожидают продажи</div><strong className="metric-value">{loading ? "—" : formatNumber.format(totals.toSale)} <small>шт.</small></strong><p><b>{totals.receiving}</b> ожидают приёмки WB</p></article>
             </section>
 
-            <section className={`movement-card ${activeView !== "overview" && activeView !== "fbs" ? "view-hidden" : ""}`} id="movement"><div className="section-heading"><div><span className="section-kicker">ОСТАТКИ WB, ФФ И ДВИЖЕНИЕ FBS</span><h2>Фактические и доступные остатки отдельно</h2></div><span className="period-pill">Актуальные заказы за 30 дней</span></div><div className="movement-grid"><article className="wb-stock-fact"><span className="wb-stock-mark">WB</span><div><small>ФАКТИЧЕСКИЙ ОСТАТОК НА WB</small><strong>{formatNumber.format(totals.available)} <em>шт.</em></strong><p>Уже находится на складах Wildberries и не является доступным запасом для FBS.</p></div></article><div className="fbs-overview"><div className="movement-subhead"><span>ДОСТУПНО НА ФФ</span><button className="text-action" type="button" onClick={() => navigateTo("manual")}>Настроить склады</button></div><div className="fbs-location-grid manual-location-grid dynamic-locations">{manualWarehouses.map((item) => { const physicalStock = totals.ffStock[item.id] ?? 0; const reserved = totals.fbsByLocation[item.id] ?? 0; return <article className="fbs-location-card manual" key={item.id}><span>{item.city}</span><strong>{formatNumber.format(Math.max(0, physicalStock - reserved))}</strong><small>{item.name} · в базе {physicalStock} · резерв {reserved}</small></article>; })}</div><div className="movement-subhead orders"><span>АКТИВНЫЕ FBS-ЗАКАЗЫ</span><small>По данным WB API</small></div><div className="fbs-location-grid order-location-grid">{fbsLocations.map((location) => <article className="fbs-location-card" key={location.id}><span>{location.city}</span><strong>{formatNumber.format(totals.fbsByLocation[location.id] ?? 0)}</strong><small>{location.label}</small></article>)}</div><div className="fbs-stage-strip"><span><b>{totals.fbs}</b> активные FBS</span><i>→</i><span><b>{totals.receiving}</b> ожидают WB</span><i>→</i><span className="sale-stage"><b>{totals.toSale}</b> к продаже</span></div></div></div></section>
+            <section className={`movement-card ${activeView !== "overview" && activeView !== "fbs" ? "view-hidden" : ""}`} id="movement"><div className="section-heading"><div><span className="section-kicker">ОСТАТКИ WB, ФФ И ДВИЖЕНИЕ FBS</span><h2>Фактические и доступные остатки отдельно</h2></div><span className="period-pill">Актуальные заказы за 30 дней</span></div><div className="movement-grid"><article className="wb-stock-fact"><span className="wb-stock-mark">WB</span><div><small>ФАКТИЧЕСКИЙ ОСТАТОК НА WB</small><strong>{formatNumber.format(totals.available)} <em>шт.</em></strong><p>Уже находится на складах Wildberries и не является доступным запасом для FBS.</p></div></article><div className="fbs-overview"><div className="movement-subhead"><span>ДОСТУПНО НА ФФ · WB API</span><button className="text-action" type="button" onClick={() => navigateTo("manual")}>Настроить склады</button></div><div className="fbs-location-grid manual-location-grid dynamic-locations">{visibleManualWarehouses.map((item) => { const physicalStock = totals.ffStock[item.id] ?? 0; const reserved = totals.fbsByLocation[item.id] ?? 0; return <article className="fbs-location-card manual" key={item.id}><span>{item.city}</span><strong>{formatNumber.format(Math.max(0, physicalStock - reserved))}</strong><small>{item.name} · WB {physicalStock} · резерв {reserved}</small></article>; })}</div><div className="movement-subhead orders"><span>АКТИВНЫЕ FBS-ЗАКАЗЫ</span><small>По данным WB API</small></div><div className="fbs-location-grid order-location-grid">{fbsLocations.map((location) => <article className="fbs-location-card" key={location.id}><span>{location.city}</span><strong>{formatNumber.format(totals.fbsByLocation[location.id] ?? 0)}</strong><small>{location.label}</small></article>)}</div><div className="fbs-stage-strip"><span><b>{totals.fbs}</b> активные FBS</span><i>→</i><span><b>{totals.receiving}</b> ожидают WB</span><i>→</i><span className="sale-stage"><b>{totals.toSale}</b> к продаже</span></div></div></div></section>
 
-            <section className={`stock-card ${activeView === "reports" ? "view-hidden" : ""}`} id="stock"><div className="stock-header"><div><span className="section-kicker">ОСТАТКИ ПО АРТИКУЛАМ</span><h2>{stockTitle}</h2></div><div className="stock-tools"><label className="search-field"><span>⌕</span><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Артикул или название" aria-label="Поиск по товарам"/></label><label className="select-wrap"><span>Склад:</span><select value={warehouse} onChange={(event) => setWarehouse(event.target.value)} aria-label="Выбрать склад"><option>Все склады</option>{warehouseNames.map((item) => <option key={item}>{item}</option>)}</select></label></div></div><div className="filter-row"><div className="filter-tabs" role="tablist" aria-label="Фильтр остатков">{[{ name: "Все", count: counts.all }, { name: "Дефицит", count: counts.risk }, { name: "Активные FBS", count: counts.transit }].map((item) => <button type="button" key={item.name} className={filter === item.name ? "active" : ""} onClick={() => setFilter(item.name)}>{item.name}<span>{item.count}</span></button>)}</div><span className="result-count">Показано {filteredRows.length} из {viewTotal} артикулов</span></div><div className="table-wrap"><table><thead><tr><th>Товар / артикул</th><th>{warehouse === "Все склады" ? "Остаток WB" : "Выбранный склад WB"}</th>{manualWarehouses.map((item) => <th className="ff-column-head" key={item.id}><span>{item.city}</span><small>{item.name}</small></th>)}<th>Активные FBS</th><th>К продаже</th><th>Статус</th><th /></tr></thead><tbody>{filteredRows.map((row) => <tr key={row.key} onClick={() => openProduct(row)} tabIndex={0} onKeyDown={(event) => { if (event.key === "Enter") openProduct(row); }}><td><div className="product-cell"><span className="product-swatch" style={{ background: row.color }}>{row.name.charAt(0).toUpperCase()}</span><span><strong>{row.name}</strong><small>{row.sku}{row.nmId ? ` · WB ${row.nmId}` : ""} · {row.category}</small></span></div></td><td><b>{formatNumber.format(warehouse === "Все склады" ? stockTotal(row) : row.warehouses[warehouse] ?? 0)}</b><small> шт.</small></td>{manualWarehouses.map((item) => <td key={item.id}><span className={`manual-stock-value ${(row.ffStock[item.id] ?? 0) === 0 ? "zero" : ""}`} title={`Открыть и изменить: ${formatManualWarehouse(item)}`}>{formatNumber.format(row.ffStock[item.id] ?? 0)}<small> шт.</small></span></td>)}<td><span className="number-pill blue-pill">{row.fbs}</span></td><td><span className="number-pill green-pill">{row.toSale}</span></td><td><span className={`status ${row.status === "В норме" ? "ok" : row.status === "Мало" ? "low" : "critical"}`}><i />{row.status}</span></td><td><button type="button" className="row-action" aria-label={`Открыть ${row.name}`}>›</button></td></tr>)}</tbody></table>{loading && <div className="loading-state"><span className="loader"/><strong>Загружаем данные из Wildberries</strong><small>Остатки и статусы FBS собираются в единый отчёт</small></div>}{!loading && !filteredRows.length && <div className="empty-state"><strong>{error ? "Данные пока не загружены" : "Ничего не найдено"}</strong><span>{error ? "Проверьте подключение WB API." : "Попробуйте изменить поиск или фильтры."}</span></div>}</div><footer className="table-footer"><span><i className={error ? "live-dot offline" : "live-dot"} />{updatedAt ? `Остатки обновлены в ${formatSyncTime(updatedAt)} МСК` : "Ожидаем синхронизацию"}</span><button type="button" onClick={() => { setQuery(""); setFilter("Все"); setWarehouse("Все склады"); }}>Сбросить фильтры</button></footer></section>
+            <section className={`stock-card ${activeView === "reports" ? "view-hidden" : ""}`} id="stock"><div className="stock-header"><div><span className="section-kicker">ОСТАТКИ ПО АРТИКУЛАМ</span><h2>{stockTitle}</h2></div><div className="stock-tools"><label className="search-field"><span>⌕</span><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Артикул или название" aria-label="Поиск по товарам"/></label><label className="select-wrap"><span>Склад:</span><select value={warehouse} onChange={(event) => setWarehouse(event.target.value)} aria-label="Выбрать склад"><option>Все склады</option>{warehouseNames.map((item) => <option key={item}>{item}</option>)}</select></label></div></div><div className="filter-row"><div className="filter-tabs" role="tablist" aria-label="Фильтр остатков">{[{ name: "Все", count: counts.all }, { name: "Дефицит", count: counts.risk }, { name: "Активные FBS", count: counts.transit }].map((item) => <button type="button" key={item.name} className={filter === item.name ? "active" : ""} onClick={() => setFilter(item.name)}>{item.name}<span>{item.count}</span></button>)}</div><span className="result-count">Показано {filteredRows.length} из {viewTotal} артикулов</span></div><div className="table-wrap"><table><thead><tr><th>Товар / артикул</th><th>{warehouse === "Все склады" ? "Остаток WB" : "Выбранный склад WB"}</th>{visibleManualWarehouses.map((item) => <th className="ff-column-head" key={item.id}><span>{item.city}</span><small>{item.name}</small></th>)}<th>Активные FBS</th><th>К продаже</th><th>Статус</th><th /></tr></thead><tbody>{filteredRows.map((row) => <tr key={row.key} onClick={() => openProduct(row)} tabIndex={0} onKeyDown={(event) => { if (event.key === "Enter") openProduct(row); }}><td><div className="product-cell"><span className="product-swatch" style={{ background: row.color }}>{row.name.charAt(0).toUpperCase()}</span><span><strong>{row.name}</strong><small>{row.sku}{row.nmId ? ` · WB ${row.nmId}` : ""} · {row.category}</small></span></div></td><td><b>{formatNumber.format(warehouse === "Все склады" ? stockTotal(row) : row.warehouses[warehouse] ?? 0)}</b><small> шт.</small></td>{visibleManualWarehouses.map((item) => <td key={item.id}><span className={`manual-stock-value ${(row.ffStock[item.id] ?? 0) === 0 ? "zero" : ""}`} title={`Остаток WB FBS: ${formatManualWarehouse(item)}`}>{formatNumber.format(row.ffStock[item.id] ?? 0)}<small> шт.</small></span></td>)}<td><span className="number-pill blue-pill">{row.fbs}</span></td><td><span className="number-pill green-pill">{row.toSale}</span></td><td><span className={`status ${row.status === "В норме" ? "ok" : row.status === "Мало" ? "low" : "critical"}`}><i />{row.status}</span></td><td><button type="button" className="row-action" aria-label={`Открыть ${row.name}`}>›</button></td></tr>)}</tbody></table>{loading && <div className="loading-state"><span className="loader"/><strong>Загружаем данные из Wildberries</strong><small>Остатки и статусы FBS собираются в единый отчёт</small></div>}{!loading && !filteredRows.length && <div className="empty-state"><strong>{error ? "Данные пока не загружены" : "Ничего не найдено"}</strong><span>{error ? "Проверьте подключение WB API." : "Попробуйте изменить поиск или фильтры."}</span></div>}</div><footer className="table-footer"><span><i className={error ? "live-dot offline" : "live-dot"} />{updatedAt ? `Остатки обновлены в ${formatSyncTime(updatedAt)} МСК` : "Ожидаем синхронизацию"}</span><button type="button" onClick={() => { setQuery(""); setFilter("Все"); setWarehouse("Все склады"); }}>Сбросить фильтры</button></footer></section>
 
-            {activeView === "reports" && <section className="reports-panel" id="reports"><div className="section-heading"><div><span className="section-kicker">ГОТОВЫЕ ВЫГРУЗКИ</span><h2>Скачать данные из кабинета</h2></div><span className="period-pill">CSV · Excel</span></div><div className="reports-grid"><article className="report-card"><span className="report-symbol blue">□</span><div><strong>Все остатки</strong><p>Артикулы и количество по каждому складу</p><small>{rows.length} артикулов · {warehouseNames.length} складов WB</small></div><button type="button" onClick={() => downloadCsv(rows, "vse-ostatki-wb")} disabled={!rows.length}>Скачать ↓</button></article><article className="report-card"><span className="report-symbol amber">→</span><div><strong>FBS-движение</strong><p>Отгружено, на приёмке и ожидает продажи</p><small>{counts.transit} артикулов · {totals.fbs} единиц</small></div><button type="button" onClick={() => downloadCsv(rows.filter((row) => row.fbs > 0), "fbs-wb")} disabled={!counts.transit}>Скачать ↓</button></article><article className="report-card"><span className="report-symbol green">▤</span><div><strong>Ручные остатки ФФ</strong><p>Все добавленные склады и остатки по артикулам</p><small>{manualWarehouses.length} складов ФФ</small></div><button type="button" onClick={() => downloadCsv(rows, "ostatki-ff")} disabled={!rows.length}>Скачать ↓</button></article></div></section>}
+            {activeView === "reports" && <section className="reports-panel" id="reports"><div className="section-heading"><div><span className="section-kicker">ГОТОВЫЕ ВЫГРУЗКИ</span><h2>Скачать данные из кабинета</h2></div><span className="period-pill">CSV · Excel</span></div><div className="reports-grid"><article className="report-card"><span className="report-symbol blue">□</span><div><strong>Все остатки</strong><p>Артикулы и количество по каждому складу</p><small>{rows.length} артикулов · {warehouseNames.length} складов WB</small></div><button type="button" onClick={() => downloadCsv(rows, "vse-ostatki-wb")} disabled={!rows.length}>Скачать ↓</button></article><article className="report-card"><span className="report-symbol amber">→</span><div><strong>FBS-движение</strong><p>Отгружено, на приёмке и ожидает продажи</p><small>{counts.transit} артикулов · {totals.fbs} единиц</small></div><button type="button" onClick={() => downloadCsv(rows.filter((row) => row.fbs > 0), "fbs-wb")} disabled={!counts.transit}>Скачать ↓</button></article><article className="report-card"><span className="report-symbol green">▤</span><div><strong>Остатки ФФ из WB API</strong><p>Видимые FBS-склады и остатки по артикулам</p><small>{visibleManualWarehouses.length} складов ФФ</small></div><button type="button" onClick={() => downloadCsv(rows, "ostatki-ff")} disabled={!rows.length}>Скачать ↓</button></article></div></section>}
           </>}
         </div>
       </section>
@@ -1100,8 +1135,8 @@ export default function Home() {
             <div className="warehouse-list">{Object.entries(selected.warehouses).sort((a, b) => b[1] - a[1]).map(([name, value]) => <div key={name}><span><i />{name}</span><strong>{formatNumber.format(value)} шт.</strong></div>)}{!Object.keys(selected.warehouses).length && <div><span>Нет остатков</span><strong>0 шт.</strong></div>}</div>
             <p className="drawer-stock-note">Этот остаток уже находится на складах Wildberries и недоступен для FBS.</p>
             <h3>Остатки на складах ФФ</h3>
-            <div className="warehouse-list ff-stock-readonly">{manualWarehouses.map((item) => <div key={item.id}><span><i />{formatManualWarehouse(item)}</span><strong>{formatNumber.format(selected.ffStock[item.id] ?? 0)} шт.</strong></div>)}</div>
-            <p className="drawer-stock-note">Остатки доступны только для просмотра: FBS и склады WB обновляются по API. Ручные поля и дубли партий убраны.</p>
+            <div className="warehouse-list ff-stock-readonly">{visibleManualWarehouses.map((item) => <div key={item.id}><span><i />{formatManualWarehouse(item)}</span><strong>{formatNumber.format(selected.ffStock[item.id] ?? 0)} шт.</strong></div>)}</div>
+            <p className="drawer-stock-note">Остатки FBS получены из WB API. Ручной Excel сохраняется только как резерв для непубличных остатков и партий.</p>
             <h3>Активные FBS по складам</h3>
             <div className="drawer-fbs-locations">{fbsLocations.map((location) => <div key={location.id}><span><strong>{location.city}</strong><small>{location.label}</small></span><b>{selected.fbsByLocation?.[location.id] ?? 0} шт.</b></div>)}</div>
             <h3>Текущее движение FBS</h3>

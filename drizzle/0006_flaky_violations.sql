@@ -1,0 +1,1 @@
+ALTER TABLE `ff_warehouses` ADD `is_hidden` integer DEFAULT false NOT NULL;

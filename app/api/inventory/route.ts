@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { batchesForProduct, emptyFfBatches, emptyFfExpiry, emptyFfStock, expiryForProduct, listFfStocks, listFfWarehouses, stockForProduct, type FfBatches, type FfExpiry, type FfStock, type ManualWarehouse } from "@/db/ff-stocks";
+import { batchesForProduct, emptyFfBatches, emptyFfExpiry, emptyFfStock, expiryForProduct, listFfStocks, listFfWarehouses, stockForProduct, syncWbFbsWarehouses, type FfBatches, type FfExpiry, type FfStock, type ManualWarehouse } from "@/db/ff-stocks";
 import { cabinetSummary, cabinetToken, getAdminCabinet, type CabinetId, type CabinetSummary } from "@/lib/admin-auth";
 
 export const dynamic = "force-dynamic";
@@ -23,6 +23,9 @@ type WbOrder = {
   warehouseId?: number;
 };
 
+type WbSellerWarehouse = { id?: number; name?: string; isDeleting?: boolean };
+type WbFbsStock = { chrtId?: number; chrtID?: number; amount?: number };
+
 type OrderStatus = { id: number; supplierStatus?: string; wbStatus?: string };
 type FbsBreakdown = Record<string, number>;
 
@@ -37,6 +40,7 @@ type DashboardRow = {
   ffStock: FfStock;
   ffExpiry: FfExpiry;
   ffBatches: FfBatches;
+  fbsStockByWbWarehouse: FbsBreakdown;
   fbs: number;
   fbsByLocation: FbsBreakdown;
   fbsByWbWarehouse: FbsBreakdown;
@@ -65,6 +69,7 @@ type DashboardPayload = {
   rows: DashboardRow[];
   warehouseNames: string[];
   manualWarehouses: ManualWarehouse[];
+  fbsStockSyncedWarehouseIds: string[];
   totals: {
     available: number;
     ffTotal: number;
@@ -145,6 +150,53 @@ async function getWbStocks(token: string) {
   return response.data?.items ?? [];
 }
 
+async function getSellerWarehouses(token: string): Promise<Array<{ id: number; name: string }>> {
+  const warehouses = await wbFetch<WbSellerWarehouse[]>(token, `${WB_MARKETPLACE}/api/v3/warehouses`);
+  return warehouses
+    .filter((warehouse) => Number.isInteger(warehouse.id) && (warehouse.id ?? 0) > 0 && !warehouse.isDeleting)
+    .map((warehouse) => ({ id: warehouse.id!, name: warehouse.name?.trim() || `Склад WB FBS №${warehouse.id}` }));
+}
+
+async function getFbsStocks(token: string, cards: WbCard[], warehouses: Array<{ id: number; name: string }>) {
+  const chrtToNmId = new Map<number, number>();
+  for (const card of cards) {
+    const nmId = card.nmID ?? card.nmId;
+    if (!nmId) continue;
+    for (const size of card.sizes ?? []) {
+      const chrtId = size.chrtID ?? size.chrtId;
+      if (chrtId) chrtToNmId.set(chrtId, nmId);
+    }
+  }
+  const chrtIds = [...chrtToNmId.keys()];
+  if (!chrtIds.length || !warehouses.length) return { stockByWarehouse: new Map<string, Map<number, number>>(), syncedWarehouseIds: [] as string[], errors: [] as Array<{ warehouse: string; reason: unknown }> };
+
+  const results = await Promise.all(warehouses.map(async (warehouse) => {
+    try {
+      const stock = new Map<number, number>();
+      for (const chunk of chunks(chrtIds, 1000)) {
+        const response = await wbFetch<{ stocks?: WbFbsStock[] }>(token, `${WB_MARKETPLACE}/api/v3/stocks/${warehouse.id}`, {
+          method: "POST",
+          body: JSON.stringify({ chrtIds: chunk }),
+        });
+        for (const item of response.stocks ?? []) {
+          const nmId = chrtToNmId.get(item.chrtId ?? item.chrtID ?? 0);
+          if (!nmId) continue;
+          stock.set(nmId, (stock.get(nmId) ?? 0) + Math.max(0, Number(item.amount) || 0));
+        }
+      }
+      return { warehouse, stock, error: null as unknown };
+    } catch (error) {
+      return { warehouse, stock: new Map<number, number>(), error };
+    }
+  }));
+
+  return {
+    stockByWarehouse: new Map(results.filter((result) => !result.error).map((result) => [String(result.warehouse.id), result.stock])),
+    syncedWarehouseIds: results.filter((result) => !result.error).map((result) => String(result.warehouse.id)),
+    errors: results.filter((result) => result.error).map((result) => ({ warehouse: result.warehouse.name, reason: result.error })),
+  };
+}
+
 async function getOrders(token: string): Promise<{ orders: WbOrder[]; statuses: Map<number, OrderStatus> }> {
   const orders: WbOrder[] = [];
   const now = Math.floor(Date.now() / 1000);
@@ -188,6 +240,7 @@ function getOrCreateRow(map: Map<string, DashboardRow>, input: { nmId?: number; 
     ffStock: emptyFfStock(),
     ffExpiry: emptyFfExpiry(),
     ffBatches: emptyFfBatches(),
+    fbsStockByWbWarehouse: emptyFbsBreakdown(),
     fbs: 0,
     fbsByLocation: emptyFbsBreakdown(),
     fbsByWbWarehouse: emptyFbsBreakdown(),
@@ -230,20 +283,29 @@ async function attachFfStocks(payload: DashboardPayload, cabinetId: CabinetId): 
         .filter((warehouse) => warehouse.wbWarehouseId)
         .map((warehouse) => [String(warehouse.wbWarehouseId), warehouse.id]),
     );
-    const rows = payload.rows.map((row) => ({
-      ...row,
-      ffStock: stockForProduct(lookup, { productKey: row.key, sku: row.sku }, manualWarehouses),
-      ffExpiry: expiryForProduct(lookup, { productKey: row.key, sku: row.sku }, manualWarehouses),
-      ffBatches: batchesForProduct(lookup, { productKey: row.key, sku: row.sku }, manualWarehouses),
-      fbsByLocation: mapWbWarehouseBreakdown(row.fbsByWbWarehouse, wbWarehouseToFfWarehouse),
-      sales7dByLocation: mapWbWarehouseBreakdown(row.sales7dByWbWarehouse, wbWarehouseToFfWarehouse),
-      receivingByLocation: mapWbWarehouseBreakdown(row.receivingByWbWarehouse, wbWarehouseToFfWarehouse),
-      toSaleByLocation: mapWbWarehouseBreakdown(row.toSaleByWbWarehouse, wbWarehouseToFfWarehouse),
-    }));
+    const syncedWarehouseIds = new Set(payload.fbsStockSyncedWarehouseIds);
+    const rows = payload.rows.map((row) => {
+      const ffStock = stockForProduct(lookup, { productKey: row.key, sku: row.sku }, manualWarehouses);
+      for (const warehouse of manualWarehouses) {
+        const wbWarehouseId = warehouse.wbWarehouseId ? String(warehouse.wbWarehouseId) : null;
+        if (wbWarehouseId && syncedWarehouseIds.has(wbWarehouseId)) ffStock[warehouse.id] = row.fbsStockByWbWarehouse[wbWarehouseId] ?? 0;
+      }
+      return {
+        ...row,
+        ffStock,
+        ffExpiry: expiryForProduct(lookup, { productKey: row.key, sku: row.sku }, manualWarehouses),
+        ffBatches: batchesForProduct(lookup, { productKey: row.key, sku: row.sku }, manualWarehouses),
+        fbsByLocation: mapWbWarehouseBreakdown(row.fbsByWbWarehouse, wbWarehouseToFfWarehouse),
+        sales7dByLocation: mapWbWarehouseBreakdown(row.sales7dByWbWarehouse, wbWarehouseToFfWarehouse),
+        receivingByLocation: mapWbWarehouseBreakdown(row.receivingByWbWarehouse, wbWarehouseToFfWarehouse),
+        toSaleByLocation: mapWbWarehouseBreakdown(row.toSaleByWbWarehouse, wbWarehouseToFfWarehouse),
+      };
+    });
+    const visibleWarehouses = manualWarehouses.filter((warehouse) => !warehouse.isHidden);
     const ffStock = rows.reduce((total, row) => {
-      for (const warehouse of manualWarehouses) total[warehouse.id] = (total[warehouse.id] ?? 0) + (row.ffStock[warehouse.id] ?? 0);
+      for (const warehouse of visibleWarehouses) total[warehouse.id] = (total[warehouse.id] ?? 0) + (row.ffStock[warehouse.id] ?? 0);
       return total;
-    }, emptyFfStock(manualWarehouses));
+    }, emptyFfStock(visibleWarehouses));
     return {
       ...payload,
       rows,
@@ -291,16 +353,19 @@ export async function GET(request: Request) {
     return NextResponse.json(await attachFfStocks(cached.payload, cabinetId), { headers: { "Cache-Control": "private, max-age=0" } });
   }
 
-  const [cardsResult, wbStocksResult, ordersResult] = await Promise.allSettled([
+  const [cardsResult, wbStocksResult, ordersResult, sellerWarehousesResult] = await Promise.allSettled([
     getCards(token),
     getWbStocks(token),
     getOrders(token),
+    getSellerWarehouses(token),
   ]);
   const warnings: string[] = [];
   const rowMap = new Map<string, DashboardRow>();
 
   const cards = cardsResult.status === "fulfilled" ? cardsResult.value : [];
+  const sellerWarehouses = sellerWarehousesResult.status === "fulfilled" ? sellerWarehousesResult.value : [];
   if (cardsResult.status === "rejected") warnings.push(warningFor("Карточки товаров", cardsResult.reason));
+  if (sellerWarehousesResult.status === "rejected") warnings.push(warningFor("Склады FBS продавца", sellerWarehousesResult.reason));
   for (const card of cards) {
     getOrCreateRow(rowMap, {
       nmId: card.nmID ?? card.nmId,
@@ -308,6 +373,25 @@ export async function GET(request: Request) {
       name: card.title,
       category: card.subjectName,
     });
+  }
+
+  if (sellerWarehouses.length) {
+    try {
+      await syncWbFbsWarehouses({ cabinetId, warehouses: sellerWarehouses });
+    } catch (error) {
+      warnings.push(warningFor("Склады ФФ", error));
+    }
+  }
+
+  const fbsStockResult = cardsResult.status === "fulfilled" && sellerWarehousesResult.status === "fulfilled"
+    ? await getFbsStocks(token, cards, sellerWarehouses)
+    : { stockByWarehouse: new Map<string, Map<number, number>>(), syncedWarehouseIds: [] as string[], errors: [] as Array<{ warehouse: string; reason: unknown }> };
+  for (const failure of fbsStockResult.errors) warnings.push(warningFor(`Остатки FBS · ${failure.warehouse}`, failure.reason));
+  for (const [warehouseId, stock] of fbsStockResult.stockByWarehouse) {
+    for (const [nmId, quantity] of stock) {
+      const row = getOrCreateRow(rowMap, { nmId });
+      row.fbsStockByWbWarehouse[warehouseId] = (row.fbsStockByWbWarehouse[warehouseId] ?? 0) + quantity;
+    }
   }
 
   if (wbStocksResult.status === "fulfilled") {
@@ -396,7 +480,7 @@ export async function GET(request: Request) {
     activeSupplies,
   };
   const updatedAt = new Date().toISOString();
-  const payload: DashboardPayload = { configured: true, cabinet, rows, warehouseNames, manualWarehouses: [], totals, warnings, updatedAt };
+  const payload: DashboardPayload = { configured: true, cabinet, rows, warehouseNames, manualWarehouses: [], fbsStockSyncedWarehouseIds: fbsStockResult.syncedWarehouseIds, totals, warnings, updatedAt };
   memoryCache.set(cabinetId, { createdAt: now, expiresAt: now + CACHE_LIFETIME_MS, payload });
 
   return NextResponse.json(await attachFfStocks(payload, cabinetId), { headers: { "Cache-Control": "private, max-age=0" } });

@@ -19,6 +19,10 @@ function optionalWarehouseName(value: unknown) {
   return typeof value === "string" && value.trim().length <= 120 ? value.trim() : undefined;
 }
 
+function optionalHidden(value: unknown) {
+  return typeof value === "boolean" ? value : undefined;
+}
+
 export async function GET(request: Request) {
   const cabinet = await getAdminCabinet(request);
   if (!cabinet) return NextResponse.json({ error: "Требуется вход администратора" }, { status: 401 });
@@ -47,13 +51,14 @@ export async function PATCH(request: Request) {
   const cabinet = await getAdminCabinet(request);
   if (!cabinet) return NextResponse.json({ error: "Требуется вход администратора" }, { status: 401 });
   try {
-    const payload = await request.json() as { id?: unknown; city?: unknown; name?: unknown; position?: unknown; wbWarehouseId?: unknown; wbWarehouseName?: unknown };
+    const payload = await request.json() as { id?: unknown; city?: unknown; name?: unknown; position?: unknown; wbWarehouseId?: unknown; wbWarehouseName?: unknown; isHidden?: unknown };
     const wbWarehouseId = optionalWarehouseId(payload.wbWarehouseId);
     const wbWarehouseName = optionalWarehouseName(payload.wbWarehouseName);
-    if (!validText(payload.id, 100) || !validText(payload.city, 80) || !validText(payload.name, 120) || wbWarehouseId === undefined || wbWarehouseName === undefined) {
+    const isHidden = optionalHidden(payload.isHidden);
+    if (!validText(payload.id, 100) || !validText(payload.city, 80) || !validText(payload.name, 120) || wbWarehouseId === undefined || wbWarehouseName === undefined || isHidden === undefined) {
       return NextResponse.json({ error: "Проверьте название склада и ID склада WB" }, { status: 400 });
     }
-    return NextResponse.json({ warehouse: await updateFfWarehouse({ cabinetId: cabinet, id: payload.id, city: payload.city, name: payload.name, position: Number(payload.position) || 0, wbWarehouseId, wbWarehouseName }) });
+    return NextResponse.json({ warehouse: await updateFfWarehouse({ cabinetId: cabinet, id: payload.id, city: payload.city, name: payload.name, position: Number(payload.position) || 0, wbWarehouseId, wbWarehouseName, isHidden }) });
   } catch {
     return NextResponse.json({ error: "Не удалось сохранить склад" }, { status: 500 });
   }
