@@ -4,7 +4,6 @@ import { cabinetToken, getAdminCabinet } from "@/lib/admin-auth";
 
 export const dynamic = "force-dynamic";
 
-const WB_MARKETPLACE = "https://marketplace-api.wildberries.ru";
 const WB_STATISTICS = "https://statistics-api.wildberries.ru";
 const DAY_MS = 24 * 60 * 60 * 1000;
 const CACHE_MS = 2 * 60 * 1000;
@@ -17,15 +16,13 @@ type WbSale = {
   isCancel?: boolean;
 };
 
-type WbOrder = { id: number; createdAt?: string; warehouseId?: number };
-type OrderStatus = { id: number; supplierStatus?: string; wbStatus?: string };
 type AnalyticsPayload = {
   from: string;
   to: string;
   summary: { fbs: number; fbo: number; total: number; fbsShare: number; fboShare: number };
   daily: Array<{ date: string; fbs: number; fbo: number }>;
   fbsWarehouses: Array<{ id: string; name: string; sublabel: string; value: number }>;
-  source: { fbs: "sales" | "orders"; fboAvailable: boolean; retryAt: string | null; retryExact: boolean };
+  source: { factAvailable: boolean; retryAt: string | null; retryExact: boolean };
   warnings: string[];
   updatedAt: string;
 };
@@ -116,30 +113,6 @@ function isSale(sale: WbSale) {
   return sale.saleID?.startsWith("S") && !sale.isCancel;
 }
 
-async function getFbsOrdersFallback(token: string, fromMs: number, toMs: number) {
-  const orders: WbOrder[] = [];
-  for (let start = fromMs; start <= toMs; start += 30 * DAY_MS) {
-    const end = Math.min(toMs + DAY_MS - 1, start + 30 * DAY_MS - 1);
-    let next = 0;
-    for (let page = 0; page < 30; page += 1) {
-      const params = new URLSearchParams({ limit: "1000", next: String(next), dateFrom: String(Math.floor(start / 1000)), dateTo: String(Math.floor(end / 1000)) });
-      const data = await wbFetch<{ next?: number; orders?: WbOrder[] }>(token, `${WB_MARKETPLACE}/api/v3/orders?${params}`);
-      const batch = data.orders ?? [];
-      orders.push(...batch);
-      if (batch.length < 1000 || !data.next || data.next === next) break;
-      next = data.next;
-    }
-  }
-  const statuses = new Map<number, OrderStatus>();
-  for (let index = 0; index < orders.length; index += 1000) {
-    const ids = orders.slice(index, index + 1000).map((order) => order.id);
-    if (!ids.length) continue;
-    const data = await wbFetch<{ orders?: OrderStatus[] }>(token, `${WB_MARKETPLACE}/api/v3/orders/status`, { method: "POST", body: JSON.stringify({ orders: ids }) });
-    for (const status of data.orders ?? []) statuses.set(status.id, status);
-  }
-  return { orders, statuses };
-}
-
 function initialWarehouseValues(warehouses: ManualWarehouse[]) {
   return new Map(warehouses.map((warehouse) => [warehouse.id, 0]));
 }
@@ -174,7 +147,7 @@ export async function GET(request: Request) {
   const warehouseByName = new Map(manualWarehouses.filter((warehouse) => warehouse.wbWarehouseName).map((warehouse) => [warehouse.wbWarehouseName!.trim().toLocaleLowerCase("ru-RU"), warehouse.id]));
   let unassigned = 0;
   const warnings: string[] = [];
-  let source: AnalyticsPayload["source"] = { fbs: "sales", fboAvailable: true, retryAt: null, retryExact: true };
+  let source: AnalyticsPayload["source"] = { factAvailable: true, retryAt: null, retryExact: true };
 
   if (salesResult.ok) {
     for (const sale of salesResult.items) {
@@ -193,29 +166,9 @@ export async function GET(request: Request) {
       }
     }
   } else {
-    warnings.push(warningFor("Факт продаж FBO", salesResult.error));
+    warnings.push(warningFor("Факт продаж FBS и FBO", salesResult.error));
     const retry = retryDetails(salesResult.error);
-    source = { fbs: "orders", fboAvailable: false, retryAt: retry?.retryAt ?? null, retryExact: retry?.retryExact ?? true };
-    try {
-      const fallback = await getFbsOrdersFallback(token, period.fromMs, period.toMs);
-      const canceled = new Set(["canceled", "canceled_by_client", "declined_by_client", "defect"]);
-      const warehouseById = new Map(manualWarehouses.filter((warehouse) => warehouse.wbWarehouseId).map((warehouse) => [String(warehouse.wbWarehouseId), warehouse.id]));
-      for (const order of fallback.orders) {
-        const status = fallback.statuses.get(order.id);
-        if (!status || canceled.has(status.wbStatus ?? "") || status.supplierStatus === "cancel") continue;
-        const day = dateKey(order.createdAt);
-        const point = day ? daily.get(day) : null;
-        if (!point) continue;
-        point.fbs += 1;
-        const warehouseId = warehouseById.get(String(order.warehouseId ?? ""));
-        if (warehouseId) fbsWarehouseValues.set(warehouseId, (fbsWarehouseValues.get(warehouseId) ?? 0) + 1);
-        else unassigned += 1;
-      }
-    } catch (error) {
-      warnings.push(warningFor("Заказы FBS", error));
-      const retry = retryDetails(error);
-      if (retry && !source.retryAt) source = { ...source, retryAt: retry.retryAt, retryExact: retry.retryExact };
-    }
+    source = { factAvailable: false, retryAt: retry?.retryAt ?? null, retryExact: retry?.retryExact ?? true };
   }
 
   const points = [...daily.values()];
@@ -233,6 +186,6 @@ export async function GET(request: Request) {
     updatedAt: new Date().toISOString(),
   };
   const retryCacheMs = source.retryAt ? Math.max(1_000, Date.parse(source.retryAt) - Date.now()) : 0;
-  cache.set(key, { expiresAt: Date.now() + (retryCacheMs || (source.fboAvailable ? CACHE_MS : 30 * 1000)), payload });
+  cache.set(key, { expiresAt: Date.now() + (retryCacheMs || (source.factAvailable ? CACHE_MS : 30 * 1000)), payload });
   return NextResponse.json(payload, { headers: { "Cache-Control": "private, max-age=0" } });
 }
