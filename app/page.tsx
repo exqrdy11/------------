@@ -753,20 +753,6 @@ export default function Home() {
     return () => window.clearInterval(timer);
   }, [inventoryRetryAt, loading]);
 
-  useEffect(() => {
-    if (authState !== "authenticated" || !inventoryRetryAt) return;
-    const delay = Math.max(0, Date.parse(inventoryRetryAt) - Date.now()) + 250;
-    const timer = window.setTimeout(() => void loadData(true), delay);
-    return () => window.clearTimeout(timer);
-  }, [authState, inventoryRetryAt, loadData]);
-
-  useEffect(() => {
-    if (authState !== "authenticated" || activeView !== "analytics" || !analyticsRetryAt) return;
-    const delay = Math.max(0, Date.parse(analyticsRetryAt) - Date.now()) + 250;
-    const timer = window.setTimeout(() => void loadAnalytics(analyticsRange, true), delay);
-    return () => window.clearTimeout(timer);
-  }, [activeView, analyticsRange, analyticsRetryAt, authState, loadAnalytics]);
-
   const visibleManualWarehouses = useMemo(() => manualWarehouses.filter((warehouse) => !warehouse.isHidden), [manualWarehouses]);
 
   const selectedImportWarehouseId = manualWarehouses.some((item) => item.id === importWarehouseId)
@@ -1278,7 +1264,7 @@ export default function Home() {
           </section>}
           {error && <section className="api-notice" role="alert"><span className="api-notice-icon">!</span><div><strong>{error}</strong><p>{configured ? "Для полной загрузки токену нужны категории: Контент, Маркетплейс и Аналитика." : "Безопасный токен хранится только на сервере и не передаётся в браузер."}</p></div><button type="button" onClick={() => void loadData(true)}>Проверить снова</button></section>}
           {!error && warnings.length > 0 && <section className="warning-strip"><span>!</span><p>{warnings.join(" · ")}</p></section>}
-          {inventoryRetrySeconds !== null && inventoryRetrySeconds > 0 && <section className="inventory-retry-timer" role="status"><span>↻</span><div><strong>WB разрешит повторную загрузку через {formatCountdown(inventoryRetrySeconds)}</strong><p>Пока показываем последние корректные данные. Повторим автоматически.</p></div></section>}
+          {inventoryRetrySeconds !== null && inventoryRetrySeconds > 0 && <section className="inventory-retry-timer" role="status"><span>↻</span><div><strong>WB разрешит повторную загрузку через {formatCountdown(inventoryRetrySeconds)}</strong><p>Пока показываем последние корректные данные. После таймера обновите вручную.</p></div></section>}
 
           {activeView === "cabinets" ? (
             <section className="cabinet-manager">
@@ -1477,7 +1463,7 @@ export default function Home() {
               <div className="analytics-controls"><div className="analytics-periods" role="group" aria-label="Период аналитики">{[{ id: "7d", label: "Неделя" }, { id: "14d", label: "2 недели" }, { id: "30d", label: "Месяц" }, { id: "custom", label: "Свои даты" }].map((item) => <button type="button" key={item.id} className={analyticsPeriod === item.id ? "active" : ""} onClick={() => chooseAnalyticsPeriod(item.id as "7d" | "14d" | "30d" | "custom")}>{item.label}</button>)}</div><span className="analytics-period-label">{shortDate(analyticsRange.from)} — {shortDate(analyticsRange.to)}</span></div>
               {analyticsPeriod === "custom" && <div className="analytics-custom-dates"><label><span>С</span><input type="date" value={analyticsDraft.from} min={isoDate(89)} max={isoDate(0)} onChange={(event) => setAnalyticsDraft((value) => ({ ...value, from: event.target.value }))} /></label><label><span>По</span><input type="date" value={analyticsDraft.to} min={isoDate(89)} max={isoDate(0)} onChange={(event) => setAnalyticsDraft((value) => ({ ...value, to: event.target.value }))} /></label><button type="button" onClick={applyAnalyticsCustomPeriod}>Применить</button><small>Максимум 90 дней</small></div>}
               {analytics?.warnings.length ? <div className="analytics-warning">{analytics.warnings.map((warning) => <span key={warning}>! {warning}</span>)}</div> : null}
-              {analyticsRetrySeconds !== null && analyticsRetrySeconds > 0 && <div className="analytics-retry-timer" role="status"><span>↻</span><div><strong>WB разрешит повторный запрос через {formatCountdown(analyticsRetrySeconds)}</strong><p>{analytics?.source.retryExact ? "Повторим автоматически, когда закончится ограничение WB." : "WB не прислал точное время — повторим автоматически по безопасному интервалу."}</p></div></div>}
+              {analyticsRetrySeconds !== null && analyticsRetrySeconds > 0 && <div className="analytics-retry-timer" role="status"><span>↻</span><div><strong>WB разрешит повторный запрос через {formatCountdown(analyticsRetrySeconds)}</strong><p>{analytics?.source.retryExact ? "После таймера нажмите «Обновить» вручную." : "WB не прислал точное время — дождитесь окончания интервала и обновите вручную."}</p></div></div>}
 
               {analyticsLoading && !analytics ? <div className="analytics-loading"><span className="loader"/><strong>Собираем аналитику Wildberries</strong><small>Сверяем продажи и каналы за выбранный период</small></div> : analyticsError && !analytics ? <div className="empty-state"><strong>Аналитика пока недоступна</strong><span>{analyticsError}</span></div> : analytics ? <>
                 <div className="analytics-kpi-grid">{analyticsFactAvailable ? <><article className="analytics-kpi total"><span>Продажи за период</span><strong>{formatNumber.format(analytics.summary.total)} <small>шт.</small></strong><p>FBS и FBO вместе</p></article><article className="analytics-kpi fbo"><span>Продажи FBO</span><strong>{formatNumber.format(analytics.summary.fbo)} <small>шт.</small></strong><p>{analytics.summary.fboShare}% от продаж</p></article><article className="analytics-kpi fbs"><span>Продажи FBS</span><strong>{formatNumber.format(analytics.summary.fbs)} <small>шт.</small></strong><p>{analytics.summary.fbsShare}% от продаж</p></article><article className="analytics-kpi share"><span>Доля FBS</span><strong>{analytics.summary.fbsShare}<small>%</small></strong><p>По факту продаж</p></article></> : <><article className="analytics-kpi total unavailable"><span>Факт продаж</span><strong>—</strong><p>WB временно не отдал статистику</p></article><article className="analytics-kpi fbo unavailable"><span>Продажи FBO</span><strong>—</strong><p>Не подменяем нулём</p></article><article className="analytics-kpi fbs unavailable"><span>Продажи FBS</span><strong>—</strong><p>Не подменяем заказами</p></article><article className="analytics-kpi share unavailable"><span>Сравнение каналов</span><strong>—</strong><p>Нет факта продаж для сравнения</p></article></>}</div>
