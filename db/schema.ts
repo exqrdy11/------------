@@ -44,6 +44,13 @@ export const marketplaceCredentials = sqliteTable("marketplace_credentials", {
   updatedAt: text("updated_at").notNull().default(sql`CURRENT_TIMESTAMP`),
 }, (table) => [primaryKey({ columns: [table.cabinetId, table.marketplace] })]);
 
+export const marketplaceConnectionControls = sqliteTable("marketplace_connection_controls", {
+  cabinetId: text("cabinet_id").notNull().default("metanutrix"),
+  marketplace: text("marketplace").notNull(),
+  isDisabled: integer("is_disabled", { mode: "boolean" }).notNull().default(false),
+  updatedAt: text("updated_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+}, (table) => [primaryKey({ columns: [table.cabinetId, table.marketplace] })]);
+
 export const fbsOrderHandoverMetrics = sqliteTable("fbs_order_handover_metrics", {
   cabinetId: text("cabinet_id").notNull(),
   orderId: integer("order_id").notNull(),

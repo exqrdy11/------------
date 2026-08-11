@@ -21,6 +21,7 @@ type UserRole = "owner" | "viewer";
 type MarketplaceConnection = {
   platform: "yandex" | "ozon";
   configured: boolean;
+  disabled: boolean;
   connected: boolean;
   accountName: string | null;
   details: string[];
@@ -413,9 +414,8 @@ function MarketplaceConnectionCard({
   platform,
   mark,
   title,
-  requirements,
   onCheck,
-  onSave,
+  onDisable,
   canManage,
   checking,
 }: {
@@ -423,43 +423,30 @@ function MarketplaceConnectionCard({
   platform: "yandex" | "ozon";
   mark: string;
   title: string;
-  requirements: string;
   onCheck: () => void;
-  onSave: (platform: "yandex" | "ozon", clientId: string, apiKey: string) => Promise<boolean>;
+  onDisable: (platform: "yandex" | "ozon") => Promise<void>;
   canManage: boolean;
   checking: boolean;
 }) {
   const connected = connection?.connected ?? false;
   const configured = connection?.configured ?? false;
-  const [setupOpen, setSetupOpen] = useState(false);
-  const [clientId, setClientId] = useState("");
-  const [apiKey, setApiKey] = useState("");
-  const [saving, setSaving] = useState(false);
-  const [setupError, setSetupError] = useState<string | null>(null);
-  const save = async (event: FormEvent<HTMLFormElement>) => {
-    event.preventDefault();
-    setSetupError(null);
-    setSaving(true);
+  const disabled = connection?.disabled ?? false;
+  const [disabling, setDisabling] = useState(false);
+  const disable = async () => {
+    setDisabling(true);
     try {
-      const saved = await onSave(platform, clientId, apiKey);
-      if (!saved) throw new Error("Не удалось сохранить ключ");
-      setApiKey("");
-      setSetupOpen(false);
-    } catch (error) {
-      setSetupError(error instanceof Error ? error.message : "Не удалось сохранить ключ");
+      await onDisable(platform);
     } finally {
-      setSaving(false);
+      setDisabling(false);
     }
   };
   return <article className={`cabinet-platform-card ${connected ? "connected-platform" : "pending-platform"}`}>
-    <div className="cabinet-platform-head"><span className={`platform-mark ${platform === "yandex" ? "ym-mark" : "oz-mark"}`}>{mark}</span><div><strong>{title}</strong><small>{connected ? "Подключено по API" : configured ? "Нужна проверка подключения" : "Кабинет не подключён"}</small></div></div>
-    {connected ? <div className="platform-connect connected"><strong>{connection?.accountName || title}</strong><span>{connection?.details.length ? connection.details.join(" · ") : "Доступ к кабинету подтверждён"}</span></div> : <div className="platform-connect"><strong>{configured ? "Ключ добавлен" : "Подключим отдельный кабинет"}</strong><span>{configured ? connection?.error || "Проверьте подключение." : requirements}</span></div>}
-    {canManage && <><button className="marketplace-check-btn" type="button" onClick={configured ? onCheck : () => setSetupOpen(true)} disabled={checking || saving}>{checking ? "Проверяем…" : connected ? "Проверить снова" : configured ? "Проверить ключ" : "Добавить ключ"}</button>{configured && <button className="marketplace-link-btn" type="button" onClick={() => setSetupOpen((current) => !current)}>{setupOpen ? "Скрыть форму" : "Заменить ключ"}</button>}</>}
-    {setupOpen && canManage && <form className="marketplace-key-form" onSubmit={(event) => void save(event)}>{platform === "ozon" && <label><span>Client ID</span><input value={clientId} onChange={(event) => setClientId(event.target.value)} autoComplete="off" required /></label>}{platform === "yandex" && <label><span>Business ID <em>необязательно</em></span><input value={clientId} onChange={(event) => setClientId(event.target.value)} inputMode="numeric" autoComplete="off" placeholder="Например, 12345678" /></label>}<label><span>API-ключ</span><input type="password" value={apiKey} onChange={(event) => setApiKey(event.target.value)} autoComplete="new-password" required /></label><button type="submit" disabled={saving}>{saving ? "Сохраняем…" : "Сохранить и проверить"}</button>{setupError && <small className="marketplace-key-error">{setupError}</small>}</form>}
+    <div className="cabinet-platform-head"><span className={`platform-mark ${platform === "yandex" ? "ym-mark" : "oz-mark"}`}>{mark}</span><div><strong>{title}</strong><small>{disabled ? "Подключение отключено" : connected ? "Подключено по API" : configured ? "Нужна проверка подключения" : "Настраивается на сервере"}</small></div></div>
+    {disabled ? <div className="platform-connect"><strong>Подключение отключено</strong><span>Ключи остаются в защищённой настройке сервера. Включение выполняется только на сервере.</span></div> : connected ? <div className="platform-connect connected"><strong>{connection?.accountName || title}</strong><span>{connection?.details.length ? connection.details.join(" · ") : "Доступ к кабинету подтверждён"}</span></div> : <div className="platform-connect"><strong>{configured ? "Ключ на сервере" : "Ключ не настроен"}</strong><span>{configured ? connection?.error || "Проверьте подключение." : "API-ключи вводятся только в защищённой настройке сервера и не доступны в браузере."}</span></div>}
+    {canManage && configured && !disabled && <><button className="marketplace-check-btn" type="button" onClick={onCheck} disabled={checking || disabling}>{checking ? "Проверяем…" : connected ? "Проверить снова" : "Проверить подключение"}</button><button className="marketplace-link-btn marketplace-disable-btn" type="button" onClick={() => void disable()} disabled={checking || disabling}>{disabling ? "Отключаем…" : "Отключить"}</button></>}
     {!canManage && <p>Гостевой доступ: можно смотреть статусы, но API-ключи и настройки скрыты.</p>}
-    {canManage && configured && !connected && <p>После успешной проверки сюда попадут доступные кампании или склады.</p>}
+    {canManage && configured && !disabled && !connected && <p>После успешной проверки сюда попадут доступные кампании или склады.</p>}
     {canManage && connected && <p>Следующий этап: подтянем товары, остатки и заказы в отдельный контур этого маркетплейса.</p>}
-    {canManage && !configured && !setupOpen && <p>Добавьте ключ прямо здесь — он сохраняется на сервере в зашифрованном виде и не возвращается в браузер.</p>}
   </article>;
 }
 
@@ -558,20 +545,19 @@ export default function Home() {
     }
   }, []);
 
-  const saveMarketplaceConnection = useCallback(async (platform: "yandex" | "ozon", clientId: string, apiKey: string) => {
+  const disableMarketplaceConnection = useCallback(async (platform: "yandex" | "ozon") => {
     const response = await fetch("/api/marketplaces", {
-      method: "POST",
+      method: "DELETE",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ platform, clientId, apiKey }),
+      body: JSON.stringify({ platform }),
     });
-    const data = await response.json() as { saved?: boolean; error?: string };
+    const data = await response.json() as { disabled?: boolean; error?: string };
     if (response.status === 401) {
       setAuthState("unauthenticated");
-      return false;
+      return;
     }
-    if (!response.ok || !data.saved) throw new Error(data.error || "Не удалось сохранить ключ");
+    if (!response.ok || !data.disabled) throw new Error(data.error || "Не удалось отключить подключение");
     await loadMarketplaceConnections();
-    return true;
   }, [loadMarketplaceConnections]);
 
   const loadData = useCallback(async (force = false) => {
@@ -1225,8 +1211,8 @@ export default function Home() {
                   {cabinetSwitchError && <p className="cabinet-switch-error">{cabinetSwitchError}</p>}
                   {!cabinetSwitchError && <p>Выберите кампанию — повторный логин не нужен.</p>}
                 </article>
-                <MarketplaceConnectionCard platform="yandex" mark="ЯМ" title="Яндекс Маркет" requirements="Нужен API-ключ. Business ID можно добавить сразу — кампании определим автоматически." connection={marketplaceConnections.find((item) => item.platform === "yandex")} onCheck={() => void loadMarketplaceConnections()} onSave={saveMarketplaceConnection} canManage={canManage} checking={marketplaceConnectionsLoading} />
-                <MarketplaceConnectionCard platform="ozon" mark="OZ" title="Ozon Seller" requirements="Понадобятся Client ID и API-ключ Ozon." connection={marketplaceConnections.find((item) => item.platform === "ozon")} onCheck={() => void loadMarketplaceConnections()} onSave={saveMarketplaceConnection} canManage={canManage} checking={marketplaceConnectionsLoading} />
+                <MarketplaceConnectionCard platform="yandex" mark="ЯМ" title="Яндекс Маркет" connection={marketplaceConnections.find((item) => item.platform === "yandex")} onCheck={() => void loadMarketplaceConnections()} onDisable={disableMarketplaceConnection} canManage={canManage} checking={marketplaceConnectionsLoading} />
+                <MarketplaceConnectionCard platform="ozon" mark="OZ" title="Ozon Seller" connection={marketplaceConnections.find((item) => item.platform === "ozon")} onCheck={() => void loadMarketplaceConnections()} onDisable={disableMarketplaceConnection} canManage={canManage} checking={marketplaceConnectionsLoading} />
               </div>
               <p className="cabinet-manager-note">Каждый маркетплейс получит отдельный контур: свои товары, склады, остатки, заказы и будущие таргет-цены. Данные между площадками не смешиваются.</p>
             </section>

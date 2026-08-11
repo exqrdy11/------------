@@ -1,12 +1,14 @@
 import { NextResponse } from "next/server";
 import { getAdminSession, getOwnerSession } from "@/lib/admin-auth";
-import { marketplaceCredential, saveMarketplaceCredential, type Marketplace, type MarketplaceCredential } from "@/db/marketplace-credentials";
+import { disableMarketplace, isMarketplaceDisabled } from "@/db/marketplace-connections";
+import type { Marketplace } from "@/db/marketplace-credentials";
 
 export const dynamic = "force-dynamic";
 
 type MarketplaceConnection = {
   platform: "yandex" | "ozon";
   configured: boolean;
+  disabled: boolean;
   connected: boolean;
   accountName: string | null;
   details: string[];
@@ -27,10 +29,12 @@ function safeApiError(platform: string, status?: number) {
   return `${platform}: не удалось проверить подключение`;
 }
 
-async function checkOzon(credentials: MarketplaceCredential | null): Promise<MarketplaceConnection> {
-  const clientId = credentials?.clientId?.trim() || process.env.OZON_CLIENT_ID?.trim();
-  const apiKey = credentials?.apiKey?.trim() || process.env.OZON_API_KEY?.trim();
-  if (!clientId || !apiKey) return { platform: "ozon", configured: false, connected: false, accountName: null, details: [], error: null };
+async function checkOzon(disabled: boolean): Promise<MarketplaceConnection> {
+  const clientId = process.env.OZON_CLIENT_ID?.trim();
+  const apiKey = process.env.OZON_API_KEY?.trim();
+  const configured = Boolean(clientId && apiKey);
+  if (disabled) return { platform: "ozon", configured, disabled: true, connected: false, accountName: null, details: [], error: null };
+  if (!configured) return { platform: "ozon", configured: false, disabled: false, connected: false, accountName: null, details: [], error: null };
 
   try {
     // Ozon discontinued the v1 warehouse endpoint in March 2026. Keeping this
@@ -42,26 +46,29 @@ async function checkOzon(credentials: MarketplaceCredential | null): Promise<Mar
       cache: "no-store",
       signal: timeoutSignal(),
     });
-    if (!response.ok) return { platform: "ozon", configured: true, connected: false, accountName: null, details: [], error: safeApiError("Ozon", response.status) };
+    if (!response.ok) return { platform: "ozon", configured: true, disabled: false, connected: false, accountName: null, details: [], error: safeApiError("Ozon", response.status) };
     const data = await response.json() as { result?: Array<{ name?: string; warehouse_id?: number }> };
     const warehouses = (data.result ?? []).map((warehouse) => warehouse.name?.trim()).filter((name): name is string => Boolean(name));
     return {
       platform: "ozon",
       configured: true,
+      disabled: false,
       connected: true,
       accountName: "Ozon Seller",
       details: warehouses.slice(0, 3),
       error: null,
     };
   } catch {
-    return { platform: "ozon", configured: true, connected: false, accountName: null, details: [], error: "Ozon: сервис не ответил за 12 секунд" };
+    return { platform: "ozon", configured: true, disabled: false, connected: false, accountName: null, details: [], error: "Ozon: сервис не ответил за 12 секунд" };
   }
 }
 
-async function checkYandex(credentials: MarketplaceCredential | null): Promise<MarketplaceConnection> {
-  const businessId = credentials?.clientId?.trim() || null;
-  const apiKey = credentials?.apiKey?.trim() || process.env.YANDEX_MARKET_API_KEY?.trim();
-  if (!apiKey) return { platform: "yandex", configured: false, connected: false, accountName: null, details: [], error: null };
+async function checkYandex(disabled: boolean): Promise<MarketplaceConnection> {
+  const businessId = process.env.YANDEX_MARKET_BUSINESS_ID?.trim() || null;
+  const apiKey = process.env.YANDEX_MARKET_API_KEY?.trim();
+  const configured = Boolean(apiKey);
+  if (disabled) return { platform: "yandex", configured, disabled: true, connected: false, accountName: null, details: [], error: null };
+  if (!configured) return { platform: "yandex", configured: false, disabled: false, connected: false, accountName: null, details: [], error: null };
 
   try {
     const response = await fetch(`${YANDEX_MARKET_API}/v2/campaigns?limit=50`, {
@@ -69,7 +76,7 @@ async function checkYandex(credentials: MarketplaceCredential | null): Promise<M
       cache: "no-store",
       signal: timeoutSignal(),
     });
-    if (!response.ok) return { platform: "yandex", configured: true, connected: false, accountName: null, details: [], error: safeApiError("Яндекс Маркет", response.status) };
+    if (!response.ok) return { platform: "yandex", configured: true, disabled: false, connected: false, accountName: null, details: [], error: safeApiError("Яндекс Маркет", response.status) };
     const data = await response.json() as { campaigns?: Array<{ id?: number; domain?: string; placementType?: string; business?: { name?: string } }> };
     const campaigns = data.campaigns ?? [];
     const details = campaigns.slice(0, 3).map((campaign) => {
@@ -80,13 +87,14 @@ async function checkYandex(credentials: MarketplaceCredential | null): Promise<M
     return {
       platform: "yandex",
       configured: true,
+      disabled: false,
       connected: true,
       accountName: campaigns.length === 1 ? details[0]?.split(" · ")[0] ?? "Яндекс Маркет" : "Яндекс Маркет",
       details,
       error: null,
     };
   } catch {
-    return { platform: "yandex", configured: true, connected: false, accountName: null, details: [], error: "Яндекс Маркет: сервис не ответил за 12 секунд" };
+    return { platform: "yandex", configured: true, disabled: false, connected: false, accountName: null, details: [], error: "Яндекс Маркет: сервис не ответил за 12 секунд" };
   }
 }
 
@@ -95,28 +103,24 @@ export async function GET(request: Request) {
   if (!session) {
     return NextResponse.json({ error: "Требуется вход администратора" }, { status: 401, headers: { "Cache-Control": "no-store" } });
   }
-  const [yandexCredentials, ozonCredentials] = await Promise.all([
-    marketplaceCredential(session.cabinetId, "yandex").catch(() => null),
-    marketplaceCredential(session.cabinetId, "ozon").catch(() => null),
+  const [yandexDisabled, ozonDisabled] = await Promise.all([
+    isMarketplaceDisabled(session.cabinetId, "yandex"),
+    isMarketplaceDisabled(session.cabinetId, "ozon"),
   ]);
-  const [yandex, ozon] = await Promise.all([checkYandex(yandexCredentials), checkOzon(ozonCredentials)]);
+  const [yandex, ozon] = await Promise.all([checkYandex(yandexDisabled), checkOzon(ozonDisabled)]);
   return NextResponse.json({ connections: [yandex, ozon] }, { headers: { "Cache-Control": "no-store" } });
 }
 
-export async function POST(request: Request) {
+export async function DELETE(request: Request) {
   const session = await getOwnerSession(request);
-  if (!session) return NextResponse.json({ error: "Управлять API-ключами может только владелец кабинета" }, { status: 403, headers: { "Cache-Control": "no-store" } });
+  if (!session) return NextResponse.json({ error: "Отключать маркетплейсы может только владелец кабинета" }, { status: 403, headers: { "Cache-Control": "no-store" } });
   try {
-    const payload = await request.json() as { platform?: unknown; clientId?: unknown; apiKey?: unknown };
+    const payload = await request.json() as { platform?: unknown };
     const marketplace = payload.platform === "ozon" || payload.platform === "yandex" ? payload.platform as Marketplace : null;
-    const apiKey = typeof payload.apiKey === "string" ? payload.apiKey.trim() : "";
-    const clientId = typeof payload.clientId === "string" ? payload.clientId.trim() : "";
-    if (!marketplace || !apiKey || apiKey.length > 1000 || (marketplace === "ozon" && (!clientId || clientId.length > 200))) {
-      return NextResponse.json({ error: marketplace === "ozon" ? "Укажите Client ID и API-ключ Ozon" : "Укажите API-ключ Яндекс Маркета" }, { status: 400, headers: { "Cache-Control": "no-store" } });
-    }
-    await saveMarketplaceCredential({ cabinetId: session.cabinetId, marketplace, clientId: clientId || null, apiKey });
-    return NextResponse.json({ saved: true }, { headers: { "Cache-Control": "no-store" } });
+    if (!marketplace) return NextResponse.json({ error: "Неизвестный маркетплейс" }, { status: 400, headers: { "Cache-Control": "no-store" } });
+    await disableMarketplace(session.cabinetId, marketplace);
+    return NextResponse.json({ disabled: true }, { headers: { "Cache-Control": "no-store" } });
   } catch {
-    return NextResponse.json({ error: "Не удалось безопасно сохранить API-ключ" }, { status: 500, headers: { "Cache-Control": "no-store" } });
+    return NextResponse.json({ error: "Не удалось отключить маркетплейс" }, { status: 500, headers: { "Cache-Control": "no-store" } });
   }
 }
