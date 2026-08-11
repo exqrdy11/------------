@@ -1,5 +1,5 @@
 import { sql } from "drizzle-orm";
-import { integer, primaryKey, sqliteTable, text } from "drizzle-orm/sqlite-core";
+import { index, integer, primaryKey, sqliteTable, text } from "drizzle-orm/sqlite-core";
 
 export const ffWarehouses = sqliteTable("ff_warehouses", {
   cabinetId: text("cabinet_id").notNull().default("metanutrix"),
@@ -43,3 +43,17 @@ export const marketplaceCredentials = sqliteTable("marketplace_credentials", {
   apiKeyCiphertext: text("api_key_ciphertext").notNull(),
   updatedAt: text("updated_at").notNull().default(sql`CURRENT_TIMESTAMP`),
 }, (table) => [primaryKey({ columns: [table.cabinetId, table.marketplace] })]);
+
+export const fbsOrderHandoverMetrics = sqliteTable("fbs_order_handover_metrics", {
+  cabinetId: text("cabinet_id").notNull(),
+  orderId: integer("order_id").notNull(),
+  warehouseId: text("warehouse_id").notNull().default("unknown"),
+  createdAt: text("created_at").notNull(),
+  firstState: text("first_state").notNull(),
+  firstSeenAt: text("first_seen_at").notNull(),
+  handedOverAt: text("handed_over_at"),
+  updatedAt: text("updated_at").notNull(),
+}, (table) => [
+  primaryKey({ columns: [table.cabinetId, table.orderId] }),
+  index("idx_fbs_handover_cabinet_warehouse_completed").on(table.cabinetId, table.warehouseId, table.handedOverAt),
+]);

@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { batchesForProduct, emptyFfBatches, emptyFfExpiry, emptyFfStock, expiryForProduct, listFfStocks, listFfWarehouses, stockForProduct, syncWbFbsWarehouses, type FfBatches, type FfExpiry, type FfStock, type ManualWarehouse } from "@/db/ff-stocks";
+import { fbsHandoverMetrics, recordFbsHandoverObservations, type HandoverMetrics } from "@/db/fbs-handover-metrics";
 import { cabinetSummary, cabinetToken, getAdminCabinet, type CabinetId, type CabinetSummary } from "@/lib/admin-auth";
 
 export const dynamic = "force-dynamic";
@@ -28,6 +29,7 @@ type WbFbsStock = { chrtId?: number; chrtID?: number; amount?: number };
 
 type OrderStatus = { id: number; supplierStatus?: string; wbStatus?: string };
 type FbsBreakdown = Record<string, number>;
+type HandoverTiming = { sampleSize: number; averageHours: number | null };
 
 type DashboardRow = {
   key: string;
@@ -62,6 +64,7 @@ const WB_CONTENT = "https://content-api.wildberries.ru";
 const WB_ANALYTICS = "https://seller-analytics-api.wildberries.ru";
 const palette = ["#ffb45c", "#8ea6ff", "#d7a6cc", "#94c5a6", "#eaa070", "#79b9bd", "#adb1b8", "#d0ad82"];
 const emptyFbsBreakdown = (): FbsBreakdown => ({});
+const emptyHandoverTiming = (): HandoverMetrics => ({ overall: { sampleSize: 0, averageHours: null }, byWbWarehouse: {}, trackingStartedAt: null });
 
 type DashboardPayload = {
   configured: true;
@@ -85,6 +88,7 @@ type DashboardPayload = {
   warnings: string[];
   retryAt: string | null;
   updatedAt: string;
+  handoverTiming: HandoverMetrics & { byLocation?: Record<string, HandoverTiming> };
 };
 
 const CACHE_LIFETIME_MS = 2 * 60 * 1000;
@@ -281,6 +285,22 @@ function mapWbWarehouseBreakdown(input: FbsBreakdown, warehouseMap: Map<string, 
   }, {});
 }
 
+function mapHandoverTimingByLocation(input: HandoverMetrics, warehouseMap: Map<string, string>) {
+  const totals = new Map<string, { sampleSize: number; totalHours: number }>();
+  for (const [wbWarehouseId, timing] of Object.entries(input.byWbWarehouse)) {
+    if (timing.averageHours === null || !timing.sampleSize) continue;
+    const warehouseId = warehouseMap.get(wbWarehouseId) ?? "unassigned";
+    const total = totals.get(warehouseId) ?? { sampleSize: 0, totalHours: 0 };
+    total.sampleSize += timing.sampleSize;
+    total.totalHours += timing.averageHours * timing.sampleSize;
+    totals.set(warehouseId, total);
+  }
+  return Object.fromEntries([...totals].map(([warehouseId, total]) => [warehouseId, {
+    sampleSize: total.sampleSize,
+    averageHours: total.sampleSize ? total.totalHours / total.sampleSize : null,
+  }]));
+}
+
 async function attachFfStocks(payload: DashboardPayload, cabinetId: CabinetId): Promise<DashboardPayload> {
   try {
     const [manualWarehouses, lookup] = await Promise.all([listFfWarehouses(cabinetId), listFfStocks(cabinetId)]);
@@ -312,6 +332,10 @@ async function attachFfStocks(payload: DashboardPayload, cabinetId: CabinetId): 
       for (const warehouse of visibleWarehouses) total[warehouse.id] = (total[warehouse.id] ?? 0) + (row.ffStock[warehouse.id] ?? 0);
       return total;
     }, emptyFfStock(visibleWarehouses));
+    const handoverTiming = {
+      ...payload.handoverTiming,
+      byLocation: mapHandoverTimingByLocation(payload.handoverTiming, wbWarehouseToFfWarehouse),
+    };
     return {
       ...payload,
       rows,
@@ -326,12 +350,14 @@ async function attachFfStocks(payload: DashboardPayload, cabinetId: CabinetId): 
         }, {}),
         sales7d: rows.reduce((sum, row) => sum + row.sales7d, 0),
       },
+      handoverTiming,
     };
   } catch (error) {
     return {
       ...payload,
       rows: payload.rows.map((row) => ({ ...row, ffStock: emptyFfStock(), ffExpiry: emptyFfExpiry(), ffBatches: emptyFfBatches() })),
       manualWarehouses: [],
+      handoverTiming: { ...payload.handoverTiming, byLocation: {} },
       warnings: [...payload.warnings, warningFor("Ручные остатки ФФ", error)],
     };
   }
@@ -449,11 +475,30 @@ export async function GET(request: Request) {
   }
 
   let activeSupplies = 0;
+  let handoverTiming = emptyHandoverTiming();
   if (ordersResult.status === "fulfilled") {
     const supplies = new Set<string>();
     const weekStart = Date.now() - 7 * 24 * 60 * 60 * 1000;
     const terminal = new Set(["sold", "canceled", "canceled_by_client", "declined_by_client", "defect"]);
     const canceled = new Set(["canceled", "canceled_by_client", "declined_by_client", "defect"]);
+    try {
+      const observedOrders = ordersResult.value.orders.flatMap((order) => {
+        const status = ordersResult.value.statuses.get(order.id);
+        const isBeforeHandover = status?.supplierStatus === "new" || status?.supplierStatus === "confirm";
+        const isHandedOver = status?.supplierStatus === "complete" && ["waiting", "sorted", "ready_for_pickup"].includes(status.wbStatus ?? "");
+        if (!isBeforeHandover && !isHandedOver) return [];
+        return [{
+          id: order.id,
+          warehouseId: order.warehouseId ?? null,
+          createdAt: order.createdAt ?? null,
+          state: isBeforeHandover ? "before" as const : "handover" as const,
+        }];
+      });
+      await recordFbsHandoverObservations({ cabinetId, orders: observedOrders });
+      handoverTiming = await fbsHandoverMetrics(cabinetId);
+    } catch (error) {
+      warnings.push(warningFor("Скорость передачи FBS", error));
+    }
     for (const order of ordersResult.value.orders) {
       const status = ordersResult.value.statuses.get(order.id);
       if (!status) continue;
@@ -528,7 +573,7 @@ export async function GET(request: Request) {
     activeSupplies,
   };
   const updatedAt = new Date().toISOString();
-  const payload: DashboardPayload = { configured: true, cabinet, rows, warehouseNames, manualWarehouses: [], fbsStockSyncedWarehouseIds: fbsStockResult.syncedWarehouseIds, totals, warnings, retryAt, updatedAt };
+  const payload: DashboardPayload = { configured: true, cabinet, rows, warehouseNames, manualWarehouses: [], fbsStockSyncedWarehouseIds: fbsStockResult.syncedWarehouseIds, totals, warnings, retryAt, updatedAt, handoverTiming };
   memoryCache.set(cabinetId, { createdAt: now, expiresAt: now + CACHE_LIFETIME_MS, payload });
 
   return NextResponse.json(await attachFfStocks(payload, cabinetId), { headers: { "Cache-Control": "private, max-age=0" } });

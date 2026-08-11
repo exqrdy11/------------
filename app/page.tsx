@@ -3,11 +3,14 @@
 import { type ChangeEvent, type FormEvent, useCallback, useEffect, useMemo, useState } from "react";
 import * as CFB from "cfb";
 import * as XLSX from "xlsx";
+import { targetPriceSheetUrl, targetPriceSnapshot, targetPriceSnapshotUpdatedAt, type TargetPriceSnapshotRow } from "@/lib/target-price-snapshot";
 
 type StockStatus = "В норме" | "Мало" | "Заканчивается";
-type View = "overview" | "stock" | "fbs" | "sales" | "analytics" | "reports" | "fulfillment" | "manual" | "cabinets";
+type View = "overview" | "stock" | "fbs" | "sales" | "analytics" | "pricing" | "reports" | "fulfillment" | "manual" | "cabinets";
 type FulfillmentList = "available" | "reserved" | "receiving" | "toSale";
 type AnalyticsChannel = "all" | "fbs" | "fbo";
+type PricingFilter = "all" | "lower" | "raise" | "review" | "hold";
+type PricingSort = "priority" | "orders" | "delta";
 type FbsBreakdown = Record<string, number>;
 type FfStock = Record<string, number>;
 type FfExpiry = Record<string, string | null>;
@@ -69,6 +72,12 @@ type DashboardTotals = {
   risk: number;
   activeSupplies: number;
 };
+type HandoverTiming = { sampleSize: number; averageHours: number | null };
+type HandoverMetrics = {
+  overall: HandoverTiming;
+  byLocation: Record<string, HandoverTiming>;
+  trackingStartedAt: string | null;
+};
 
 type InventoryResponse = {
   configured: boolean;
@@ -79,6 +88,7 @@ type InventoryResponse = {
   totals?: DashboardTotals;
   warnings?: string[];
   retryAt?: string | null;
+  handoverTiming?: HandoverMetrics;
   updatedAt?: string;
   error?: string;
 };
@@ -113,13 +123,24 @@ const defaultManualWarehouses: ManualWarehouse[] = [
 ];
 const emptyFbsBreakdown: FbsBreakdown = {};
 const emptyTotals: DashboardTotals = { available: 0, ffTotal: 0, ffStock: {}, fbs: 0, fbsByLocation: emptyFbsBreakdown, sales7d: 0, receiving: 0, toSale: 0, risk: 0, activeSupplies: 0 };
+const emptyHandoverMetrics: HandoverMetrics = { overall: { sampleSize: 0, averageHours: null }, byLocation: {}, trackingStartedAt: null };
 const formatNumber = new Intl.NumberFormat("ru-RU");
+const formatMoney = new Intl.NumberFormat("ru-RU", { style: "currency", currency: "RUB", maximumFractionDigits: 0 });
+
+function formatHandoverTime(hours: number | null) {
+  if (hours === null || !Number.isFinite(hours)) return "—";
+  if (hours < 1) return `${Math.max(1, Math.round(hours * 60))} мин`;
+  const wholeHours = Math.floor(hours);
+  const minutes = Math.round((hours - wholeHours) * 60);
+  return minutes >= 30 ? `${wholeHours},5 ч` : `${wholeHours} ч`;
+}
 const viewTitles: Record<View, { eyebrow: string; title: string }> = {
   overview: { eyebrow: "WILDBERRIES · ОПЕРАЦИИ", title: "Остатки и движение товаров" },
   stock: { eyebrow: "СКЛАДЫ · АРТИКУЛЫ", title: "Остатки по всем складам" },
   fbs: { eyebrow: "FBS · ПОСЛЕДНИЕ 30 ДНЕЙ", title: "Отгрузки и приёмка" },
   sales: { eyebrow: "ПРОДАЖИ · ПОТРЕБНОСТЬ", title: "Продажи и потребность ФФ" },
   analytics: { eyebrow: "АНАЛИТИКА · РУКОВОДИТЕЛЮ", title: "Продажи FBS и FBO" },
+  pricing: { eyebrow: "ЦЕНЫ · РЫНОК WB", title: "Таргет цен" },
   reports: { eyebrow: "ВЫГРУЗКИ · CSV", title: "Отчёты по кабинету" },
   fulfillment: { eyebrow: "ФУЛФИЛМЕНТ · СКЛАДЫ", title: "ФФ — остатки и движение" },
   manual: { eyebrow: "ФУЛФИЛМЕНТ · РУЧНЫЕ ОСТАТКИ", title: "Склады ФФ и импорт Excel" },
@@ -169,6 +190,67 @@ function formatManualWarehouse(warehouse: ManualWarehouse) {
 
 function normalizedSku(value: string) {
   return value.trim().toLocaleUpperCase("ru-RU");
+}
+
+type PriceRecommendation = {
+  row: TargetPriceSnapshotRow;
+  low: number | null;
+  median: number | null;
+  high: number | null;
+  target: number | null;
+  delta: number | null;
+  action: PricingFilter;
+  label: string;
+  detail: string;
+  priority: number;
+};
+
+function roundPrice(value: number) {
+  return Math.round(value / 5) * 5;
+}
+
+function median(values: number[]) {
+  const sorted = [...values].sort((left, right) => left - right);
+  const middle = Math.floor(sorted.length / 2);
+  return sorted.length % 2 ? sorted[middle] : (sorted[middle - 1] + sorted[middle]) / 2;
+}
+
+function buildPriceRecommendation(row: TargetPriceSnapshotRow): PriceRecommendation {
+  const market = row.competitors.map((item) => item.price).filter((price) => price > 0);
+  const needsReview = row.sourceStatus === "нужен подбор" || row.sourceStatus?.includes("ошибка");
+  if (!row.currentPrice || !market.length) {
+    return {
+      row, low: null, median: null, high: null, target: null, delta: null,
+      action: "review", label: "Нужна проверка", detail: needsReview ? "Сначала подберите или подтвердите конкурента." : "Нет актуальной цены конкурента для расчёта.",
+      priority: row.orders + 10_000_000,
+    };
+  }
+  const low = Math.min(...market);
+  const high = Math.max(...market);
+  const middle = median(market);
+  const target = roundPrice(Math.max(low * 1.02, middle * 0.985));
+  const delta = target - row.currentPrice;
+  const threshold = Math.max(10, row.currentPrice * 0.015);
+  if (needsReview) {
+    return {
+      row, low, median: middle, high, target, delta,
+      action: "review", label: "Проверить рынок", detail: row.candidateNmId ? `Есть автокандидат WB ${row.candidateNmId}${row.score ? ` · score ${Math.round(row.score * 100)}%` : ""}.` : "Источник или карточку конкурента нужно подтвердить.",
+      priority: row.orders + Math.abs(delta) * 1_000,
+    };
+  }
+  if (Math.abs(delta) < threshold) {
+    return {
+      row, low, median: middle, high, target: row.currentPrice, delta: 0,
+      action: "hold", label: "Оставить", detail: "Текущая цена в коридоре рынка; менять не нужно.",
+      priority: row.orders,
+    };
+  }
+  const action: PricingFilter = delta < 0 ? "lower" : "raise";
+  return {
+    row, low, median: middle, high, target, delta, action,
+    label: delta < 0 ? "Снизить цену" : "Можно поднять", detail: delta < 0 ? "Таргет ниже текущей цены, но остаётся выше самого дешёвого конкурента." : "Цена ниже рыночного коридора — можно проверить повышение без потери позиции.",
+    priority: row.orders * Math.max(1, Math.abs(delta)),
+  };
 }
 
 function normalizedHeader(value: unknown) {
@@ -373,7 +455,7 @@ function MarketplaceConnectionCard({
     <div className="cabinet-platform-head"><span className={`platform-mark ${platform === "yandex" ? "ym-mark" : "oz-mark"}`}>{mark}</span><div><strong>{title}</strong><small>{connected ? "Подключено по API" : configured ? "Нужна проверка подключения" : "Кабинет не подключён"}</small></div></div>
     {connected ? <div className="platform-connect connected"><strong>{connection?.accountName || title}</strong><span>{connection?.details.length ? connection.details.join(" · ") : "Доступ к кабинету подтверждён"}</span></div> : <div className="platform-connect"><strong>{configured ? "Ключ добавлен" : "Подключим отдельный кабинет"}</strong><span>{configured ? connection?.error || "Проверьте подключение." : requirements}</span></div>}
     {canManage && <><button className="marketplace-check-btn" type="button" onClick={configured ? onCheck : () => setSetupOpen(true)} disabled={checking || saving}>{checking ? "Проверяем…" : connected ? "Проверить снова" : configured ? "Проверить ключ" : "Добавить ключ"}</button>{configured && <button className="marketplace-link-btn" type="button" onClick={() => setSetupOpen((current) => !current)}>{setupOpen ? "Скрыть форму" : "Заменить ключ"}</button>}</>}
-    {setupOpen && canManage && <form className="marketplace-key-form" onSubmit={(event) => void save(event)}>{platform === "ozon" && <label><span>Client ID</span><input value={clientId} onChange={(event) => setClientId(event.target.value)} autoComplete="off" required /></label>}<label><span>API-ключ</span><input type="password" value={apiKey} onChange={(event) => setApiKey(event.target.value)} autoComplete="new-password" required /></label><button type="submit" disabled={saving}>{saving ? "Сохраняем…" : "Сохранить и проверить"}</button>{setupError && <small className="marketplace-key-error">{setupError}</small>}</form>}
+    {setupOpen && canManage && <form className="marketplace-key-form" onSubmit={(event) => void save(event)}>{platform === "ozon" && <label><span>Client ID</span><input value={clientId} onChange={(event) => setClientId(event.target.value)} autoComplete="off" required /></label>}{platform === "yandex" && <label><span>Business ID <em>необязательно</em></span><input value={clientId} onChange={(event) => setClientId(event.target.value)} inputMode="numeric" autoComplete="off" placeholder="Например, 12345678" /></label>}<label><span>API-ключ</span><input type="password" value={apiKey} onChange={(event) => setApiKey(event.target.value)} autoComplete="new-password" required /></label><button type="submit" disabled={saving}>{saving ? "Сохраняем…" : "Сохранить и проверить"}</button>{setupError && <small className="marketplace-key-error">{setupError}</small>}</form>}
     {!canManage && <p>Гостевой доступ: можно смотреть статусы, но API-ключи и настройки скрыты.</p>}
     {canManage && configured && !connected && <p>После успешной проверки сюда попадут доступные кампании или склады.</p>}
     {canManage && connected && <p>Следующий этап: подтянем товары, остатки и заказы в отдельный контур этого маркетплейса.</p>}
@@ -399,8 +481,12 @@ export default function Home() {
   const [warehouseNames, setWarehouseNames] = useState<string[]>([]);
   const [manualWarehouses, setManualWarehouses] = useState<ManualWarehouse[]>(defaultManualWarehouses);
   const [totals, setTotals] = useState<DashboardTotals>(emptyTotals);
+  const [handoverTiming, setHandoverTiming] = useState<HandoverMetrics>(emptyHandoverMetrics);
   const [query, setQuery] = useState("");
   const [warehouse, setWarehouse] = useState("Все склады");
+  const [pricingQuery, setPricingQuery] = useState("");
+  const [pricingFilter, setPricingFilter] = useState<PricingFilter>("all");
+  const [pricingSort, setPricingSort] = useState<PricingSort>("priority");
   const [salesWarehouseId, setSalesWarehouseId] = useState("all");
   const [salesProductScope, setSalesProductScope] = useState<"ff" | "all">("ff");
   const [salesTargetDays, setSalesTargetDays] = useState(14);
@@ -508,6 +594,7 @@ export default function Home() {
       setRows(data.rows ?? []);
       setWarehouseNames(data.warehouseNames ?? []);
       setTotals(data.totals ? { ...emptyTotals, ...data.totals, ffStock: data.totals.ffStock ?? {}, fbsByLocation: { ...emptyFbsBreakdown, ...data.totals.fbsByLocation } } : emptyTotals);
+      setHandoverTiming(data.handoverTiming ? { ...emptyHandoverMetrics, ...data.handoverTiming, overall: { ...emptyHandoverMetrics.overall, ...data.handoverTiming.overall }, byLocation: data.handoverTiming.byLocation ?? {} } : emptyHandoverMetrics);
       setUpdatedAt(data.updatedAt ?? new Date().toISOString());
     } catch (loadError) {
       setError(loadError instanceof Error ? loadError.message : "Не удалось получить данные Wildberries");
@@ -666,6 +753,9 @@ export default function Home() {
   }), [visibleManualWarehouses, rows, totals.ffStock, totals.fbsByLocation]);
 
   const selectedFulfillmentWarehouse = fulfillmentWarehouses.find((item) => item.warehouse.id === selectedFulfillmentWarehouseId) ?? null;
+  const selectedHandoverTiming = selectedFulfillmentWarehouse
+    ? handoverTiming.byLocation[selectedFulfillmentWarehouse.warehouse.id] ?? { sampleSize: 0, averageHours: null }
+    : null;
 
   const fulfillmentRows = useMemo(() => {
     if (!selectedFulfillmentWarehouse) return [];
@@ -716,6 +806,26 @@ export default function Home() {
   }, [rows, query, selectedSalesWarehouse, salesProductScope, salesTargetDays, visibleManualWarehouses]);
 
   const salesTotals = useMemo(() => salesRows.reduce((total, item) => ({ sales: total.sales + item.sales, stock: total.stock + item.stock, need: total.need + item.need }), { sales: 0, stock: 0, need: 0 }), [salesRows]);
+
+  const pricingRecommendations = useMemo(() => targetPriceSnapshot.map(buildPriceRecommendation), []);
+  const pricingCounts = useMemo(() => pricingRecommendations.reduce<Record<PricingFilter, number>>((counts, item) => {
+    counts.all += 1;
+    counts[item.action] += 1;
+    return counts;
+  }, { all: 0, lower: 0, raise: 0, review: 0, hold: 0 }), [pricingRecommendations]);
+  const pricingRows = useMemo(() => {
+    const term = pricingQuery.trim().toLocaleLowerCase("ru-RU");
+    const rowsForView = pricingRecommendations.filter((item) => {
+      const matchesFilter = pricingFilter === "all" || item.action === pricingFilter;
+      const haystack = `${item.row.sku} ${item.row.searchQuery ?? ""} ${item.row.nmId ?? ""}`.toLocaleLowerCase("ru-RU");
+      return matchesFilter && (!term || haystack.includes(term));
+    });
+    return rowsForView.sort((left, right) => {
+      if (pricingSort === "orders") return right.row.orders - left.row.orders || right.priority - left.priority;
+      if (pricingSort === "delta") return Math.abs(right.delta ?? 0) - Math.abs(left.delta ?? 0) || right.priority - left.priority;
+      return right.priority - left.priority || right.row.orders - left.row.orders;
+    });
+  }, [pricingFilter, pricingQuery, pricingRecommendations, pricingSort]);
 
   const filteredRows = useMemo(() => {
     const term = query.trim().toLowerCase();
@@ -1077,6 +1187,7 @@ export default function Home() {
           <button type="button" className={`nav-item ${activeView === "fbs" ? "active" : ""}`} onClick={() => navigateTo("fbs")}><span className="nav-symbol">→</span>FBS-отгрузки<span className="nav-badge">{activeFbsTotal}</span></button>
           <button type="button" className={`nav-item ${activeView === "sales" ? "active" : ""}`} onClick={() => navigateTo("sales")}><span className="nav-symbol">↗</span>Продажи</button>
           <button type="button" className={`nav-item ${activeView === "analytics" ? "active" : ""}`} onClick={() => navigateTo("analytics")}><span className="nav-symbol">⌁</span>Анализ</button>
+          <button type="button" className={`nav-item ${activeView === "pricing" ? "active" : ""}`} onClick={() => navigateTo("pricing")}><span className="nav-symbol">₽</span>Таргет цен</button>
           <button type="button" className={`nav-item ${activeView === "fulfillment" || activeView === "manual" ? "active" : ""}`} onClick={() => navigateTo("fulfillment")}><span className="nav-symbol">▤</span>ФФ</button>
           <button type="button" className={`nav-item ${activeView === "reports" ? "active" : ""}`} onClick={() => navigateTo("reports")}><span className="nav-symbol">≡</span>Отчёты</button>
         </nav>
@@ -1114,10 +1225,59 @@ export default function Home() {
                   {cabinetSwitchError && <p className="cabinet-switch-error">{cabinetSwitchError}</p>}
                   {!cabinetSwitchError && <p>Выберите кампанию — повторный логин не нужен.</p>}
                 </article>
-                <MarketplaceConnectionCard platform="yandex" mark="ЯМ" title="Яндекс Маркет" requirements="Нужен API-ключ. Кампании определим автоматически — ID вручную указывать не нужно." connection={marketplaceConnections.find((item) => item.platform === "yandex")} onCheck={() => void loadMarketplaceConnections()} onSave={saveMarketplaceConnection} canManage={canManage} checking={marketplaceConnectionsLoading} />
+                <MarketplaceConnectionCard platform="yandex" mark="ЯМ" title="Яндекс Маркет" requirements="Нужен API-ключ. Business ID можно добавить сразу — кампании определим автоматически." connection={marketplaceConnections.find((item) => item.platform === "yandex")} onCheck={() => void loadMarketplaceConnections()} onSave={saveMarketplaceConnection} canManage={canManage} checking={marketplaceConnectionsLoading} />
                 <MarketplaceConnectionCard platform="ozon" mark="OZ" title="Ozon Seller" requirements="Понадобятся Client ID и API-ключ Ozon." connection={marketplaceConnections.find((item) => item.platform === "ozon")} onCheck={() => void loadMarketplaceConnections()} onSave={saveMarketplaceConnection} canManage={canManage} checking={marketplaceConnectionsLoading} />
               </div>
               <p className="cabinet-manager-note">Каждый маркетплейс получит отдельный контур: свои товары, склады, остатки, заказы и будущие таргет-цены. Данные между площадками не смешиваются.</p>
+            </section>
+          ) : activeView === "pricing" ? (
+            <section className="pricing-panel">
+              <div className="section-heading pricing-heading">
+                <div>
+                  <span className="section-kicker">МОНИТОРИНГ ЦЕН · WILDBERRIES</span>
+                  <h2>Рынок, таргет и решение по цене</h2>
+                  <p className="section-note">Сначала смотрим цены конкурентов, затем даём рекомендацию. Эта витрина пока ничего не меняет на WB — каждое решение остаётся под твоим контролем.</p>
+                </div>
+                <a className="secondary-btn pricing-source-link" href={targetPriceSheetUrl} target="_blank" rel="noreferrer">Открыть таблицу ↗</a>
+              </div>
+
+              <div className="pricing-source-strip"><span>✓</span><div><strong>Снимок цен из твоей таблицы</strong><p>Последнее обновление источника: {targetPriceSnapshotUpdatedAt}. Перед автоматизацией добавим безопасную синхронизацию и лимиты.</p></div></div>
+
+              <div className="pricing-kpi-grid">
+                <article className="pricing-kpi tracked"><span>Под контролем</span><strong>{pricingCounts.all}</strong><p>карточек WB из таблицы</p></article>
+                <article className="pricing-kpi lower"><span>Снизить цену</span><strong>{pricingCounts.lower}</strong><p>выше целевого коридора</p></article>
+                <article className="pricing-kpi raise"><span>Можно поднять</span><strong>{pricingCounts.raise}</strong><p>ниже рынка без причины</p></article>
+                <article className="pricing-kpi review"><span>Проверить рынок</span><strong>{pricingCounts.review}</strong><p>нужен конкурент или валидация</p></article>
+              </div>
+
+              <div className="pricing-toolbar">
+                <label className="search-field"><span>⌕</span><input value={pricingQuery} onChange={(event) => setPricingQuery(event.target.value)} placeholder="Артикул, запрос или WB ID" aria-label="Поиск по таргету цен" /></label>
+                <label className="pricing-sort"><span>Сортировка</span><select value={pricingSort} onChange={(event) => setPricingSort(event.target.value as PricingSort)} aria-label="Сортировка рекомендаций"><option value="priority">Сначала важные</option><option value="orders">По заказам</option><option value="delta">По изменению цены</option></select></label>
+              </div>
+              <div className="pricing-filter-row" role="tablist" aria-label="Фильтр рекомендаций">{([
+                ["all", "Все"],
+                ["lower", "Снизить"],
+                ["raise", "Поднять"],
+                ["review", "Проверить"],
+                ["hold", "Оставить"],
+              ] as Array<[PricingFilter, string]>).map(([value, label]) => <button type="button" key={value} className={pricingFilter === value ? "active" : ""} onClick={() => setPricingFilter(value)}>{label}<span>{pricingCounts[value]}</span></button>)}</div>
+
+              <section className="pricing-table-card">
+                <div className="pricing-table-heading"><div><span className="section-kicker">РЕКОМЕНДАЦИИ</span><h3>Что проверить в первую очередь</h3></div><span>{pricingRows.length} из {pricingCounts.all} карточек</span></div>
+                <div className="pricing-table-wrap"><table><thead><tr><th>Товар / артикул</th><th>Наша цена<br/>после СПП</th><th>Рынок</th><th>Таргет</th><th>Изменение</th><th>Решение</th></tr></thead><tbody>{pricingRows.map((item) => <tr key={item.row.sku}>
+                  <td><div className="pricing-product"><strong>{item.row.sku}</strong><small>{item.row.searchQuery || "Запрос не указан"}{item.row.nmId ? ` · WB ${item.row.nmId}` : ""}</small></div></td>
+                  <td><b>{item.row.currentPrice ? formatMoney.format(item.row.currentPrice) : "—"}</b><small>{item.row.sppPercent !== null ? `СПП ${Math.round(item.row.sppPercent * 100)}%` : "СПП не указан"}</small></td>
+                  <td>{item.low !== null && item.high !== null ? <><b>{formatMoney.format(item.low)}–{formatMoney.format(item.high)}</b><small>{item.row.competitors.length} конкурента · середина {item.median ? formatMoney.format(item.median) : "—"}</small></> : <span className="pricing-empty">Нет цен</span>}</td>
+                  <td><b>{item.target ? formatMoney.format(item.target) : "—"}</b><small>{item.target ? "после СПП" : "нужен рынок"}</small></td>
+                  <td><span className={`pricing-delta ${item.delta === null || item.delta === 0 ? "flat" : item.delta < 0 ? "down" : "up"}`}>{item.delta === null ? "—" : item.delta === 0 ? "0 ₽" : `${item.delta > 0 ? "+" : ""}${formatMoney.format(item.delta)}`}</span></td>
+                  <td><span className={`pricing-action ${item.action}`} title={item.detail}>{item.label}</span><small className="pricing-decision-note">{item.detail}</small></td>
+                </tr>)}</tbody></table>{!pricingRows.length && <div className="empty-state"><strong>Ничего не найдено</strong><span>Сбросьте фильтр или измените запрос.</span></div>}</div>
+              </section>
+
+              <section className="pricing-rules">
+                <div><span className="section-kicker">ЛОГИКА ТАРГЕТА · ВЕРСИЯ 1</span><h3>Без ценовой войны</h3></div>
+                <ol><li><b>Рынок:</b> берём цены доступных конкурентов и считаем середину.</li><li><b>Коридор:</b> таргет на 1,5% ниже середины, но не ниже 2% от самого дешёвого конкурента.</li><li><b>Контроль:</b> если источник сомнительный или разница мала — цена не меняется, карточка идёт на проверку.</li></ol>
+              </section>
             </section>
           ) : activeView === "fulfillment" ? (
             <section className="fulfillment-panel">
@@ -1135,6 +1295,7 @@ export default function Home() {
                   <div className="fulfillment-heading-actions"><button className="secondary-btn fulfillment-export-btn" type="button" onClick={() => void downloadFfOrders(selectedFulfillmentWarehouse.warehouse)} disabled={ffOrdersExportLoading || !selectedFulfillmentWarehouse.warehouse.wbWarehouseId}>{ffOrdersExportLoading ? "Собираем стикеры…" : "Excel: заказы + стикеры ↓"}</button>{canManage && <button className="secondary-btn" type="button" onClick={() => navigateTo("manual")}>Настроить склад</button>}</div>
                 </div>
                 <div className="fulfillment-export-note"><span>Только актуальные FBS-заказы этого ФФ. Одна строка — один заказ: артикул, количество и стикер WB; WB выдаёт стикеры только для заказов на сборке и в доставке.</span>{ffOrdersExportMessage && <strong className="success">{ffOrdersExportMessage}</strong>}{ffOrdersExportError && <strong className="error">{ffOrdersExportError}</strong>}</div>
+                <aside className="fulfillment-handover-timing" aria-label="Скорость передачи заказов Wildberries"><div><span>СКОРОСТЬ ЭТОГО ФФ</span><strong>{formatHandoverTime(selectedHandoverTiming?.averageHours ?? null)}</strong><p>Среднее от создания заказа до передачи WB</p></div><small>{selectedHandoverTiming?.sampleSize ? `Выборка: ${selectedHandoverTiming.sampleSize} заказов за 30 дней` : "Собираем историю переходов new → complete"}</small></aside>
                 <div className="fulfillment-metric-grid" role="group" aria-label="Списки по статусу товара">
                   <button type="button" className={`fulfillment-metric ${fulfillmentList === "available" ? "active" : ""}`} aria-pressed={fulfillmentList === "available"} onClick={() => { setFulfillmentList("available"); setQuery(""); }}><span>Доступно на ФФ</span><strong>{formatNumber.format(selectedFulfillmentWarehouse.stock)} <small>шт.</small></strong><p>WB FBS {formatNumber.format(selectedFulfillmentWarehouse.physicalStock)} · новые FBS {selectedFulfillmentWarehouse.fbs}</p></button>
                   <button type="button" className={`fulfillment-metric ${fulfillmentList === "reserved" ? "active" : ""}`} aria-pressed={fulfillmentList === "reserved"} onClick={() => { setFulfillmentList("reserved"); setQuery(""); }}><span>Новые FBS</span><strong>{formatNumber.format(selectedFulfillmentWarehouse.fbs)} <small>шт.</small></strong><p>new / confirm · вычтено из доступного</p></button>
@@ -1265,6 +1426,12 @@ export default function Home() {
               <article className="metric-card"><div className="metric-icon green">□</div><div className="metric-label">Доступно на ФФ</div><strong className="metric-value">{loading ? "—" : formatNumber.format(ffAvailableTotal)} <small>шт.</small></strong><p>В базе {formatNumber.format(totals.ffTotal)} · вычтено FBS {formatNumber.format(ffReservedFromStockTotal)}</p></article>
               <article className="metric-card"><div className="metric-icon blue">→</div><div className="metric-label">Активные FBS</div><strong className="metric-value">{loading ? "—" : formatNumber.format(activeFbsTotal)} <small>шт.</small></strong><p>{fbsLocations.map((location) => <span key={location.id}>{location.city} <b>{activeFbsByLocation[location.id] ?? 0}</b>{" · "}</span>)}</p></article>
               <article className="metric-card"><div className="metric-icon amber">◷</div><div className="metric-label">Продано</div><strong className="metric-value">{loading ? "—" : formatNumber.format(totals.toSale)} <small>шт.</small></strong><p>Факт выкупа · без отмен</p></article>
+            </section>
+
+            <section className={`delivery-overview ${activeView !== "overview" ? "view-hidden" : ""}`} aria-label="Качество доставки FBS">
+              <div className="delivery-overview-heading"><span className="section-kicker">FBS · СКОРОСТЬ ПЕРЕДАЧИ</span><h2>От заказа до WB</h2><p>Считаем по изменениям статусов FBS. Это время передачи WB, а не обещанный срок для покупателя.</p></div>
+              <article className="delivery-kpi"><strong>{formatNumber.format(handoverTiming.overall.sampleSize)}</strong><span>заказов в выборке</span><p>{handoverTiming.trackingStartedAt ? "Наблюдаем переходы new → complete" : "Начнём собирать историю после обновления"}</p></article>
+              <article className="delivery-kpi delivery-time"><strong>{formatHandoverTime(handoverTiming.overall.averageHours)}</strong><div><i /></div><p>Среднее до передачи WB · все ФФ</p></article>
             </section>
 
             <section className={`movement-card ${activeView !== "overview" && activeView !== "fbs" ? "view-hidden" : ""}`} id="movement"><div className="section-heading"><div><span className="section-kicker">ОСТАТКИ WB, ФФ И ДВИЖЕНИЕ FBS</span><h2>Фактические и доступные остатки отдельно</h2></div><span className="period-pill">Актуальные заказы за 30 дней</span></div><div className="movement-grid"><article className="wb-stock-fact"><span className="wb-stock-mark">WB</span><div><small>ФАКТИЧЕСКИЙ ОСТАТОК НА WB</small><strong>{formatNumber.format(totals.available)} <em>шт.</em></strong><p>Уже находится на складах Wildberries и не является доступным запасом для FBS.</p></div></article><div className="fbs-overview"><div className="movement-subhead"><span>ДОСТУПНО НА ФФ · WB API</span>{canManage && <button className="text-action" type="button" onClick={() => navigateTo("manual")}>Настроить склады</button>}</div><div className="fbs-location-grid manual-location-grid dynamic-locations">{visibleManualWarehouses.map((item) => { const physicalStock = totals.ffStock[item.id] ?? 0; const reserved = totals.fbsByLocation[item.id] ?? 0; return <article className="fbs-location-card manual" key={item.id}><span>{item.city}</span><strong>{formatNumber.format(Math.max(0, physicalStock - reserved))}</strong><small>{item.name} · WB FBS {physicalStock} · новые FBS {reserved}</small></article>; })}</div><div className="movement-subhead orders"><span>АКТИВНЫЕ FBS-ЗАКАЗЫ</span><small>По данным WB API</small></div><div className="fbs-location-grid order-location-grid">{fbsLocations.map((location) => <article className="fbs-location-card" key={location.id}><span>{location.city}</span><strong>{formatNumber.format(activeFbsByLocation[location.id] ?? 0)}</strong><small>{location.label}</small></article>)}</div><div className="fbs-stage-strip"><span><b>{totals.fbs}</b> новые FBS</span><i>→</i><span><b>{totals.receiving}</b> переданы WB</span><i>→</i><span className="sale-stage"><b>{totals.toSale}</b> продано</span></div></div></div></section>

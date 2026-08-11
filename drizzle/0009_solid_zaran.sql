@@ -1,0 +1,1 @@
+CREATE INDEX `idx_fbs_handover_cabinet_warehouse_completed` ON `fbs_order_handover_metrics` (`cabinet_id`,`warehouse_id`,`handed_over_at`);

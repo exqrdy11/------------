@@ -33,9 +33,11 @@ async function checkOzon(credentials: MarketplaceCredential | null): Promise<Mar
   if (!clientId || !apiKey) return { platform: "ozon", configured: false, connected: false, accountName: null, details: [], error: null };
 
   try {
-    const response = await fetch(`${OZON_API}/v1/warehouse/list`, {
+    // Ozon discontinued the v1 warehouse endpoint in March 2026. Keeping this
+    // request on v2 makes an otherwise valid Client ID and API key verifiable.
+    const response = await fetch(`${OZON_API}/v2/warehouse/list`, {
       method: "POST",
-      headers: { "Client-Id": clientId, "Api-Key": apiKey, "Content-Type": "application/json" },
+      headers: { "Client-Id": clientId, "Api-Key": apiKey, "Content-Type": "application/json", Accept: "application/json" },
       body: "{}",
       cache: "no-store",
       signal: timeoutSignal(),
@@ -57,11 +59,12 @@ async function checkOzon(credentials: MarketplaceCredential | null): Promise<Mar
 }
 
 async function checkYandex(credentials: MarketplaceCredential | null): Promise<MarketplaceConnection> {
+  const businessId = credentials?.clientId?.trim() || null;
   const apiKey = credentials?.apiKey?.trim() || process.env.YANDEX_MARKET_API_KEY?.trim();
   if (!apiKey) return { platform: "yandex", configured: false, connected: false, accountName: null, details: [], error: null };
 
   try {
-    const response = await fetch(`${YANDEX_MARKET_API}/v2/campaigns`, {
+    const response = await fetch(`${YANDEX_MARKET_API}/v2/campaigns?limit=50`, {
       headers: { Authorization: `Api-Key ${apiKey}`, Accept: "application/json" },
       cache: "no-store",
       signal: timeoutSignal(),
@@ -73,6 +76,7 @@ async function checkYandex(credentials: MarketplaceCredential | null): Promise<M
       const name = campaign.business?.name?.trim() || campaign.domain?.trim() || `Кампания ${campaign.id ?? ""}`.trim();
       return campaign.placementType ? `${name} · ${campaign.placementType}` : name;
     });
+    if (businessId) details.unshift(`Business ID ${businessId}`);
     return {
       platform: "yandex",
       configured: true,
@@ -110,7 +114,7 @@ export async function POST(request: Request) {
     if (!marketplace || !apiKey || apiKey.length > 1000 || (marketplace === "ozon" && (!clientId || clientId.length > 200))) {
       return NextResponse.json({ error: marketplace === "ozon" ? "Укажите Client ID и API-ключ Ozon" : "Укажите API-ключ Яндекс Маркета" }, { status: 400, headers: { "Cache-Control": "no-store" } });
     }
-    await saveMarketplaceCredential({ cabinetId: session.cabinetId, marketplace, clientId: marketplace === "ozon" ? clientId : null, apiKey });
+    await saveMarketplaceCredential({ cabinetId: session.cabinetId, marketplace, clientId: clientId || null, apiKey });
     return NextResponse.json({ saved: true }, { headers: { "Cache-Control": "no-store" } });
   } catch {
     return NextResponse.json({ error: "Не удалось безопасно сохранить API-ключ" }, { status: 500, headers: { "Cache-Control": "no-store" } });
