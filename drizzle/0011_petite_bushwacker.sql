@@ -1,0 +1,1 @@
+ALTER TABLE `ff_warehouses` ADD `service_rate_kopecks` integer DEFAULT 0 NOT NULL;

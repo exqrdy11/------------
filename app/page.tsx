@@ -6,7 +6,7 @@ import * as XLSX from "xlsx";
 import { targetPriceSheetUrl, targetPriceSnapshot, targetPriceSnapshotUpdatedAt, type TargetPriceSnapshotRow } from "@/lib/target-price-snapshot";
 
 type StockStatus = "В норме" | "Мало" | "Заканчивается";
-type View = "overview" | "stock" | "fbs" | "sales" | "analytics" | "pricing" | "reports" | "fulfillment" | "manual" | "cabinets";
+type View = "overview" | "stock" | "fbs" | "sales" | "analytics" | "pricing" | "payments" | "reports" | "fulfillment" | "manual" | "cabinets";
 type FulfillmentList = "available" | "reserved" | "receiving" | "toSale";
 type AnalyticsChannel = "all" | "fbs" | "fbo";
 type PricingFilter = "all" | "lower" | "raise" | "review" | "hold";
@@ -35,6 +35,7 @@ type ManualWarehouse = {
   position: number;
   wbWarehouseId: number | null;
   wbWarehouseName: string | null;
+  serviceRateKopecks: number;
   isHidden: boolean;
 };
 
@@ -116,17 +117,28 @@ type FfOrdersExportResponse = {
   missingStickers?: number;
   error?: string;
 };
+type FfSettlement = {
+  warehouse: ManualWarehouse;
+  from: string;
+  to: string;
+  orders: Array<{ orderId: number; handedOverAt: string }>;
+  quantity: number;
+  rateKopecks: number;
+  totalKopecks: number;
+  trackingStartedAt: string | null;
+};
 
 const defaultManualWarehouses: ManualWarehouse[] = [
-  { id: "kazan", city: "Казань", name: "Наш склад", position: 10, wbWarehouseId: 1692397, wbWarehouseName: null, isHidden: false },
-  { id: "moscow", city: "Москва", name: "БИК ФФ", position: 20, wbWarehouseId: null, wbWarehouseName: null, isHidden: false },
-  { id: "spb", city: "Питер", name: "Rus ФФ", position: 30, wbWarehouseId: null, wbWarehouseName: null, isHidden: false },
+  { id: "kazan", city: "Казань", name: "Наш склад", position: 10, wbWarehouseId: 1692397, wbWarehouseName: null, serviceRateKopecks: 0, isHidden: false },
+  { id: "moscow", city: "Москва", name: "БИК ФФ", position: 20, wbWarehouseId: null, wbWarehouseName: null, serviceRateKopecks: 0, isHidden: false },
+  { id: "spb", city: "Питер", name: "Rus ФФ", position: 30, wbWarehouseId: null, wbWarehouseName: null, serviceRateKopecks: 0, isHidden: false },
 ];
 const emptyFbsBreakdown: FbsBreakdown = {};
 const emptyTotals: DashboardTotals = { available: 0, ffTotal: 0, ffStock: {}, fbs: 0, fbsByLocation: emptyFbsBreakdown, sales7d: 0, receiving: 0, toSale: 0, risk: 0, activeSupplies: 0 };
 const emptyHandoverMetrics: HandoverMetrics = { overall: { sampleSize: 0, averageHours: null }, byLocation: {}, trackingStartedAt: null };
 const formatNumber = new Intl.NumberFormat("ru-RU");
 const formatMoney = new Intl.NumberFormat("ru-RU", { style: "currency", currency: "RUB", maximumFractionDigits: 0 });
+const formatRate = new Intl.NumberFormat("ru-RU", { minimumFractionDigits: 0, maximumFractionDigits: 2 });
 
 function formatHandoverTime(hours: number | null) {
   if (hours === null || !Number.isFinite(hours)) return "—";
@@ -142,6 +154,7 @@ const viewTitles: Record<View, { eyebrow: string; title: string }> = {
   sales: { eyebrow: "ПРОДАЖИ · ПОТРЕБНОСТЬ", title: "Продажи и потребность ФФ" },
   analytics: { eyebrow: "АНАЛИТИКА · РУКОВОДИТЕЛЮ", title: "Продажи FBS и FBO" },
   pricing: { eyebrow: "ЦЕНЫ · РЫНОК WB", title: "Таргет цен" },
+  payments: { eyebrow: "БУХГАЛТЕРИЯ · ФФ", title: "Калькулятор оплат ФФ" },
   reports: { eyebrow: "ВЫГРУЗКИ · CSV", title: "Отчёты по кабинету" },
   fulfillment: { eyebrow: "ФУЛФИЛМЕНТ · СКЛАДЫ", title: "ФФ — остатки и движение" },
   manual: { eyebrow: "ФУЛФИЛМЕНТ · РУЧНЫЕ ОСТАТКИ", title: "Склады ФФ и импорт Excel" },
@@ -266,6 +279,30 @@ function parseQuantity(value: unknown) {
 
 function isoDate(daysAgo = 0) {
   return new Date(Date.now() - daysAgo * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+}
+
+function currentMonthStart() {
+  const date = new Date();
+  return new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), 1)).toISOString().slice(0, 10);
+}
+
+function kopecksToRubles(value: number) {
+  return Math.max(0, Number(value) || 0) / 100;
+}
+
+function rateDraft(value: number) {
+  return kopecksToRubles(value).toLocaleString("ru-RU", { useGrouping: false, maximumFractionDigits: 2 });
+}
+
+function parseRateKopecks(value: string) {
+  const rubles = Number(value.trim().replace(",", "."));
+  if (!Number.isFinite(rubles) || rubles < 0 || rubles > 100_000) return null;
+  return Math.round(rubles * 100);
+}
+
+function formatDateTime(value: string) {
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? "—" : new Intl.DateTimeFormat("ru-RU", { day: "2-digit", month: "short", year: "numeric", hour: "2-digit", minute: "2-digit", timeZone: "Europe/Moscow" }).format(date);
 }
 
 function shortDate(value: string) {
@@ -506,8 +543,13 @@ export default function Home() {
   const [warehouseSaving, setWarehouseSaving] = useState(false);
   const [warehouseMessage, setWarehouseMessage] = useState<string | null>(null);
   const [warehouseError, setWarehouseError] = useState<string | null>(null);
-  const [warehouseLinkDrafts, setWarehouseLinkDrafts] = useState<Record<string, { wbWarehouseId: string; wbWarehouseName: string }>>({});
+  const [warehouseLinkDrafts, setWarehouseLinkDrafts] = useState<Record<string, { wbWarehouseId: string; wbWarehouseName: string; serviceRate: string }>>({});
   const [warehouseLinkSavingId, setWarehouseLinkSavingId] = useState<string | null>(null);
+  const [settlementWarehouseId, setSettlementWarehouseId] = useState("");
+  const [settlementRange, setSettlementRange] = useState({ from: currentMonthStart(), to: isoDate(0) });
+  const [settlement, setSettlement] = useState<FfSettlement | null>(null);
+  const [settlementLoading, setSettlementLoading] = useState(false);
+  const [settlementError, setSettlementError] = useState<string | null>(null);
   const [importWarehouseId, setImportWarehouseId] = useState("kazan");
   const [importMode, setImportMode] = useState<"replace" | "add">("replace");
   const [importPreview, setImportPreview] = useState<ImportPreview | null>(null);
@@ -524,7 +566,10 @@ export default function Home() {
         setAuthState("unauthenticated");
         return;
       }
-      if (response.ok && data.warehouses?.length) setManualWarehouses(data.warehouses);
+      if (response.ok && data.warehouses?.length) {
+        setManualWarehouses(data.warehouses);
+        setSettlementWarehouseId((current) => data.warehouses!.some((warehouse) => warehouse.id === current) ? current : data.warehouses![0].id);
+      }
     } catch {
       // The dashboard remains usable with the built-in warehouses until D1 reconnects.
     }
@@ -611,6 +656,32 @@ export default function Home() {
     }
   }, [analyticsRange]);
 
+  const loadSettlement = useCallback(async () => {
+    if (!settlementWarehouseId || !settlementRange.from || !settlementRange.to || settlementRange.from > settlementRange.to) {
+      setSettlement(null);
+      setSettlementError("Выберите ФФ и корректный период");
+      return;
+    }
+    setSettlementLoading(true);
+    setSettlementError(null);
+    try {
+      const params = new URLSearchParams({ warehouseId: settlementWarehouseId, from: settlementRange.from, to: settlementRange.to });
+      const response = await fetch(`/api/ff-settlements?${params}`, { cache: "no-store" });
+      const data = await response.json() as { settlement?: FfSettlement; error?: string };
+      if (response.status === 401) {
+        setAuthState("unauthenticated");
+        return;
+      }
+      if (!response.ok || !data.settlement) throw new Error(data.error || "Не удалось посчитать оплату ФФ");
+      setSettlement(data.settlement);
+    } catch (settlementLoadError) {
+      setSettlement(null);
+      setSettlementError(settlementLoadError instanceof Error ? settlementLoadError.message : "Не удалось посчитать оплату ФФ");
+    } finally {
+      setSettlementLoading(false);
+    }
+  }, [settlementRange, settlementWarehouseId]);
+
   const analyticsRetryAt = analytics?.source.retryAt ?? null;
   const analyticsRetrySeconds = useMemo(() => {
     if (!analyticsRetryAt) return null;
@@ -657,6 +728,12 @@ export default function Home() {
   useEffect(() => {
     if (authState === "authenticated" && activeView === "cabinets") void loadMarketplaceConnections();
   }, [activeView, authState, loadMarketplaceConnections]);
+
+  useEffect(() => {
+    if (authState !== "authenticated" || activeView !== "payments" || !settlementWarehouseId) return;
+    const timer = window.setTimeout(() => void loadSettlement(), 0);
+    return () => window.clearTimeout(timer);
+  }, [activeView, authState, loadSettlement, settlementWarehouseId]);
 
   useEffect(() => {
     if (authState !== "authenticated" || activeView !== "analytics") return;
@@ -926,11 +1003,17 @@ export default function Home() {
     const draft = warehouseLinkDrafts[warehouseToUpdate.id] ?? {
       wbWarehouseId: warehouseToUpdate.wbWarehouseId ? String(warehouseToUpdate.wbWarehouseId) : "",
       wbWarehouseName: warehouseToUpdate.wbWarehouseName ?? "",
+      serviceRate: rateDraft(warehouseToUpdate.serviceRateKopecks),
     };
     const rawWbWarehouseId = draft.wbWarehouseId.trim();
     const wbWarehouseId = rawWbWarehouseId ? Number(rawWbWarehouseId) : null;
     if (rawWbWarehouseId && (!Number.isInteger(wbWarehouseId) || wbWarehouseId <= 0 || wbWarehouseId > 2_147_483_647)) {
       setWarehouseError("ID склада WB должен быть положительным целым числом");
+      return;
+    }
+    const serviceRateKopecks = parseRateKopecks(draft.serviceRate);
+    if (serviceRateKopecks === null) {
+      setWarehouseError("Ставка должна быть числом от 0 до 100 000 ₽ за единицу");
       return;
     }
     setWarehouseLinkSavingId(warehouseToUpdate.id);
@@ -947,6 +1030,7 @@ export default function Home() {
           position: warehouseToUpdate.position,
           wbWarehouseId,
           wbWarehouseName: draft.wbWarehouseName.trim() || null,
+          serviceRateKopecks,
           isHidden: warehouseToUpdate.isHidden,
         }),
       });
@@ -962,9 +1046,10 @@ export default function Home() {
         [warehouseToUpdate.id]: {
           wbWarehouseId: data.warehouse?.wbWarehouseId ? String(data.warehouse.wbWarehouseId) : "",
           wbWarehouseName: data.warehouse?.wbWarehouseName ?? "",
+          serviceRate: rateDraft(data.warehouse?.serviceRateKopecks ?? 0),
         },
       }));
-      setWarehouseMessage(wbWarehouseId ? `${formatManualWarehouse(warehouseToUpdate)} привязан к WB` : `${formatManualWarehouse(warehouseToUpdate)} отвязан от WB`);
+      setWarehouseMessage(`Настройки ${formatManualWarehouse(warehouseToUpdate)} сохранены`);
       await loadData(true);
     } catch (saveError) {
       setWarehouseError(saveError instanceof Error ? saveError.message : "Не удалось сохранить привязку к WB");
@@ -988,6 +1073,7 @@ export default function Home() {
           position: warehouseToUpdate.position,
           wbWarehouseId: warehouseToUpdate.wbWarehouseId,
           wbWarehouseName: warehouseToUpdate.wbWarehouseName,
+          serviceRateKopecks: warehouseToUpdate.serviceRateKopecks,
           isHidden: !warehouseToUpdate.isHidden,
         }),
       });
@@ -1175,6 +1261,7 @@ export default function Home() {
           <button type="button" className={`nav-item ${activeView === "analytics" ? "active" : ""}`} onClick={() => navigateTo("analytics")}><span className="nav-symbol">⌁</span>Анализ</button>
           <button type="button" className={`nav-item ${activeView === "pricing" ? "active" : ""}`} onClick={() => navigateTo("pricing")}><span className="nav-symbol">₽</span>Таргет цен</button>
           <button type="button" className={`nav-item ${activeView === "fulfillment" || activeView === "manual" ? "active" : ""}`} onClick={() => navigateTo("fulfillment")}><span className="nav-symbol">▤</span>ФФ</button>
+          <button type="button" className={`nav-item ${activeView === "payments" ? "active" : ""}`} onClick={() => navigateTo("payments")}><span className="nav-symbol">₽</span>Оплаты ФФ</button>
           <button type="button" className={`nav-item ${activeView === "reports" ? "active" : ""}`} onClick={() => navigateTo("reports")}><span className="nav-symbol">≡</span>Отчёты</button>
         </nav>
         <div className="sidebar-bottom"><div className="connection"><span className={error ? "live-dot offline" : "live-dot"} />{error ? "Нужна проверка подключения" : "Подключено к WB API"}</div><button type="button" className="profile" onClick={() => navigateTo("cabinets")}><span className="avatar">WB</span><span><strong>{cabinet?.name ?? "Wildberries"}</strong><small>{role === "viewer" ? "Гость · только просмотр" : configured ? "Владелец · кабинеты и ключи" : "Владелец · токен не добавлен"}</small></span><span className="chevron">›</span></button></div>
@@ -1265,6 +1352,33 @@ export default function Home() {
                 <ol><li><b>Рынок:</b> берём цены доступных конкурентов и считаем середину.</li><li><b>Коридор:</b> таргет на 1,5% ниже середины, но не ниже 2% от самого дешёвого конкурента.</li><li><b>Контроль:</b> если источник сомнительный или разница мала — цена не меняется, карточка идёт на проверку.</li></ol>
               </section>
             </section>
+          ) : activeView === "payments" ? (
+            <section className="settlement-panel">
+              <div className="settlement-heading">
+                <div><span className="section-kicker">СВЕРКА С ФУЛФИЛМЕНТОМ</span><h2>Сколько оплатить ФФ</h2><p>Берём только заказы, которые WB принял в доставку: один переданный заказ = одна обработанная единица.</p></div>
+                {canManage && <button type="button" className="secondary-btn" onClick={() => navigateTo("manual")}>Настроить ставки</button>}
+              </div>
+              <form className="settlement-controls" onSubmit={(event) => { event.preventDefault(); void loadSettlement(); }}>
+                <label><span>ФФ</span><select value={settlementWarehouseId} onChange={(event) => setSettlementWarehouseId(event.target.value)}>{manualWarehouses.map((item) => <option value={item.id} key={item.id}>{formatManualWarehouse(item)}{item.isHidden ? " · скрыт" : ""}</option>)}</select></label>
+                <label><span>Период с</span><input type="date" value={settlementRange.from} max={settlementRange.to} onChange={(event) => setSettlementRange((current) => ({ ...current, from: event.target.value }))} required /></label>
+                <label><span>по</span><input type="date" value={settlementRange.to} min={settlementRange.from} max={isoDate(0)} onChange={(event) => setSettlementRange((current) => ({ ...current, to: event.target.value }))} required /></label>
+                <button className="primary-btn" type="submit" disabled={settlementLoading || !settlementWarehouseId}>{settlementLoading ? "Считаем…" : "Рассчитать"}</button>
+              </form>
+              {settlementError && <div className="settlement-error" role="alert">{settlementError}</div>}
+              {settlement && <>
+                <div className="settlement-summary">
+                  <article><span>Передано WB</span><strong>{formatNumber.format(settlement.quantity)} <small>ед.</small></strong><p>За {shortDate(settlement.from)} — {shortDate(settlement.to)}</p></article>
+                  <article><span>Ставка ФФ</span><strong>{settlement.rateKopecks > 0 ? `${formatRate.format(kopecksToRubles(settlement.rateKopecks))} ₽` : "—"}<small>{settlement.rateKopecks > 0 ? " / ед." : ""}</small></strong><p>{settlement.rateKopecks > 0 ? "Настроена владельцем" : "Ставка пока не задана"}</p></article>
+                  <article className="settlement-total"><span>К оплате</span><strong>{settlement.rateKopecks > 0 ? formatMoney.format(kopecksToRubles(settlement.totalKopecks)) : "—"}</strong><p>{settlement.rateKopecks > 0 ? `${formatNumber.format(settlement.quantity)} ед. × ${formatRate.format(kopecksToRubles(settlement.rateKopecks))} ₽` : "Владелец должен задать ставку ФФ"}</p></article>
+                </div>
+                <section className="settlement-orders">
+                  <div className="settlement-orders-heading"><div><span className="section-kicker">ОСНОВАНИЕ ДЛЯ СЧЁТА</span><h3>Переданные WB заказы</h3></div><span>{settlement.orders.length} ед.</span></div>
+                  <div className="settlement-table-wrap"><table><thead><tr><th>Заказ WB</th><th>Передан WB</th><th>Количество</th><th>Сумма</th></tr></thead><tbody>{settlement.orders.map((order) => <tr key={order.orderId}><td><b>№ {order.orderId}</b></td><td>{formatDateTime(order.handedOverAt)}</td><td>1 ед.</td><td>{settlement.rateKopecks > 0 ? formatMoney.format(kopecksToRubles(settlement.rateKopecks)) : "—"}</td></tr>)}</tbody></table>{!settlement.orders.length && <div className="empty-state"><strong>За этот период переданных WB заказов пока нет</strong><span>Сумма к оплате появится после перехода заказа из «Новые» в «Переданы WB».</span></div>}</div>
+                  <footer>Сверка считает только подтверждённый переход new / confirm → complete. Заказ со стикером доставки не считается второй раз.</footer>
+                </section>
+                <p className="settlement-note">{settlement.trackingStartedAt ? `Учёт переходов ведётся с ${formatDateTime(settlement.trackingStartedAt)}. Для прошлых периодов до этой даты WB не передаёт точный момент передачи заказа.` : "После ближайшего обновления начнём фиксировать передачи WB для сверки."}</p>
+              </>}
+            </section>
           ) : activeView === "fulfillment" ? (
             <section className="fulfillment-panel">
               {!selectedFulfillmentWarehouse ? <>
@@ -1307,6 +1421,7 @@ export default function Home() {
                     const linkDraft = warehouseLinkDrafts[item.id] ?? {
                       wbWarehouseId: item.wbWarehouseId ? String(item.wbWarehouseId) : "",
                       wbWarehouseName: item.wbWarehouseName ?? "",
+                      serviceRate: rateDraft(item.serviceRateKopecks),
                     };
                     return <div className="manual-warehouse-item" key={item.id}>
                       <span className="warehouse-pin">□</span>
@@ -1314,7 +1429,8 @@ export default function Home() {
                       <form className="warehouse-link-form" onSubmit={(event) => void saveWarehouseLink(item, event)}>
                         <label><span>ID склада WB</span><input value={linkDraft.wbWarehouseId} onChange={(event) => setWarehouseLinkDrafts((current) => ({ ...current, [item.id]: { ...linkDraft, wbWarehouseId: event.target.value } }))} inputMode="numeric" placeholder="Например, 1987385" /></label>
                         <label><span>Название в WB</span><input value={linkDraft.wbWarehouseName} onChange={(event) => setWarehouseLinkDrafts((current) => ({ ...current, [item.id]: { ...linkDraft, wbWarehouseName: event.target.value } }))} maxLength={120} placeholder="Например, Волгоград Upakovka" /></label>
-                        <button type="submit" disabled={warehouseLinkSavingId === item.id}>{warehouseLinkSavingId === item.id ? "Сохраняем…" : "Связать с WB"}</button>
+                        <label><span>Ставка, ₽ / ед.</span><input value={linkDraft.serviceRate} onChange={(event) => setWarehouseLinkDrafts((current) => ({ ...current, [item.id]: { ...linkDraft, serviceRate: event.target.value } }))} inputMode="decimal" placeholder="Например, 10" /></label>
+                        <button type="submit" disabled={warehouseLinkSavingId === item.id}>{warehouseLinkSavingId === item.id ? "Сохраняем…" : "Сохранить"}</button>
                       </form>
                       <button className="warehouse-visibility-btn" type="button" onClick={() => void toggleWarehouseVisibility(item)} disabled={warehouseLinkSavingId === item.id}>{item.isHidden ? "Показать" : "Скрыть"}</button>
                     </div>;

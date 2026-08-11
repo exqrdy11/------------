@@ -8,6 +8,7 @@ export type ManualWarehouse = {
   position: number;
   wbWarehouseId: number | null;
   wbWarehouseName: string | null;
+  serviceRateKopecks: number;
   isHidden: boolean;
 };
 
@@ -33,9 +34,9 @@ type FfBatchRow = {
 };
 
 const defaultWarehouses: ManualWarehouse[] = [
-  { id: "kazan", city: "Казань", name: "Наш склад", position: 10, wbWarehouseId: 1692397, wbWarehouseName: null, isHidden: false },
-  { id: "moscow", city: "Москва", name: "БИК ФФ", position: 20, wbWarehouseId: null, wbWarehouseName: null, isHidden: false },
-  { id: "spb", city: "Питер", name: "Rus ФФ", position: 30, wbWarehouseId: null, wbWarehouseName: null, isHidden: false },
+  { id: "kazan", city: "Казань", name: "Наш склад", position: 10, wbWarehouseId: 1692397, wbWarehouseName: null, serviceRateKopecks: 0, isHidden: false },
+  { id: "moscow", city: "Москва", name: "БИК ФФ", position: 20, wbWarehouseId: null, wbWarehouseName: null, serviceRateKopecks: 0, isHidden: false },
+  { id: "spb", city: "Питер", name: "Rus ФФ", position: 30, wbWarehouseId: null, wbWarehouseName: null, serviceRateKopecks: 0, isHidden: false },
 ];
 
 const createStocksTableSql = `
@@ -60,6 +61,7 @@ const createWarehousesTableSql = `
     position INTEGER NOT NULL DEFAULT 0,
     wb_warehouse_id INTEGER,
     wb_warehouse_name TEXT,
+    service_rate_kopecks INTEGER NOT NULL DEFAULT 0,
     is_hidden INTEGER NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     PRIMARY KEY (cabinet_id, id)
@@ -159,6 +161,7 @@ async function getFfStockDb() {
       const currentWarehouseColumnNames = new Set((currentWarehouseColumns.results ?? []).map((column) => column.name));
       if (!currentWarehouseColumnNames.has("wb_warehouse_id")) await d1.prepare("ALTER TABLE ff_warehouses ADD COLUMN wb_warehouse_id INTEGER").run();
       if (!currentWarehouseColumnNames.has("wb_warehouse_name")) await d1.prepare("ALTER TABLE ff_warehouses ADD COLUMN wb_warehouse_name TEXT").run();
+      if (!currentWarehouseColumnNames.has("service_rate_kopecks")) await d1.prepare("ALTER TABLE ff_warehouses ADD COLUMN service_rate_kopecks INTEGER NOT NULL DEFAULT 0").run();
       if (!currentWarehouseColumnNames.has("is_hidden")) await d1.prepare("ALTER TABLE ff_warehouses ADD COLUMN is_hidden INTEGER NOT NULL DEFAULT 0").run();
 
       await d1.batch([
@@ -187,8 +190,8 @@ async function getFfStockDb() {
 
 export async function listFfWarehouses(cabinetId: CabinetId) {
   const d1 = await getFfStockDb();
-  const result = await d1.prepare("SELECT id, city, name, position, wb_warehouse_id AS wbWarehouseId, wb_warehouse_name AS wbWarehouseName, is_hidden AS isHidden FROM ff_warehouses WHERE cabinet_id = ? ORDER BY position, city, name").bind(cabinetId).all<ManualWarehouse & { isHidden: boolean | number }>();
-  return (result.results ?? []).map((warehouse) => ({ ...warehouse, isHidden: Boolean(warehouse.isHidden) }));
+  const result = await d1.prepare("SELECT id, city, name, position, wb_warehouse_id AS wbWarehouseId, wb_warehouse_name AS wbWarehouseName, service_rate_kopecks AS serviceRateKopecks, is_hidden AS isHidden FROM ff_warehouses WHERE cabinet_id = ? ORDER BY position, city, name").bind(cabinetId).all<ManualWarehouse & { serviceRateKopecks: number | null; isHidden: boolean | number }>();
+  return (result.results ?? []).map((warehouse) => ({ ...warehouse, serviceRateKopecks: Math.max(0, Number(warehouse.serviceRateKopecks) || 0), isHidden: Boolean(warehouse.isHidden) }));
 }
 
 export async function createFfWarehouse(input: { cabinetId: CabinetId; city: string; name: string }) {
@@ -201,9 +204,10 @@ export async function createFfWarehouse(input: { cabinetId: CabinetId; city: str
     position: (current.at(-1)?.position ?? 0) + 10,
     wbWarehouseId: null,
     wbWarehouseName: null,
+    serviceRateKopecks: 0,
     isHidden: false,
   };
-  await d1.prepare("INSERT INTO ff_warehouses (cabinet_id, id, city, name, position, wb_warehouse_id, wb_warehouse_name, is_hidden) VALUES (?, ?, ?, ?, ?, ?, ?, ?)").bind(
+  await d1.prepare("INSERT INTO ff_warehouses (cabinet_id, id, city, name, position, wb_warehouse_id, wb_warehouse_name, service_rate_kopecks, is_hidden) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)").bind(
     input.cabinetId,
     warehouse.id,
     warehouse.city,
@@ -211,6 +215,7 @@ export async function createFfWarehouse(input: { cabinetId: CabinetId; city: str
     warehouse.position,
     warehouse.wbWarehouseId,
     warehouse.wbWarehouseName,
+    warehouse.serviceRateKopecks,
     warehouse.isHidden,
   ).run();
   return warehouse;
@@ -224,11 +229,12 @@ export async function updateFfWarehouse(input: ManualWarehouse & { cabinetId: Ca
     name: input.name.trim(),
     wbWarehouseName: input.wbWarehouseName?.trim() || null,
   };
-  await d1.prepare("UPDATE ff_warehouses SET city = ?, name = ?, wb_warehouse_id = ?, wb_warehouse_name = ?, is_hidden = ? WHERE cabinet_id = ? AND id = ?").bind(
+  await d1.prepare("UPDATE ff_warehouses SET city = ?, name = ?, wb_warehouse_id = ?, wb_warehouse_name = ?, service_rate_kopecks = ?, is_hidden = ? WHERE cabinet_id = ? AND id = ?").bind(
     warehouse.city,
     warehouse.name,
     warehouse.wbWarehouseId,
     warehouse.wbWarehouseName,
+    Math.max(0, Math.round(Number(warehouse.serviceRateKopecks) || 0)),
     warehouse.isHidden,
     warehouse.cabinetId,
     warehouse.id,

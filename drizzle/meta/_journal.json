@@ -78,6 +78,13 @@
       "when": 1786446087473,
       "tag": "0010_normal_vargas",
       "breakpoints": true
+    },
+    {
+      "idx": 11,
+      "version": "6",
+      "when": 1786447319791,
+      "tag": "0011_petite_bushwacker",
+      "breakpoints": true
     }
   ]
 }

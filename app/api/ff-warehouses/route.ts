@@ -23,6 +23,11 @@ function optionalHidden(value: unknown) {
   return typeof value === "boolean" ? value : undefined;
 }
 
+function optionalServiceRateKopecks(value: unknown) {
+  const rate = Number(value);
+  return Number.isInteger(rate) && rate >= 0 && rate <= 10_000_000 ? rate : undefined;
+}
+
 export async function GET(request: Request) {
   const cabinet = await getAdminCabinet(request);
   if (!cabinet) return NextResponse.json({ error: "Требуется вход" }, { status: 401 });
@@ -51,14 +56,15 @@ export async function PATCH(request: Request) {
   const session = await getOwnerSession(request);
   if (!session) return NextResponse.json({ error: "Изменять данные может только владелец кабинета" }, { status: 403 });
   try {
-    const payload = await request.json() as { id?: unknown; city?: unknown; name?: unknown; position?: unknown; wbWarehouseId?: unknown; wbWarehouseName?: unknown; isHidden?: unknown };
+    const payload = await request.json() as { id?: unknown; city?: unknown; name?: unknown; position?: unknown; wbWarehouseId?: unknown; wbWarehouseName?: unknown; serviceRateKopecks?: unknown; isHidden?: unknown };
     const wbWarehouseId = optionalWarehouseId(payload.wbWarehouseId);
     const wbWarehouseName = optionalWarehouseName(payload.wbWarehouseName);
+    const serviceRateKopecks = optionalServiceRateKopecks(payload.serviceRateKopecks);
     const isHidden = optionalHidden(payload.isHidden);
-    if (!validText(payload.id, 100) || !validText(payload.city, 80) || !validText(payload.name, 120) || wbWarehouseId === undefined || wbWarehouseName === undefined || isHidden === undefined) {
-      return NextResponse.json({ error: "Проверьте название склада и ID склада WB" }, { status: 400 });
+    if (!validText(payload.id, 100) || !validText(payload.city, 80) || !validText(payload.name, 120) || wbWarehouseId === undefined || wbWarehouseName === undefined || serviceRateKopecks === undefined || isHidden === undefined) {
+      return NextResponse.json({ error: "Проверьте настройки ФФ, ставку и ID склада WB" }, { status: 400 });
     }
-    return NextResponse.json({ warehouse: await updateFfWarehouse({ cabinetId: session.cabinetId, id: payload.id, city: payload.city, name: payload.name, position: Number(payload.position) || 0, wbWarehouseId, wbWarehouseName, isHidden }) });
+    return NextResponse.json({ warehouse: await updateFfWarehouse({ cabinetId: session.cabinetId, id: payload.id, city: payload.city, name: payload.name, position: Number(payload.position) || 0, wbWarehouseId, wbWarehouseName, serviceRateKopecks, isHidden }) });
   } catch {
     return NextResponse.json({ error: "Не удалось сохранить склад" }, { status: 500 });
   }
