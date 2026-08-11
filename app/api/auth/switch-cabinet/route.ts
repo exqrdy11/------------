@@ -14,8 +14,8 @@ export async function POST(request: Request) {
     const cabinets = availableCabinets(session.ownerId);
     if (!cabinets.some((cabinet) => cabinet.id === cabinetId)) return NextResponse.json({ error: "Нет доступа к этой кампании" }, { status: 403, headers: { "Cache-Control": "no-store" } });
 
-    const token = await createAdminSession(session.ownerId, cabinetId as CabinetId);
-    return NextResponse.json({ authenticated: true, cabinet: cabinetSummary(cabinetId as CabinetId), cabinets }, {
+    const token = await createAdminSession(session.ownerId, cabinetId as CabinetId, session.role);
+    return NextResponse.json({ authenticated: true, role: session.role, cabinet: cabinetSummary(cabinetId as CabinetId), cabinets }, {
       headers: { "Cache-Control": "no-store", "Set-Cookie": adminSessionCookie(token) },
     });
   } catch {

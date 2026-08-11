@@ -5,7 +5,8 @@ const encoder = new TextEncoder();
 export const cabinetIds = ["metanutrix"] as const;
 export type CabinetId = typeof cabinetIds[number];
 export type CabinetSummary = { id: CabinetId; name: string; configured: boolean };
-export type AdminSession = { ownerId: CabinetId; cabinetId: CabinetId };
+export type UserRole = "owner" | "viewer";
+export type AdminSession = { ownerId: CabinetId; cabinetId: CabinetId; role: UserRole };
 
 function constantTimeEqual(left: string, right: string) {
   const leftBytes = encoder.encode(left);
@@ -56,17 +57,28 @@ function readCookie(request: Request, name: string) {
   return null;
 }
 
-function cabinetCredentials() {
+function ownerCredentials() {
   return {
-    login: process.env.ADMIN_LOGIN?.trim() || "admin",
-    password: process.env.ADMIN_PASSWORD || "admin",
+    login: process.env.OWNER_LOGIN?.trim() || process.env.ADMIN_LOGIN?.trim() || "admin",
+    password: process.env.OWNER_PASSWORD || process.env.ADMIN_PASSWORD || "admin",
   };
 }
 
-export function cabinetForCredentials(login: string, password: string): CabinetId | null {
-  for (const cabinetId of cabinetIds) {
-    const credentials = cabinetCredentials();
-    if (constantTimeEqual(login, credentials.login) && constantTimeEqual(password, credentials.password)) return cabinetId;
+function viewerCredentials() {
+  return {
+    login: process.env.GUEST_LOGIN?.trim() || "Metanutrix",
+    password: process.env.GUEST_PASSWORD || "5566rino",
+  };
+}
+
+export function sessionForCredentials(login: string, password: string): AdminSession | null {
+  const owner = ownerCredentials();
+  if (constantTimeEqual(login, owner.login) && constantTimeEqual(password, owner.password)) {
+    return { ownerId: "metanutrix", cabinetId: "metanutrix", role: "owner" };
+  }
+  const viewer = viewerCredentials();
+  if (constantTimeEqual(login, viewer.login) && constantTimeEqual(password, viewer.password)) {
+    return { ownerId: "metanutrix", cabinetId: "metanutrix", role: "viewer" };
   }
   return null;
 }
@@ -87,10 +99,10 @@ export function cabinetToken(id: CabinetId) {
   return id === "metanutrix" ? process.env.WB_API_TOKEN?.trim() : undefined;
 }
 
-export async function createAdminSession(ownerId: CabinetId, cabinetId: CabinetId = ownerId) {
+export async function createAdminSession(ownerId: CabinetId, cabinetId: CabinetId = ownerId, role: UserRole = "owner") {
   if (!cabinetsForOwner(ownerId).includes(cabinetId)) throw new Error("Cabinet is not available for this access");
   const expiresAt = Math.floor(Date.now() / 1000) + SESSION_LIFETIME_SECONDS;
-  const payload = `v3.${ownerId}.${cabinetId}.${expiresAt}`;
+  const payload = `v4.${ownerId}.${cabinetId}.${role}.${expiresAt}`;
   const signature = await crypto.subtle.sign("HMAC", await getSigningKey(), encoder.encode(payload));
   return `${payload}.${toBase64Url(new Uint8Array(signature))}`;
 }
@@ -100,20 +112,21 @@ export async function getAdminSession(request: Request): Promise<AdminSession | 
   if (!token) return null;
   const values = token.split(".");
   const version = values[0];
-  const legacy = version === "v2" && values.length === 4;
-  const current = version === "v3" && values.length === 5;
-  if (!legacy && !current) return null;
+  const current = version === "v4" && values.length === 6;
+  if (!current) return null;
   const ownerValue = values[1];
-  const cabinetValue = legacy ? values[1] : values[2];
-  const expiresAtValue = legacy ? values[2] : values[3];
-  const signatureValue = legacy ? values[3] : values[4];
-  if (!ownerValue || !cabinetValue || !expiresAtValue || !signatureValue || !cabinetIds.includes(ownerValue as CabinetId) || !cabinetIds.includes(cabinetValue as CabinetId)) return null;
+  const cabinetValue = values[2];
+  const roleValue = values[3];
+  const expiresAtValue = values[4];
+  const signatureValue = values[5];
+  if (!ownerValue || !cabinetValue || !roleValue || !expiresAtValue || !signatureValue || !cabinetIds.includes(ownerValue as CabinetId) || !cabinetIds.includes(cabinetValue as CabinetId) || !["owner", "viewer"].includes(roleValue)) return null;
   const ownerId = ownerValue as CabinetId;
   const cabinetId = cabinetValue as CabinetId;
+  const role = roleValue as UserRole;
   if (!cabinetsForOwner(ownerId).includes(cabinetId)) return null;
   const expiresAt = Number(expiresAtValue);
   if (!Number.isInteger(expiresAt) || expiresAt <= Math.floor(Date.now() / 1000)) return null;
-  const payload = legacy ? `v2.${cabinetValue}.${expiresAtValue}` : `v3.${ownerValue}.${cabinetValue}.${expiresAtValue}`;
+  const payload = `v4.${ownerValue}.${cabinetValue}.${roleValue}.${expiresAtValue}`;
   try {
     const verified = await crypto.subtle.verify(
       "HMAC",
@@ -121,7 +134,7 @@ export async function getAdminSession(request: Request): Promise<AdminSession | 
       fromBase64Url(signatureValue),
       encoder.encode(payload),
     );
-    return verified ? { ownerId, cabinetId } : null;
+    return verified ? { ownerId, cabinetId, role } : null;
   } catch {
     return null;
   }
@@ -131,8 +144,13 @@ export async function getAdminCabinet(request: Request): Promise<CabinetId | nul
   return (await getAdminSession(request))?.cabinetId ?? null;
 }
 
+export async function getOwnerSession(request: Request): Promise<AdminSession | null> {
+  const session = await getAdminSession(request);
+  return session?.role === "owner" ? session : null;
+}
+
 export async function isAdminRequest(request: Request) {
-  return Boolean(await getAdminCabinet(request));
+  return Boolean(await getOwnerSession(request));
 }
 
 export function adminSessionCookie(token: string) {

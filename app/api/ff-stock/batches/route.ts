@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { deleteFfStockBatch, saveFfStockBatch } from "@/db/ff-stocks";
-import { getAdminCabinet } from "@/lib/admin-auth";
+import { getOwnerSession } from "@/lib/admin-auth";
 
 export const dynamic = "force-dynamic";
 
@@ -19,8 +19,8 @@ function batchInput(payload: Record<string, unknown>) {
 }
 
 export async function POST(request: Request) {
-  const cabinet = await getAdminCabinet(request);
-  if (!cabinet) return NextResponse.json({ error: "Требуется вход администратора" }, { status: 401 });
+  const session = await getOwnerSession(request);
+  if (!session) return NextResponse.json({ error: "Изменять данные может только владелец кабинета" }, { status: 403 });
   try {
     const payload = await request.json() as Record<string, unknown>;
     const input = batchInput(payload);
@@ -28,7 +28,7 @@ export async function POST(request: Request) {
     if (!input.productKey || !input.sku || !input.warehouseId || !validExpiry(input.expiresAt) || !Number.isFinite(quantity) || quantity < 0 || quantity > 10_000_000) {
       return NextResponse.json({ error: "Укажите склад, артикул, количество от 0 до 10 000 000 и корректный срок годности" }, { status: 400 });
     }
-    return NextResponse.json(await saveFfStockBatch({ cabinetId: cabinet, ...input, quantity }));
+    return NextResponse.json(await saveFfStockBatch({ cabinetId: session.cabinetId, ...input, quantity }));
   } catch (error) {
     const message = error instanceof Error && error.message === "Склад не найден" ? error.message : "Не удалось сохранить партию";
     return NextResponse.json({ error: message }, { status: 500 });
@@ -36,15 +36,15 @@ export async function POST(request: Request) {
 }
 
 export async function DELETE(request: Request) {
-  const cabinet = await getAdminCabinet(request);
-  if (!cabinet) return NextResponse.json({ error: "Требуется вход администратора" }, { status: 401 });
+  const session = await getOwnerSession(request);
+  if (!session) return NextResponse.json({ error: "Изменять данные может только владелец кабинета" }, { status: 403 });
   try {
     const payload = await request.json() as Record<string, unknown>;
     const input = batchInput(payload);
     if (!input.productKey || !input.sku || !input.warehouseId || !validExpiry(input.expiresAt)) {
       return NextResponse.json({ error: "Не удалось определить партию" }, { status: 400 });
     }
-    return NextResponse.json(await deleteFfStockBatch({ cabinetId: cabinet, ...input }));
+    return NextResponse.json(await deleteFfStockBatch({ cabinetId: session.cabinetId, ...input }));
   } catch (error) {
     const message = error instanceof Error && error.message === "Склад не найден" ? error.message : "Не удалось удалить партию";
     return NextResponse.json({ error: message }, { status: 500 });

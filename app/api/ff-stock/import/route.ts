@@ -1,12 +1,12 @@
 import { NextResponse } from "next/server";
 import { importFfStocks, normalizeSku } from "@/db/ff-stocks";
-import { getAdminCabinet } from "@/lib/admin-auth";
+import { getOwnerSession } from "@/lib/admin-auth";
 
 export const dynamic = "force-dynamic";
 
 export async function POST(request: Request) {
-  const cabinet = await getAdminCabinet(request);
-  if (!cabinet) return NextResponse.json({ error: "Требуется вход администратора" }, { status: 401 });
+  const session = await getOwnerSession(request);
+  if (!session) return NextResponse.json({ error: "Изменять данные может только владелец кабинета" }, { status: 403 });
   try {
     const payload = await request.json() as {
       warehouseId?: unknown;
@@ -41,7 +41,7 @@ export async function POST(request: Request) {
 
     const items = [...grouped.values()];
     if (items.some((item) => item.quantity > 10_000_000)) return NextResponse.json({ error: "Количество по партии не должно превышать 10 000 000" }, { status: 400 });
-    const result = await importFfStocks({ cabinetId: cabinet, warehouseId: payload.warehouseId, mode: payload.mode as "replace" | "add", items });
+    const result = await importFfStocks({ cabinetId: session.cabinetId, warehouseId: payload.warehouseId, mode: payload.mode as "replace" | "add", items });
     return NextResponse.json(result);
   } catch (error) {
     const message = error instanceof Error && error.message === "Склад не найден" ? error.message : "Не удалось загрузить остатки";

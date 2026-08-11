@@ -1,17 +1,17 @@
 import { NextResponse } from "next/server";
-import { adminSessionCookie, availableCabinets, cabinetForCredentials, cabinetSummary, createAdminSession } from "@/lib/admin-auth";
+import { adminSessionCookie, availableCabinets, cabinetSummary, createAdminSession, sessionForCredentials } from "@/lib/admin-auth";
 
 export const dynamic = "force-dynamic";
 
 export async function POST(request: Request) {
   try {
     const payload = await request.json() as { login?: string; password?: string };
-    const owner = cabinetForCredentials(payload.login?.trim() ?? "", payload.password ?? "");
-    if (!owner) {
+    const session = sessionForCredentials(payload.login?.trim() ?? "", payload.password ?? "");
+    if (!session) {
       return NextResponse.json({ error: "Неверный логин или пароль" }, { status: 401, headers: { "Cache-Control": "no-store" } });
     }
-    const token = await createAdminSession(owner);
-    return NextResponse.json({ authenticated: true, cabinet: cabinetSummary(owner), cabinets: availableCabinets(owner) }, {
+    const token = await createAdminSession(session.ownerId, session.cabinetId, session.role);
+    return NextResponse.json({ authenticated: true, role: session.role, cabinet: cabinetSummary(session.cabinetId), cabinets: availableCabinets(session.ownerId) }, {
       headers: { "Cache-Control": "no-store", "Set-Cookie": adminSessionCookie(token) },
     });
   } catch {

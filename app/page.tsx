@@ -14,6 +14,15 @@ type FfExpiry = Record<string, string | null>;
 type FfBatch = { location: string; batchCode: string; expiresAt: string | null; quantity: number };
 type FfBatches = Record<string, FfBatch[]>;
 type CabinetSummary = { id: "metanutrix"; name: string; configured: boolean };
+type UserRole = "owner" | "viewer";
+type MarketplaceConnection = {
+  platform: "yandex" | "ozon";
+  configured: boolean;
+  connected: boolean;
+  accountName: string | null;
+  details: string[];
+  error: string | null;
+};
 
 type ManualWarehouse = {
   id: string;
@@ -317,12 +326,70 @@ function ExpiryManager({ rows, warehouses }: {
   </section>;
 }
 
+function MarketplaceConnectionCard({
+  connection,
+  platform,
+  mark,
+  title,
+  requirements,
+  onCheck,
+  onSave,
+  canManage,
+  checking,
+}: {
+  connection?: MarketplaceConnection;
+  platform: "yandex" | "ozon";
+  mark: string;
+  title: string;
+  requirements: string;
+  onCheck: () => void;
+  onSave: (platform: "yandex" | "ozon", clientId: string, apiKey: string) => Promise<boolean>;
+  canManage: boolean;
+  checking: boolean;
+}) {
+  const connected = connection?.connected ?? false;
+  const configured = connection?.configured ?? false;
+  const [setupOpen, setSetupOpen] = useState(false);
+  const [clientId, setClientId] = useState("");
+  const [apiKey, setApiKey] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [setupError, setSetupError] = useState<string | null>(null);
+  const save = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    setSetupError(null);
+    setSaving(true);
+    try {
+      const saved = await onSave(platform, clientId, apiKey);
+      if (!saved) throw new Error("Не удалось сохранить ключ");
+      setApiKey("");
+      setSetupOpen(false);
+    } catch (error) {
+      setSetupError(error instanceof Error ? error.message : "Не удалось сохранить ключ");
+    } finally {
+      setSaving(false);
+    }
+  };
+  return <article className={`cabinet-platform-card ${connected ? "connected-platform" : "pending-platform"}`}>
+    <div className="cabinet-platform-head"><span className={`platform-mark ${platform === "yandex" ? "ym-mark" : "oz-mark"}`}>{mark}</span><div><strong>{title}</strong><small>{connected ? "Подключено по API" : configured ? "Нужна проверка подключения" : "Кабинет не подключён"}</small></div></div>
+    {connected ? <div className="platform-connect connected"><strong>{connection?.accountName || title}</strong><span>{connection?.details.length ? connection.details.join(" · ") : "Доступ к кабинету подтверждён"}</span></div> : <div className="platform-connect"><strong>{configured ? "Ключ добавлен" : "Подключим отдельный кабинет"}</strong><span>{configured ? connection?.error || "Проверьте подключение." : requirements}</span></div>}
+    {canManage && <><button className="marketplace-check-btn" type="button" onClick={configured ? onCheck : () => setSetupOpen(true)} disabled={checking || saving}>{checking ? "Проверяем…" : connected ? "Проверить снова" : configured ? "Проверить ключ" : "Добавить ключ"}</button>{configured && <button className="marketplace-link-btn" type="button" onClick={() => setSetupOpen((current) => !current)}>{setupOpen ? "Скрыть форму" : "Заменить ключ"}</button>}</>}
+    {setupOpen && canManage && <form className="marketplace-key-form" onSubmit={(event) => void save(event)}>{platform === "ozon" && <label><span>Client ID</span><input value={clientId} onChange={(event) => setClientId(event.target.value)} autoComplete="off" required /></label>}<label><span>API-ключ</span><input type="password" value={apiKey} onChange={(event) => setApiKey(event.target.value)} autoComplete="new-password" required /></label><button type="submit" disabled={saving}>{saving ? "Сохраняем…" : "Сохранить и проверить"}</button>{setupError && <small className="marketplace-key-error">{setupError}</small>}</form>}
+    {!canManage && <p>Гостевой доступ: можно смотреть статусы, но API-ключи и настройки скрыты.</p>}
+    {canManage && configured && !connected && <p>После успешной проверки сюда попадут доступные кампании или склады.</p>}
+    {canManage && connected && <p>Следующий этап: подтянем товары, остатки и заказы в отдельный контур этого маркетплейса.</p>}
+    {canManage && !configured && !setupOpen && <p>Добавьте ключ прямо здесь — он сохраняется на сервере в зашифрованном виде и не возвращается в браузер.</p>}
+  </article>;
+}
+
 export default function Home() {
   const [authState, setAuthState] = useState<"checking" | "authenticated" | "unauthenticated">("checking");
+  const [role, setRole] = useState<UserRole | null>(null);
   const [cabinet, setCabinet] = useState<CabinetSummary | null>(null);
   const [availableCabinets, setAvailableCabinets] = useState<CabinetSummary[]>([]);
   const [cabinetSwitchingId, setCabinetSwitchingId] = useState<CabinetSummary["id"] | null>(null);
   const [cabinetSwitchError, setCabinetSwitchError] = useState<string | null>(null);
+  const [marketplaceConnections, setMarketplaceConnections] = useState<MarketplaceConnection[]>([]);
+  const [marketplaceConnectionsLoading, setMarketplaceConnectionsLoading] = useState(false);
   const [adminLogin, setAdminLogin] = useState("");
   const [adminPassword, setAdminPassword] = useState("");
   const [loginLoading, setLoginLoading] = useState(false);
@@ -374,6 +441,7 @@ export default function Home() {
   const [importLoading, setImportLoading] = useState(false);
   const [importMessage, setImportMessage] = useState<string | null>(null);
   const [importError, setImportError] = useState<string | null>(null);
+  const canManage = role === "owner";
 
   const loadManualWarehouses = useCallback(async () => {
     try {
@@ -388,6 +456,37 @@ export default function Home() {
       // The dashboard remains usable with the built-in warehouses until D1 reconnects.
     }
   }, []);
+
+  const loadMarketplaceConnections = useCallback(async () => {
+    setMarketplaceConnectionsLoading(true);
+    try {
+      const response = await fetch("/api/marketplaces", { cache: "no-store" });
+      const data = await response.json() as { connections?: MarketplaceConnection[] };
+      if (response.status === 401) {
+        setAuthState("unauthenticated");
+        return;
+      }
+      if (response.ok) setMarketplaceConnections(data.connections ?? []);
+    } finally {
+      setMarketplaceConnectionsLoading(false);
+    }
+  }, []);
+
+  const saveMarketplaceConnection = useCallback(async (platform: "yandex" | "ozon", clientId: string, apiKey: string) => {
+    const response = await fetch("/api/marketplaces", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ platform, clientId, apiKey }),
+    });
+    const data = await response.json() as { saved?: boolean; error?: string };
+    if (response.status === 401) {
+      setAuthState("unauthenticated");
+      return false;
+    }
+    if (!response.ok || !data.saved) throw new Error(data.error || "Не удалось сохранить ключ");
+    await loadMarketplaceConnections();
+    return true;
+  }, [loadMarketplaceConnections]);
 
   const loadData = useCallback(async (force = false) => {
     setLoading(true);
@@ -461,8 +560,9 @@ export default function Home() {
     void (async () => {
       try {
         const response = await fetch("/api/auth/session", { cache: "no-store" });
-        const data = await response.json() as { authenticated?: boolean; cabinet?: CabinetSummary | null; cabinets?: CabinetSummary[] };
+        const data = await response.json() as { authenticated?: boolean; role?: UserRole | null; cabinet?: CabinetSummary | null; cabinets?: CabinetSummary[] };
         setAuthState(data.authenticated ? "authenticated" : "unauthenticated");
+        setRole(data.role ?? null);
         setCabinet(data.cabinet ?? null);
         setAvailableCabinets(data.cabinets ?? []);
       } catch {
@@ -480,6 +580,10 @@ export default function Home() {
       return () => window.clearTimeout(timer);
     }
   }, [authState, loadData, loadManualWarehouses]);
+
+  useEffect(() => {
+    if (authState === "authenticated" && activeView === "cabinets") void loadMarketplaceConnections();
+  }, [activeView, authState, loadMarketplaceConnections]);
 
   useEffect(() => {
     if (authState !== "authenticated" || activeView !== "analytics") return;
@@ -852,9 +956,10 @@ export default function Home() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ login: adminLogin, password: adminPassword }),
       });
-      const data = await response.json() as { authenticated?: boolean; cabinet?: CabinetSummary; cabinets?: CabinetSummary[]; error?: string };
+      const data = await response.json() as { authenticated?: boolean; role?: UserRole; cabinet?: CabinetSummary; cabinets?: CabinetSummary[]; error?: string };
       if (!response.ok || !data.authenticated) throw new Error(data.error || "Не удалось выполнить вход");
       setAdminPassword("");
+      setRole(data.role ?? null);
       setCabinet(data.cabinet ?? null);
       setAvailableCabinets(data.cabinets ?? []);
       setAuthState("authenticated");
@@ -871,6 +976,7 @@ export default function Home() {
     setSelected(null);
     setCabinet(null);
     setAvailableCabinets([]);
+    setRole(null);
     setAuthState("unauthenticated");
   };
 
@@ -884,12 +990,13 @@ export default function Home() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ cabinetId }),
       });
-      const data = await response.json() as { authenticated?: boolean; cabinet?: CabinetSummary; cabinets?: CabinetSummary[]; error?: string };
+      const data = await response.json() as { authenticated?: boolean; role?: UserRole; cabinet?: CabinetSummary; cabinets?: CabinetSummary[]; error?: string };
       if (response.status === 401) {
         setAuthState("unauthenticated");
         return;
       }
       if (!response.ok || !data.cabinet) throw new Error(data.error || "Не удалось открыть кампанию");
+      setRole(data.role ?? null);
       setCabinet(data.cabinet);
       setAvailableCabinets(data.cabinets ?? []);
       setRows([]);
@@ -973,7 +1080,7 @@ export default function Home() {
           <button type="button" className={`nav-item ${activeView === "fulfillment" || activeView === "manual" ? "active" : ""}`} onClick={() => navigateTo("fulfillment")}><span className="nav-symbol">▤</span>ФФ</button>
           <button type="button" className={`nav-item ${activeView === "reports" ? "active" : ""}`} onClick={() => navigateTo("reports")}><span className="nav-symbol">≡</span>Отчёты</button>
         </nav>
-        <div className="sidebar-bottom"><div className="connection"><span className={error ? "live-dot offline" : "live-dot"} />{error ? "Нужна проверка подключения" : "Подключено к WB API"}</div><button type="button" className="profile" onClick={() => navigateTo("cabinets")}><span className="avatar">WB</span><span><strong>{cabinet?.name ?? "Wildberries"}</strong><small>{configured ? "Кабинеты и подключения" : "Токен не добавлен"}</small></span><span className="chevron">›</span></button></div>
+        <div className="sidebar-bottom"><div className="connection"><span className={error ? "live-dot offline" : "live-dot"} />{error ? "Нужна проверка подключения" : "Подключено к WB API"}</div><button type="button" className="profile" onClick={() => navigateTo("cabinets")}><span className="avatar">WB</span><span><strong>{cabinet?.name ?? "Wildberries"}</strong><small>{role === "viewer" ? "Гость · только просмотр" : configured ? "Владелец · кабинеты и ключи" : "Владелец · токен не добавлен"}</small></span><span className="chevron">›</span></button></div>
       </aside>
 
       <section className="workspace">
@@ -1007,25 +1114,17 @@ export default function Home() {
                   {cabinetSwitchError && <p className="cabinet-switch-error">{cabinetSwitchError}</p>}
                   {!cabinetSwitchError && <p>Выберите кампанию — повторный логин не нужен.</p>}
                 </article>
-                <article className="cabinet-platform-card pending-platform">
-                  <div className="cabinet-platform-head"><span className="platform-mark ym-mark">ЯМ</span><div><strong>Яндекс Маркет</strong><small>Кабинет не подключён</small></div></div>
-                  <div className="platform-connect"><strong>Подключим отдельный кабинет</strong><span>Понадобятся API-ключ и ID кампании продавца.</span></div>
-                  <p>После подключения это будет ещё одна кампания в этом же входе.</p>
-                </article>
-                <article className="cabinet-platform-card pending-platform">
-                  <div className="cabinet-platform-head"><span className="platform-mark oz-mark">OZ</span><div><strong>Ozon Seller</strong><small>Кабинет не подключён</small></div></div>
-                  <div className="platform-connect"><strong>Подключим отдельный кабинет</strong><span>Понадобятся Client ID и API-ключ Ozon.</span></div>
-                  <p>После подключения это будет ещё одна кампания в этом же входе.</p>
-                </article>
+                <MarketplaceConnectionCard platform="yandex" mark="ЯМ" title="Яндекс Маркет" requirements="Нужен API-ключ. Кампании определим автоматически — ID вручную указывать не нужно." connection={marketplaceConnections.find((item) => item.platform === "yandex")} onCheck={() => void loadMarketplaceConnections()} onSave={saveMarketplaceConnection} canManage={canManage} checking={marketplaceConnectionsLoading} />
+                <MarketplaceConnectionCard platform="ozon" mark="OZ" title="Ozon Seller" requirements="Понадобятся Client ID и API-ключ Ozon." connection={marketplaceConnections.find((item) => item.platform === "ozon")} onCheck={() => void loadMarketplaceConnections()} onSave={saveMarketplaceConnection} canManage={canManage} checking={marketplaceConnectionsLoading} />
               </div>
-              <p className="cabinet-manager-note">Новая кампания добавляется в этот же доступ, но получает свой отдельный контур и собственные ФФ-склады. Никакие остатки между кампаниями не копируются.</p>
+              <p className="cabinet-manager-note">Каждый маркетплейс получит отдельный контур: свои товары, склады, остатки, заказы и будущие таргет-цены. Данные между площадками не смешиваются.</p>
             </section>
           ) : activeView === "fulfillment" ? (
             <section className="fulfillment-panel">
               {!selectedFulfillmentWarehouse ? <>
                 <div className="section-heading fulfillment-heading">
                   <div><span className="section-kicker">ВЫБЕРИТЕ СКЛАД ФФ</span><h2>Куда смотреть остатки и движение</h2><p className="section-note">Откройте склад, чтобы увидеть его остаток и FBS-движение по каждому артикулу.</p></div>
-                  <button className="secondary-btn" type="button" onClick={() => navigateTo("manual")}>Настроить склады</button>
+                  {canManage && <button className="secondary-btn" type="button" onClick={() => navigateTo("manual")}>Настроить склады</button>}
                 </div>
                 <div className="fulfillment-warehouse-grid">{fulfillmentWarehouses.map((item) => <button className="fulfillment-warehouse-card" type="button" key={item.warehouse.id} onClick={() => openFulfillmentWarehouse(item.warehouse.id)}><span className="fulfillment-card-top"><i>□</i><small>{item.warehouse.wbWarehouseId ? `WB FBS · ${item.warehouse.wbWarehouseName || `№${item.warehouse.wbWarehouseId}`}` : "WB FBS не назначен"}</small><b>›</b></span><strong>{item.warehouse.city}</strong><span className="fulfillment-card-name">{item.warehouse.name}</span><span className="fulfillment-card-stock"><b>{formatNumber.format(item.stock)}</b> шт. доступно</span><span className="fulfillment-card-stats">В базе {formatNumber.format(item.physicalStock)} · новые FBS {item.fbs}</span></button>)}</div>
                 {!fulfillmentWarehouses.length && <div className="empty-state"><strong>Добавьте первый склад ФФ</strong><span>После этого сюда будут попадать остатки из Excel и заказы WB.</span></div>}
@@ -1033,7 +1132,7 @@ export default function Home() {
               </> : <>
                 <div className="section-heading fulfillment-heading">
                   <div><button className="back-link" type="button" onClick={() => { setSelectedFulfillmentWarehouseId(null); setQuery(""); }}>‹ Все склады ФФ</button><span className="section-kicker">ФФ · СКЛАД В РАБОТЕ</span><h2>{formatManualWarehouse(selectedFulfillmentWarehouse.warehouse)}</h2><p className="section-note">Остатки на этом ФФ и FBS-заказы, отгруженные с привязанного склада WB.</p></div>
-                  <div className="fulfillment-heading-actions"><button className="secondary-btn fulfillment-export-btn" type="button" onClick={() => void downloadFfOrders(selectedFulfillmentWarehouse.warehouse)} disabled={ffOrdersExportLoading || !selectedFulfillmentWarehouse.warehouse.wbWarehouseId}>{ffOrdersExportLoading ? "Собираем стикеры…" : "Excel: заказы + стикеры ↓"}</button><button className="secondary-btn" type="button" onClick={() => navigateTo("manual")}>Настроить склад</button></div>
+                  <div className="fulfillment-heading-actions"><button className="secondary-btn fulfillment-export-btn" type="button" onClick={() => void downloadFfOrders(selectedFulfillmentWarehouse.warehouse)} disabled={ffOrdersExportLoading || !selectedFulfillmentWarehouse.warehouse.wbWarehouseId}>{ffOrdersExportLoading ? "Собираем стикеры…" : "Excel: заказы + стикеры ↓"}</button>{canManage && <button className="secondary-btn" type="button" onClick={() => navigateTo("manual")}>Настроить склад</button>}</div>
                 </div>
                 <div className="fulfillment-export-note"><span>Только актуальные FBS-заказы этого ФФ. Одна строка — один заказ: артикул, количество и стикер WB; WB выдаёт стикеры только для заказов на сборке и в доставке.</span>{ffOrdersExportMessage && <strong className="success">{ffOrdersExportMessage}</strong>}{ffOrdersExportError && <strong className="error">{ffOrdersExportError}</strong>}</div>
                 <div className="fulfillment-metric-grid" role="group" aria-label="Списки по статусу товара">
@@ -1045,7 +1144,7 @@ export default function Home() {
                 <section className="stock-card fulfillment-stock-card"><div className="stock-header"><div><span className="section-kicker">{activeFulfillmentListMeta.kicker}</span><h2 aria-live="polite">{activeFulfillmentListMeta.title}</h2><p className="fulfillment-list-note">Нажмите на карточку выше, чтобы переключить список.</p></div><label className="search-field"><span>⌕</span><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Артикул или название" aria-label="Поиск по выбранному списку склада ФФ" /></label></div><div className="fulfillment-table-wrap"><table><thead><tr><th>Товар / артикул</th><th>{activeFulfillmentListMeta.primary}</th><th>{fulfillmentList === "available" ? "Новые FBS" : "Доступно ФФ"}</th><th>{fulfillmentList === "receiving" ? "Новые FBS" : "Переданы WB"}</th><th>Статус ФФ</th><th /></tr></thead><tbody>{fulfillmentRows.map((row) => { const warehouseId = selectedFulfillmentWarehouse.warehouse.id; const availableStock = availableFfStock(row, warehouseId); const fbsReserve = row.fbsByLocation[warehouseId] ?? 0; const waitingForWb = row.receivingByLocation[warehouseId] ?? 0; const sold = row.toSaleByLocation[warehouseId] ?? 0; const primaryValue = fulfillmentList === "reserved" ? fbsReserve : fulfillmentList === "receiving" ? waitingForWb : fulfillmentList === "toSale" ? sold : availableStock; const secondaryValue = fulfillmentList === "available" ? fbsReserve : availableStock; const thirdValue = fulfillmentList === "receiving" ? fbsReserve : waitingForWb; const status = fulfillmentStockStatus(availableStock); const primaryClass = fulfillmentList === "available" ? `manual-stock-value ${availableStock === 0 ? "zero" : ""}` : fulfillmentList === "reserved" ? "number-pill blue-pill" : fulfillmentList === "receiving" ? "number-pill amber-pill" : "number-pill green-pill"; const secondaryClass = fulfillmentList === "available" ? "number-pill blue-pill" : `manual-stock-value ${availableStock === 0 ? "zero" : ""}`; const thirdClass = fulfillmentList === "receiving" ? "number-pill blue-pill" : "number-pill amber-pill"; return <tr key={row.key} onClick={() => openProduct(row)} tabIndex={0} onKeyDown={(event) => { if (event.key === "Enter") openProduct(row); }}><td><div className="product-cell"><span className="product-swatch" style={{ background: row.color }}>{row.name.charAt(0).toUpperCase()}</span><span><strong>{row.name}</strong><small>{row.sku}{row.nmId ? ` · WB ${row.nmId}` : ""} · {row.category}</small></span></div></td><td><span className={primaryClass}>{formatNumber.format(primaryValue)}{fulfillmentList === "available" && <small> шт.</small>}</span></td><td><span className={secondaryClass}>{formatNumber.format(secondaryValue)}{fulfillmentList !== "available" && <small> шт.</small>}</span></td><td><span className={thirdClass}>{formatNumber.format(thirdValue)}</span></td><td><span className={`status ${status === "В норме" ? "ok" : status === "Мало" ? "low" : "critical"}`}><i />{status}</span></td><td><button type="button" className="row-action" aria-label={`Открыть ${row.name}`}>›</button></td></tr>; })}</tbody></table>{!loading && !fulfillmentRows.length && <div className="empty-state"><strong>{activeFulfillmentListMeta.empty}</strong><span>Выберите другую карточку или проверьте привязку ФФ к складу WB.</span></div>}</div><footer className="table-footer"><span><i className={error ? "live-dot offline" : "live-dot"} />{fulfillmentRows.length} артикулов в выбранном списке</span><span>{activeFulfillmentListMeta.footer}</span></footer></section>
               </>}
             </section>
-          ) : activeView === "manual" ? (
+          ) : activeView === "manual" && canManage ? (
             <section className="manual-warehouses-panel">
               <div className="section-heading">
                 <div>
@@ -1168,7 +1267,7 @@ export default function Home() {
               <article className="metric-card"><div className="metric-icon amber">◷</div><div className="metric-label">Продано</div><strong className="metric-value">{loading ? "—" : formatNumber.format(totals.toSale)} <small>шт.</small></strong><p>Факт выкупа · без отмен</p></article>
             </section>
 
-            <section className={`movement-card ${activeView !== "overview" && activeView !== "fbs" ? "view-hidden" : ""}`} id="movement"><div className="section-heading"><div><span className="section-kicker">ОСТАТКИ WB, ФФ И ДВИЖЕНИЕ FBS</span><h2>Фактические и доступные остатки отдельно</h2></div><span className="period-pill">Актуальные заказы за 30 дней</span></div><div className="movement-grid"><article className="wb-stock-fact"><span className="wb-stock-mark">WB</span><div><small>ФАКТИЧЕСКИЙ ОСТАТОК НА WB</small><strong>{formatNumber.format(totals.available)} <em>шт.</em></strong><p>Уже находится на складах Wildberries и не является доступным запасом для FBS.</p></div></article><div className="fbs-overview"><div className="movement-subhead"><span>ДОСТУПНО НА ФФ · WB API</span><button className="text-action" type="button" onClick={() => navigateTo("manual")}>Настроить склады</button></div><div className="fbs-location-grid manual-location-grid dynamic-locations">{visibleManualWarehouses.map((item) => { const physicalStock = totals.ffStock[item.id] ?? 0; const reserved = totals.fbsByLocation[item.id] ?? 0; return <article className="fbs-location-card manual" key={item.id}><span>{item.city}</span><strong>{formatNumber.format(Math.max(0, physicalStock - reserved))}</strong><small>{item.name} · WB FBS {physicalStock} · новые FBS {reserved}</small></article>; })}</div><div className="movement-subhead orders"><span>АКТИВНЫЕ FBS-ЗАКАЗЫ</span><small>По данным WB API</small></div><div className="fbs-location-grid order-location-grid">{fbsLocations.map((location) => <article className="fbs-location-card" key={location.id}><span>{location.city}</span><strong>{formatNumber.format(activeFbsByLocation[location.id] ?? 0)}</strong><small>{location.label}</small></article>)}</div><div className="fbs-stage-strip"><span><b>{totals.fbs}</b> новые FBS</span><i>→</i><span><b>{totals.receiving}</b> переданы WB</span><i>→</i><span className="sale-stage"><b>{totals.toSale}</b> продано</span></div></div></div></section>
+            <section className={`movement-card ${activeView !== "overview" && activeView !== "fbs" ? "view-hidden" : ""}`} id="movement"><div className="section-heading"><div><span className="section-kicker">ОСТАТКИ WB, ФФ И ДВИЖЕНИЕ FBS</span><h2>Фактические и доступные остатки отдельно</h2></div><span className="period-pill">Актуальные заказы за 30 дней</span></div><div className="movement-grid"><article className="wb-stock-fact"><span className="wb-stock-mark">WB</span><div><small>ФАКТИЧЕСКИЙ ОСТАТОК НА WB</small><strong>{formatNumber.format(totals.available)} <em>шт.</em></strong><p>Уже находится на складах Wildberries и не является доступным запасом для FBS.</p></div></article><div className="fbs-overview"><div className="movement-subhead"><span>ДОСТУПНО НА ФФ · WB API</span>{canManage && <button className="text-action" type="button" onClick={() => navigateTo("manual")}>Настроить склады</button>}</div><div className="fbs-location-grid manual-location-grid dynamic-locations">{visibleManualWarehouses.map((item) => { const physicalStock = totals.ffStock[item.id] ?? 0; const reserved = totals.fbsByLocation[item.id] ?? 0; return <article className="fbs-location-card manual" key={item.id}><span>{item.city}</span><strong>{formatNumber.format(Math.max(0, physicalStock - reserved))}</strong><small>{item.name} · WB FBS {physicalStock} · новые FBS {reserved}</small></article>; })}</div><div className="movement-subhead orders"><span>АКТИВНЫЕ FBS-ЗАКАЗЫ</span><small>По данным WB API</small></div><div className="fbs-location-grid order-location-grid">{fbsLocations.map((location) => <article className="fbs-location-card" key={location.id}><span>{location.city}</span><strong>{formatNumber.format(activeFbsByLocation[location.id] ?? 0)}</strong><small>{location.label}</small></article>)}</div><div className="fbs-stage-strip"><span><b>{totals.fbs}</b> новые FBS</span><i>→</i><span><b>{totals.receiving}</b> переданы WB</span><i>→</i><span className="sale-stage"><b>{totals.toSale}</b> продано</span></div></div></div></section>
 
             <section className={`stock-card ${activeView === "reports" ? "view-hidden" : ""}`} id="stock"><div className="stock-header"><div><span className="section-kicker">ОСТАТКИ ПО АРТИКУЛАМ</span><h2>{stockTitle}</h2></div><div className="stock-tools"><label className="search-field"><span>⌕</span><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Артикул или название" aria-label="Поиск по товарам"/></label><label className="select-wrap"><span>Склад:</span><select value={warehouse} onChange={(event) => setWarehouse(event.target.value)} aria-label="Выбрать склад"><option>Все склады</option>{warehouseNames.map((item) => <option key={item}>{item}</option>)}</select></label></div></div><div className="filter-row"><div className="filter-tabs" role="tablist" aria-label="Фильтр остатков">{[{ name: "Все", count: counts.all }, { name: "Дефицит", count: counts.risk }, { name: "Активные FBS", count: counts.transit }].map((item) => <button type="button" key={item.name} className={filter === item.name ? "active" : ""} onClick={() => setFilter(item.name)}>{item.name}<span>{item.count}</span></button>)}</div><span className="result-count">Показано {filteredRows.length} из {viewTotal} артикулов</span></div><div className="table-wrap"><table><thead><tr><th>Товар / артикул</th><th>{warehouse === "Все склады" ? "Остаток WB" : "Выбранный склад WB"}</th>{visibleManualWarehouses.map((item) => <th className="ff-column-head" key={item.id}><span>{item.city}</span><small>{item.name}</small></th>)}<th>Активные FBS</th><th>Продано</th><th>Статус</th><th /></tr></thead><tbody>{filteredRows.map((row) => <tr key={row.key} onClick={() => openProduct(row)} tabIndex={0} onKeyDown={(event) => { if (event.key === "Enter") openProduct(row); }}><td><div className="product-cell"><span className="product-swatch" style={{ background: row.color }}>{row.name.charAt(0).toUpperCase()}</span><span><strong>{row.name}</strong><small>{row.sku}{row.nmId ? ` · WB ${row.nmId}` : ""} · {row.category}</small></span></div></td><td><b>{formatNumber.format(warehouse === "Все склады" ? stockTotal(row) : row.warehouses[warehouse] ?? 0)}</b><small> шт.</small></td>{visibleManualWarehouses.map((item) => <td key={item.id}><span className={`manual-stock-value ${(row.ffStock[item.id] ?? 0) === 0 ? "zero" : ""}`} title={`Остаток WB FBS: ${formatManualWarehouse(item)}`}>{formatNumber.format(row.ffStock[item.id] ?? 0)}<small> шт.</small></span></td>)}<td><span className="number-pill blue-pill">{row.fbs + row.receiving}</span></td><td><span className="number-pill green-pill">{row.toSale}</span></td><td><span className={`status ${row.status === "В норме" ? "ok" : row.status === "Мало" ? "low" : "critical"}`}><i />{row.status}</span></td><td><button type="button" className="row-action" aria-label={`Открыть ${row.name}`}>›</button></td></tr>)}</tbody></table>{loading && <div className="loading-state"><span className="loader"/><strong>Загружаем данные из Wildberries</strong><small>Остатки и статусы FBS собираются в единый отчёт</small></div>}{!loading && !filteredRows.length && <div className="empty-state"><strong>{error ? "Данные пока не загружены" : "Ничего не найдено"}</strong><span>{error ? "Проверьте подключение WB API." : "Попробуйте изменить поиск или фильтры."}</span></div>}</div><footer className="table-footer"><span><i className={error ? "live-dot offline" : "live-dot"} />{updatedAt ? `Остатки обновлены в ${formatSyncTime(updatedAt)} МСК` : "Ожидаем синхронизацию"}</span><button type="button" onClick={() => { setQuery(""); setFilter("Все"); setWarehouse("Все склады"); }}>Сбросить фильтры</button></footer></section>
 

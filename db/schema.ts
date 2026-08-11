@@ -35,3 +35,11 @@ export const ffStockBatches = sqliteTable("ff_stock_batches", {
   quantity: integer("quantity").notNull().default(0),
   updatedAt: text("updated_at").notNull().default(sql`CURRENT_TIMESTAMP`),
 }, (table) => [primaryKey({ columns: [table.cabinetId, table.productKey, table.location, table.batchCode, table.expiresAt] })]);
+
+export const marketplaceCredentials = sqliteTable("marketplace_credentials", {
+  cabinetId: text("cabinet_id").notNull().default("metanutrix"),
+  marketplace: text("marketplace").notNull(),
+  clientId: text("client_id"),
+  apiKeyCiphertext: text("api_key_ciphertext").notNull(),
+  updatedAt: text("updated_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+}, (table) => [primaryKey({ columns: [table.cabinetId, table.marketplace] })]);
