@@ -1,5 +1,5 @@
 import { sql } from "drizzle-orm";
-import { index, integer, primaryKey, sqliteTable, text } from "drizzle-orm/sqlite-core";
+import { index, integer, primaryKey, real, sqliteTable, text } from "drizzle-orm/sqlite-core";
 
 export const ffWarehouses = sqliteTable("ff_warehouses", {
   cabinetId: text("cabinet_id").notNull().default("metanutrix"),
@@ -64,4 +64,27 @@ export const fbsOrderHandoverMetrics = sqliteTable("fbs_order_handover_metrics",
 }, (table) => [
   primaryKey({ columns: [table.cabinetId, table.orderId] }),
   index("idx_fbs_handover_cabinet_warehouse_completed").on(table.cabinetId, table.warehouseId, table.handedOverAt),
+]);
+
+export const targetPriceProducts = sqliteTable("target_price_products", {
+  cabinetId: text("cabinet_id").notNull(),
+  productKey: text("product_key").notNull(),
+  sku: text("sku").notNull(),
+  nmId: integer("nm_id"),
+  orders: integer("orders").notNull().default(0),
+  priceBeforeSpp: real("price_before_spp"),
+  sppPercent: real("spp_percent"),
+  currentPrice: real("current_price"),
+  updatedAt: text("updated_at"),
+  searchQuery: text("search_query"),
+  competitorsJson: text("competitors_json").notNull().default("[]"),
+  candidateNmId: integer("candidate_nm_id"),
+  score: real("score"),
+  reason: text("reason"),
+  sourceStatus: text("source_status"),
+  refreshedAt: text("refreshed_at"),
+  refreshError: text("refresh_error"),
+}, (table) => [
+  primaryKey({ columns: [table.cabinetId, table.productKey] }),
+  index("target_price_products_cabinet_orders").on(table.cabinetId, table.orders),
 ]);

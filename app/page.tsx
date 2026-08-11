@@ -3,7 +3,6 @@
 import { type ChangeEvent, type FormEvent, useCallback, useEffect, useMemo, useState } from "react";
 import * as CFB from "cfb";
 import * as XLSX from "xlsx";
-import { targetPriceSheetUrl, targetPriceSnapshot, targetPriceSnapshotUpdatedAt, type TargetPriceSnapshotRow } from "@/lib/target-price-snapshot";
 
 type StockStatus = "В норме" | "Мало" | "Заканчивается";
 type View = "overview" | "stock" | "fbs" | "sales" | "analytics" | "pricing" | "payments" | "reports" | "fulfillment" | "manual" | "cabinets";
@@ -128,6 +127,32 @@ type FfSettlement = {
   untrackedHandoverQuantity: number;
   trackingStartedAt: string | null;
 };
+type TargetPriceCompetitor = {
+  nmId: number;
+  price: number | null;
+  source: string | null;
+  name: string | null;
+  updatedAt: string | null;
+  error: string | null;
+};
+type TargetPriceRow = {
+  sku: string;
+  nmId: number | null;
+  orders: number;
+  priceBeforeSpp: number | null;
+  sppPercent: number | null;
+  currentPrice: number | null;
+  updatedAt: string | null;
+  searchQuery: string | null;
+  competitors: TargetPriceCompetitor[];
+  candidateNmId: number | null;
+  score: number | null;
+  reason: string | null;
+  sourceStatus: string | null;
+  refreshedAt: string | null;
+  refreshError: string | null;
+};
+type TargetPricesResponse = { rows?: TargetPriceRow[]; updatedAt?: string | null; warnings?: string[]; error?: string };
 
 const defaultManualWarehouses: ManualWarehouse[] = [
   { id: "kazan", city: "Казань", name: "Наш склад", position: 10, wbWarehouseId: 1692397, wbWarehouseName: null, serviceRateKopecks: 0, isHidden: false },
@@ -208,7 +233,7 @@ function normalizedSku(value: string) {
 }
 
 type PriceRecommendation = {
-  row: TargetPriceSnapshotRow;
+  row: TargetPriceRow;
   low: number | null;
   median: number | null;
   high: number | null;
@@ -230,8 +255,8 @@ function median(values: number[]) {
   return sorted.length % 2 ? sorted[middle] : (sorted[middle - 1] + sorted[middle]) / 2;
 }
 
-function buildPriceRecommendation(row: TargetPriceSnapshotRow): PriceRecommendation {
-  const market = row.competitors.map((item) => item.price).filter((price) => price > 0);
+function buildPriceRecommendation(row: TargetPriceRow): PriceRecommendation {
+  const market = row.competitors.map((item) => item.price).filter((price): price is number => Boolean(price && price > 0));
   const needsReview = row.sourceStatus === "нужен подбор" || row.sourceStatus?.includes("ошибка");
   if (!row.currentPrice || !market.length) {
     return {
@@ -512,6 +537,13 @@ export default function Home() {
   const [pricingQuery, setPricingQuery] = useState("");
   const [pricingFilter, setPricingFilter] = useState<PricingFilter>("all");
   const [pricingSort, setPricingSort] = useState<PricingSort>("priority");
+  const [targetPriceRows, setTargetPriceRows] = useState<TargetPriceRow[]>([]);
+  const [targetPricesLoading, setTargetPricesLoading] = useState(false);
+  const [targetPricesRefreshing, setTargetPricesRefreshing] = useState(false);
+  const [targetPricesUpdatedAt, setTargetPricesUpdatedAt] = useState<string | null>(null);
+  const [targetPricesError, setTargetPricesError] = useState<string | null>(null);
+  const [targetPricesWarnings, setTargetPricesWarnings] = useState<string[]>([]);
+  const [selectedPricingRow, setSelectedPricingRow] = useState<TargetPriceRow | null>(null);
   const [salesWarehouseId, setSalesWarehouseId] = useState("all");
   const [salesProductScope, setSalesProductScope] = useState<"ff" | "all">("ff");
   const [salesTargetDays, setSalesTargetDays] = useState(14);
@@ -588,6 +620,48 @@ export default function Home() {
       if (response.ok) setMarketplaceConnections(data.connections ?? []);
     } finally {
       setMarketplaceConnectionsLoading(false);
+    }
+  }, []);
+
+  const loadTargetPrices = useCallback(async () => {
+    setTargetPricesLoading(true);
+    setTargetPricesError(null);
+    try {
+      const response = await fetch("/api/target-prices", { cache: "no-store" });
+      const data = await response.json() as TargetPricesResponse;
+      if (response.status === 401) {
+        setAuthState("unauthenticated");
+        return;
+      }
+      if (!response.ok) throw new Error(data.error || "Не удалось загрузить мониторинг цен");
+      setTargetPriceRows(data.rows ?? []);
+      setTargetPricesUpdatedAt(data.updatedAt ?? null);
+      setTargetPricesWarnings(data.warnings ?? []);
+    } catch (pricingLoadError) {
+      setTargetPricesError(pricingLoadError instanceof Error ? pricingLoadError.message : "Не удалось загрузить мониторинг цен");
+    } finally {
+      setTargetPricesLoading(false);
+    }
+  }, []);
+
+  const refreshTargetPrices = useCallback(async () => {
+    setTargetPricesRefreshing(true);
+    setTargetPricesError(null);
+    try {
+      const response = await fetch("/api/target-prices", { method: "POST", cache: "no-store" });
+      const data = await response.json() as TargetPricesResponse;
+      if (response.status === 401) {
+        setAuthState("unauthenticated");
+        return;
+      }
+      if (!response.ok) throw new Error(data.error || "Не удалось обновить цены");
+      setTargetPriceRows(data.rows ?? []);
+      setTargetPricesUpdatedAt(data.updatedAt ?? new Date().toISOString());
+      setTargetPricesWarnings(data.warnings ?? []);
+    } catch (pricingRefreshError) {
+      setTargetPricesError(pricingRefreshError instanceof Error ? pricingRefreshError.message : "Не удалось обновить цены");
+    } finally {
+      setTargetPricesRefreshing(false);
     }
   }, []);
 
@@ -731,6 +805,12 @@ export default function Home() {
   }, [activeView, authState, loadMarketplaceConnections]);
 
   useEffect(() => {
+    if (authState !== "authenticated" || activeView !== "pricing") return;
+    const timer = window.setTimeout(() => void loadTargetPrices(), 0);
+    return () => window.clearTimeout(timer);
+  }, [activeView, authState, loadTargetPrices]);
+
+  useEffect(() => {
     if (authState !== "authenticated" || activeView !== "payments" || !settlementWarehouseId) return;
     const timer = window.setTimeout(() => void loadSettlement(), 0);
     return () => window.clearTimeout(timer);
@@ -857,7 +937,7 @@ export default function Home() {
 
   const salesTotals = useMemo(() => salesRows.reduce((total, item) => ({ sales: total.sales + item.sales, stock: total.stock + item.stock, need: total.need + item.need }), { sales: 0, stock: 0, need: 0 }), [salesRows]);
 
-  const pricingRecommendations = useMemo(() => targetPriceSnapshot.map(buildPriceRecommendation), []);
+  const pricingRecommendations = useMemo(() => targetPriceRows.map(buildPriceRecommendation), [targetPriceRows]);
   const pricingCounts = useMemo(() => pricingRecommendations.reduce<Record<PricingFilter, number>>((counts, item) => {
     counts.all += 1;
     counts[item.action] += 1;
@@ -1296,15 +1376,15 @@ export default function Home() {
                 <div>
                   <span className="section-kicker">МОНИТОРИНГ ЦЕН · WILDBERRIES</span>
                   <h2>Рынок, таргет и решение по цене</h2>
-                  <p className="section-note">Сначала смотрим цены конкурентов, затем даём рекомендацию. Эта витрина пока ничего не меняет на WB — каждое решение остаётся под твоим контролем.</p>
+                  <p className="section-note">Тянем цены ваших карточек и уже выбранных конкурентов напрямую из витрины WB. Эта витрина ничего не меняет на WB — решение по цене остаётся за тобой.</p>
                 </div>
-                <a className="secondary-btn pricing-source-link" href={targetPriceSheetUrl} target="_blank" rel="noreferrer">Открыть таблицу ↗</a>
+                {canManage ? <button className="secondary-btn pricing-source-link" type="button" onClick={() => void refreshTargetPrices()} disabled={targetPricesRefreshing}>{targetPricesRefreshing ? "Обновляем цены…" : "Обновить цены"}</button> : <span className="pricing-viewer-note">Обновление цен — у владельца</span>}
               </div>
 
-              <div className="pricing-source-strip"><span>✓</span><div><strong>Снимок цен из твоей таблицы</strong><p>Последнее обновление источника: {targetPriceSnapshotUpdatedAt}. Перед автоматизацией добавим безопасную синхронизацию и лимиты.</p></div></div>
+              <div className={`pricing-source-strip ${targetPricesError || targetPricesWarnings.length ? "has-warning" : ""}`}><span>{targetPricesError || targetPricesWarnings.length ? "!" : "✓"}</span><div><strong>{targetPricesError || targetPricesWarnings.length ? "Часть цен пока не обновилась" : "Цены по WB: ручное обновление"}</strong><p>{targetPricesError || targetPricesWarnings[0] || (targetPricesUpdatedAt ? `Последнее обновление: ${formatDateTime(targetPricesUpdatedAt)}. Новое обновление — только по кнопке.` : "Пока показана стартовая база; нажмите «Обновить цены», чтобы запросить актуальные значения.")}</p></div></div>
 
               <div className="pricing-kpi-grid">
-                <article className="pricing-kpi tracked"><span>Под контролем</span><strong>{pricingCounts.all}</strong><p>карточек WB из таблицы</p></article>
+                <article className="pricing-kpi tracked"><span>Под контролем</span><strong>{pricingCounts.all}</strong><p>карточек WB в мониторинге</p></article>
                 <article className="pricing-kpi lower"><span>Снизить цену</span><strong>{pricingCounts.lower}</strong><p>выше целевого коридора</p></article>
                 <article className="pricing-kpi raise"><span>Можно поднять</span><strong>{pricingCounts.raise}</strong><p>ниже рынка без причины</p></article>
                 <article className="pricing-kpi review"><span>Проверить рынок</span><strong>{pricingCounts.review}</strong><p>нужен конкурент или валидация</p></article>
@@ -1324,20 +1404,30 @@ export default function Home() {
 
               <section className="pricing-table-card">
                 <div className="pricing-table-heading"><div><span className="section-kicker">РЕКОМЕНДАЦИИ</span><h3>Что проверить в первую очередь</h3></div><span>{pricingRows.length} из {pricingCounts.all} карточек</span></div>
-                <div className="pricing-table-wrap"><table><thead><tr><th>Товар / артикул</th><th>Наша цена<br/>после СПП</th><th>Рынок</th><th>Таргет</th><th>Изменение</th><th>Решение</th></tr></thead><tbody>{pricingRows.map((item) => <tr key={item.row.sku}>
-                  <td><div className="pricing-product"><strong>{item.row.sku}</strong><small>{item.row.searchQuery || "Запрос не указан"}{item.row.nmId ? ` · WB ${item.row.nmId}` : ""}</small></div></td>
+                <div className="pricing-table-wrap">{targetPricesLoading ? <div className="empty-state"><strong>Загружаем мониторинг цен…</strong></div> : <table><thead><tr><th>Товар / артикул</th><th>Наша цена<br/>после СПП</th><th>Рынок</th><th>Таргет</th><th>Изменение</th><th>Решение</th></tr></thead><tbody>{pricingRows.map((item) => <tr key={item.row.sku}>
+                  <td><button className="pricing-product pricing-product-open" type="button" onClick={() => setSelectedPricingRow(item.row)}><strong>{item.row.sku}</strong><small>{item.row.searchQuery || "Запрос не указан"}{item.row.nmId ? ` · WB ${item.row.nmId}` : ""} · конкуренты ↗</small></button></td>
                   <td><b>{item.row.currentPrice ? formatMoney.format(item.row.currentPrice) : "—"}</b><small>{item.row.sppPercent !== null ? `СПП ${Math.round(item.row.sppPercent * 100)}%` : "СПП не указан"}</small></td>
                   <td>{item.low !== null && item.high !== null ? <><b>{formatMoney.format(item.low)}–{formatMoney.format(item.high)}</b><small>{item.row.competitors.length} конкурента · середина {item.median ? formatMoney.format(item.median) : "—"}</small></> : <span className="pricing-empty">Нет цен</span>}</td>
                   <td><b>{item.target ? formatMoney.format(item.target) : "—"}</b><small>{item.target ? "после СПП" : "нужен рынок"}</small></td>
                   <td><span className={`pricing-delta ${item.delta === null || item.delta === 0 ? "flat" : item.delta < 0 ? "down" : "up"}`}>{item.delta === null ? "—" : item.delta === 0 ? "0 ₽" : `${item.delta > 0 ? "+" : ""}${formatMoney.format(item.delta)}`}</span></td>
                   <td><span className={`pricing-action ${item.action}`} title={item.detail}>{item.label}</span><small className="pricing-decision-note">{item.detail}</small></td>
-                </tr>)}</tbody></table>{!pricingRows.length && <div className="empty-state"><strong>Ничего не найдено</strong><span>Сбросьте фильтр или измените запрос.</span></div>}</div>
+                </tr>)}</tbody></table>}{!targetPricesLoading && !pricingRows.length && <div className="empty-state"><strong>Ничего не найдено</strong><span>Сбросьте фильтр или измените запрос.</span></div>}</div>
               </section>
 
               <section className="pricing-rules">
                 <div><span className="section-kicker">ЛОГИКА ТАРГЕТА · ВЕРСИЯ 1</span><h3>Без ценовой войны</h3></div>
                 <ol><li><b>Рынок:</b> берём цены доступных конкурентов и считаем середину.</li><li><b>Коридор:</b> таргет на 1,5% ниже середины, но не ниже 2% от самого дешёвого конкурента.</li><li><b>Контроль:</b> если источник сомнительный или разница мала — цена не меняется, карточка идёт на проверку.</li></ol>
               </section>
+              {selectedPricingRow && (() => {
+                const recommendation = buildPriceRecommendation(selectedPricingRow);
+                return <div className="pricing-modal-backdrop" role="presentation" onMouseDown={() => setSelectedPricingRow(null)}><section className="pricing-modal" role="dialog" aria-modal="true" aria-label={`Конкуренты ${selectedPricingRow.sku}`} onMouseDown={(event) => event.stopPropagation()}>
+                  <button className="pricing-modal-close" type="button" onClick={() => setSelectedPricingRow(null)} aria-label="Закрыть">×</button>
+                  <span className="section-kicker">КАРТОЧКА РЫНКА</span><h3>{selectedPricingRow.sku}</h3><p>{selectedPricingRow.searchQuery || "Поисковый запрос не указан"}{selectedPricingRow.nmId ? ` · ваша карточка WB ${selectedPricingRow.nmId}` : ""}</p>
+                  <div className="pricing-modal-summary"><span>Наша цена <b>{selectedPricingRow.currentPrice ? formatMoney.format(selectedPricingRow.currentPrice) : "—"}</b></span><span>Таргет <b>{recommendation.target ? formatMoney.format(recommendation.target) : "—"}</b></span><span>Решение <b>{recommendation.label}</b></span></div>
+                  <div className="pricing-competitor-list"><h4>Конкуренты</h4>{selectedPricingRow.competitors.map((competitor) => <article key={competitor.nmId}><div><strong>{competitor.name || `Карточка WB ${competitor.nmId}`}</strong><small>{competitor.source || "добавлен в мониторинг"}{competitor.updatedAt ? ` · ${formatDateTime(competitor.updatedAt)}` : ""}</small>{competitor.error && <em>{competitor.error}</em>}</div><a href={`https://www.wildberries.ru/catalog/${competitor.nmId}/detail.aspx`} target="_blank" rel="noreferrer">{competitor.price ? formatMoney.format(competitor.price) : "Нет цены"} ↗</a></article>)}{!selectedPricingRow.competitors.length && <p>Для этой карточки пока не назначены конкуренты.</p>}</div>
+                  <footer>{recommendation.detail}{selectedPricingRow.refreshError ? ` ${selectedPricingRow.refreshError}` : ""}</footer>
+                </section></div>;
+              })()}
             </section>
           ) : activeView === "payments" ? (
             <section className="settlement-panel">
