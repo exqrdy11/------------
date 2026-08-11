@@ -14,6 +14,7 @@ test("таргет цен работает через API WB, а не через
   assert.match(page, /Обновить цены/);
   assert.match(page, /Конкуренты/);
   assert.match(route, /https:\/\/card\.wb\.ru\/cards\/v4\/detail/);
+  assert.match(route, /cabinetToken\(session\.cabinetId\)/);
   assert.match(route, /export async function GET/);
   assert.match(route, /export async function POST/);
 });
@@ -29,4 +30,19 @@ test("обновление цен не стирает последние кор�
   assert.match(route, /оставили последние корректные значения/);
   assert.match(storage, /ON CONFLICT\(cabinet_id, product_key\) DO UPDATE/);
   assert.match(storage, /target_price_products/);
+});
+
+test("остатки ФФ и движение FBS переживают временный лимит WB", async () => {
+  const [route, snapshots] = await Promise.all([
+    readFile(new URL("app/api/inventory/route.ts", root), "utf8"),
+    readFile(new URL("db/inventory-snapshots.ts", root), "utf8"),
+  ]);
+
+  assert.match(route, /loadInventorySnapshot<DashboardPayload>/);
+  assert.match(route, /restoreFbsStocksForWarehouses/);
+  assert.match(route, /restoreFbsMovement/);
+  assert.match(route, /snapshotIsComplete/);
+  assert.match(route, /partial response must never become the new baseline/);
+  assert.match(snapshots, /inventory_snapshots/);
+  assert.match(snapshots, /ON CONFLICT\(cabinet_id\) DO UPDATE/);
 });

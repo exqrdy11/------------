@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { batchesForProduct, emptyFfBatches, emptyFfExpiry, emptyFfStock, expiryForProduct, listFfStocks, listFfWarehouses, stockForProduct, syncWbFbsWarehouses, type FfBatches, type FfExpiry, type FfStock, type ManualWarehouse } from "@/db/ff-stocks";
 import { fbsHandoverMetrics, recordFbsHandoverObservations, type HandoverMetrics } from "@/db/fbs-handover-metrics";
+import { loadInventorySnapshot, saveInventorySnapshot } from "@/db/inventory-snapshots";
 import { cabinetSummary, cabinetToken, getAdminCabinet, type CabinetId, type CabinetSummary } from "@/lib/admin-auth";
 
 export const dynamic = "force-dynamic";
@@ -210,7 +211,7 @@ async function getFbsStocks(token: string, cards: WbCard[], warehouses: Array<{ 
     }
   }
   const chrtIds = [...chrtToNmId.keys()];
-  if (!chrtIds.length || !warehouses.length) return { stockByWarehouse: new Map<string, Map<number, number>>(), syncedWarehouseIds: [] as string[], errors: [] as Array<{ warehouse: string; reason: unknown }> };
+  if (!chrtIds.length || !warehouses.length) return { stockByWarehouse: new Map<string, Map<number, number>>(), syncedWarehouseIds: [] as string[], errors: [] as Array<{ warehouseId: string; warehouse: string; reason: unknown }> };
 
   const results: Array<{ warehouse: { id: number; name: string }; stock: Map<number, number>; error: unknown }> = [];
   for (const [warehouseIndex, warehouse] of warehouses.entries()) {
@@ -237,7 +238,7 @@ async function getFbsStocks(token: string, cards: WbCard[], warehouses: Array<{ 
   return {
     stockByWarehouse: new Map(results.filter((result) => !result.error).map((result) => [String(result.warehouse.id), result.stock])),
     syncedWarehouseIds: results.filter((result) => !result.error).map((result) => String(result.warehouse.id)),
-    errors: results.filter((result) => result.error).map((result) => ({ warehouse: result.warehouse.name, reason: result.error })),
+    errors: results.filter((result) => result.error).map((result) => ({ warehouseId: String(result.warehouse.id), warehouse: result.warehouse.name, reason: result.error })),
   };
 }
 
@@ -302,6 +303,43 @@ function getOrCreateRow(map: Map<string, DashboardRow>, input: { nmId?: number; 
   };
   map.set(key, row);
   return row;
+}
+
+function restorePreviousRows(rowMap: Map<string, DashboardRow>, previousRows: DashboardRow[], restore: (current: DashboardRow, previous: DashboardRow) => void) {
+  for (const previous of previousRows) {
+    const current = getOrCreateRow(rowMap, {
+      nmId: previous.nmId ?? undefined,
+      sku: previous.sku,
+      name: previous.name,
+      category: previous.category,
+    });
+    restore(current, previous);
+  }
+}
+
+function restoreFbsStocksForWarehouses(rowMap: Map<string, DashboardRow>, previousRows: DashboardRow[], warehouseIds: string[]) {
+  const failedWarehouseIds = new Set(warehouseIds);
+  if (!failedWarehouseIds.size) return;
+  restorePreviousRows(rowMap, previousRows, (current, previous) => {
+    for (const warehouseId of failedWarehouseIds) {
+      if (Object.hasOwn(previous.fbsStockByWbWarehouse, warehouseId)) {
+        current.fbsStockByWbWarehouse[warehouseId] = previous.fbsStockByWbWarehouse[warehouseId];
+      }
+    }
+  });
+}
+
+function restoreFbsMovement(rowMap: Map<string, DashboardRow>, previousRows: DashboardRow[]) {
+  restorePreviousRows(rowMap, previousRows, (current, previous) => {
+    current.fbs = previous.fbs;
+    current.fbsByWbWarehouse = { ...previous.fbsByWbWarehouse };
+    current.sales7d = previous.sales7d;
+    current.sales7dByWbWarehouse = { ...previous.sales7dByWbWarehouse };
+    current.receiving = previous.receiving;
+    current.receivingByWbWarehouse = { ...previous.receivingByWbWarehouse };
+    current.toSale = previous.toSale;
+    current.toSaleByWbWarehouse = { ...previous.toSaleByWbWarehouse };
+  });
 }
 
 function warningFor(section: string, error: unknown) {
@@ -419,9 +457,18 @@ export async function GET(request: Request) {
   const cacheIsWaitingForWb = Number.isFinite(cachedRetryAt) && cachedRetryAt > now;
   const retryWindowExpired = Number.isFinite(cachedRetryAt) && cachedRetryAt <= now;
   const forceIsTooSoon = force && cached && now - cached.createdAt < FORCE_REFRESH_COOLDOWN_MS && !retryWindowExpired;
+  // A cooldown is a hard stop, not an invitation to keep retrying in the
+  // background. The person looking at the dashboard chooses the next refresh.
+  if (cached && cacheIsWaitingForWb) {
+    return NextResponse.json(await attachFfStocks(cached.payload, cabinetId), { headers: { "Cache-Control": "private, max-age=0" } });
+  }
   if (cached && cached.expiresAt > now && (!force || forceIsTooSoon)) {
     return NextResponse.json(await attachFfStocks({ ...cached.payload, retryAt: cacheIsWaitingForWb ? cached.payload.retryAt : null }, cabinetId), { headers: { "Cache-Control": "private, max-age=0" } });
   }
+
+  const persisted = await loadInventorySnapshot<DashboardPayload>(cabinetId).catch(() => null);
+  const durableSnapshot = persisted && Array.isArray(persisted.rows) ? persisted : null;
+  const lastKnown = cached?.payload ?? durableSnapshot;
 
   const refreshController = new AbortController();
   let refreshTimedOut = false;
@@ -438,11 +485,11 @@ export async function GET(request: Request) {
       getSellerWarehouses(token, refreshController.signal),
     ]);
 
-    if (refreshTimedOut && cached) {
+    if (refreshTimedOut && lastKnown) {
       const fallback = {
-        ...cached.payload,
+        ...lastKnown,
         retryAt: null,
-        warnings: [...new Set([...cached.payload.warnings, "WB отвечает дольше 25 секунд — показаны последние корректные данные"])],
+        warnings: [...new Set([...lastKnown.warnings, "WB отвечает дольше 25 секунд — показаны последние корректные данные"])],
       };
       return NextResponse.json(await attachFfStocks(fallback, cabinetId), { headers: { "Cache-Control": "private, max-age=0" } });
     }
@@ -451,8 +498,11 @@ export async function GET(request: Request) {
 
   const cards = cardsResult.status === "fulfilled" ? cardsResult.value : [];
   const sellerWarehouses = sellerWarehousesResult.status === "fulfilled" ? sellerWarehousesResult.value : [];
-  if (cardsResult.status === "rejected") warnings.push(warningFor("Карточки товаров", cardsResult.reason));
-  if (sellerWarehousesResult.status === "rejected") warnings.push(warningFor("Склады FBS продавца", sellerWarehousesResult.reason));
+  if (cardsResult.status === "rejected") warnings.push(`${warningFor("Карточки товаров", cardsResult.reason)}${lastKnown ? " — показаны последние корректные данные" : ""}`);
+  if (sellerWarehousesResult.status === "rejected") warnings.push(`${warningFor("Склады FBS продавца", sellerWarehousesResult.reason)}${lastKnown ? " — показаны последние корректные данные" : ""}`);
+  if (lastKnown && (cardsResult.status === "rejected" || sellerWarehousesResult.status === "rejected")) {
+    restorePreviousRows(rowMap, lastKnown.rows, () => undefined);
+  }
   for (const card of cards) {
     getOrCreateRow(rowMap, {
       nmId: card.nmID ?? card.nmId,
@@ -472,21 +522,30 @@ export async function GET(request: Request) {
 
   const fbsStockResult = cardsResult.status === "fulfilled" && sellerWarehousesResult.status === "fulfilled"
     ? await getFbsStocks(token, cards, sellerWarehouses, refreshController.signal)
-    : { stockByWarehouse: new Map<string, Map<number, number>>(), syncedWarehouseIds: [] as string[], errors: [] as Array<{ warehouse: string; reason: unknown }> };
-  if (refreshTimedOut && cached) {
+    : { stockByWarehouse: new Map<string, Map<number, number>>(), syncedWarehouseIds: [] as string[], errors: [] as Array<{ warehouseId: string; warehouse: string; reason: unknown }> };
+  if (refreshTimedOut && lastKnown) {
     const fallback = {
-      ...cached.payload,
+      ...lastKnown,
       retryAt: null,
-      warnings: [...new Set([...cached.payload.warnings, "WB отвечает дольше 25 секунд — показаны последние корректные данные"])],
+      warnings: [...new Set([...lastKnown.warnings, "WB отвечает дольше 25 секунд — показаны последние корректные данные"])],
     };
     return NextResponse.json(await attachFfStocks(fallback, cabinetId), { headers: { "Cache-Control": "private, max-age=0" } });
   }
-  for (const failure of fbsStockResult.errors) warnings.push(warningFor(`Остатки FBS · ${failure.warehouse}`, failure.reason));
+  for (const failure of fbsStockResult.errors) warnings.push(
+    `${warningFor(`Остатки FBS · ${failure.warehouse}`, failure.reason)}${lastKnown ? " — показаны последние корректные данные" : ""}`,
+  );
   for (const [warehouseId, stock] of fbsStockResult.stockByWarehouse) {
     for (const [nmId, quantity] of stock) {
       const row = getOrCreateRow(rowMap, { nmId });
       row.fbsStockByWbWarehouse[warehouseId] = (row.fbsStockByWbWarehouse[warehouseId] ?? 0) + quantity;
     }
+  }
+  const fallbackFbsWarehouseIds = [
+    ...fbsStockResult.errors.map((failure) => failure.warehouseId),
+    ...(cardsResult.status === "rejected" || sellerWarehousesResult.status === "rejected" ? lastKnown?.fbsStockSyncedWarehouseIds ?? [] : []),
+  ];
+  if (lastKnown && fallbackFbsWarehouseIds.length) {
+    restoreFbsStocksForWarehouses(rowMap, lastKnown.rows, fallbackFbsWarehouseIds);
   }
 
   if (wbStocksResult.status === "fulfilled") {
@@ -498,8 +557,8 @@ export async function GET(request: Request) {
       row.warehouses[warehouseName] = (row.warehouses[warehouseName] ?? 0) + (stock.quantity ?? 0);
     }
   } else {
-    if (cached) {
-      for (const previous of cached.payload.rows) {
+    if (lastKnown) {
+      for (const previous of lastKnown.rows) {
         const row = getOrCreateRow(rowMap, { nmId: previous.nmId ?? undefined, sku: previous.sku, name: previous.name, category: previous.category });
         row.warehouses = { ...previous.warehouses };
       }
@@ -570,7 +629,14 @@ export async function GET(request: Request) {
     }
     activeSupplies = supplies.size;
   } else {
-    warnings.push(warningFor("FBS-отгрузки", ordersResult.reason));
+    if (lastKnown) {
+      restoreFbsMovement(rowMap, lastKnown.rows);
+      activeSupplies = lastKnown.totals.activeSupplies;
+      handoverTiming = lastKnown.handoverTiming;
+      warnings.push(`${warningFor("FBS-отгрузки", ordersResult.reason)} — показаны последние корректные данные`);
+    } else {
+      warnings.push(warningFor("FBS-отгрузки", ordersResult.reason));
+    }
   }
 
   const rows = [...rowMap.values()].map((row) => {
@@ -609,9 +675,23 @@ export async function GET(request: Request) {
     risk: rows.filter((row) => row.status !== "В норме").length,
     activeSupplies,
   };
-  const updatedAt = new Date().toISOString();
-  const payload: DashboardPayload = { configured: true, cabinet, rows, warehouseNames, manualWarehouses: [], fbsStockSyncedWarehouseIds: fbsStockResult.syncedWarehouseIds, totals, warnings, retryAt, updatedAt, handoverTiming };
+  const snapshotIsComplete = cardsResult.status === "fulfilled"
+    && wbStocksResult.status === "fulfilled"
+    && ordersResult.status === "fulfilled"
+    && sellerWarehousesResult.status === "fulfilled"
+    && fbsStockResult.errors.length === 0;
+  // A partial response must never become the new baseline. Otherwise a 429
+  // would replace real FF/FBS values with zeros after the process restarts.
+  const updatedAt = snapshotIsComplete ? new Date().toISOString() : lastKnown?.updatedAt ?? new Date().toISOString();
+  const fbsStockSyncedWarehouseIds = [...new Set([
+    ...fbsStockResult.syncedWarehouseIds,
+    ...fallbackFbsWarehouseIds,
+  ])];
+  const payload: DashboardPayload = { configured: true, cabinet, rows, warehouseNames, manualWarehouses: [], fbsStockSyncedWarehouseIds, totals, warnings, retryAt, updatedAt, handoverTiming };
   memoryCache.set(cabinetId, { createdAt: now, expiresAt: now + CACHE_LIFETIME_MS, payload });
+  if (snapshotIsComplete) {
+    await saveInventorySnapshot(cabinetId, payload, updatedAt).catch(() => undefined);
+  }
 
   return NextResponse.json(await attachFfStocks(payload, cabinetId), { headers: { "Cache-Control": "private, max-age=0" } });
   } finally {

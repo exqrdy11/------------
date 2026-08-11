@@ -88,3 +88,9 @@ export const targetPriceProducts = sqliteTable("target_price_products", {
   primaryKey({ columns: [table.cabinetId, table.productKey] }),
   index("target_price_products_cabinet_orders").on(table.cabinetId, table.orders),
 ]);
+
+export const inventorySnapshots = sqliteTable("inventory_snapshots", {
+  cabinetId: text("cabinet_id").primaryKey(),
+  payloadJson: text("payload_json").notNull(),
+  updatedAt: text("updated_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+});
