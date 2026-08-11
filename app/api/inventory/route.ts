@@ -94,13 +94,45 @@ type DashboardPayload = {
 const CACHE_LIFETIME_MS = 2 * 60 * 1000;
 const FORCE_REFRESH_COOLDOWN_MS = 20 * 1000;
 const INVENTORY_REFRESH_TIMEOUT_MS = 25 * 1000;
-const WB_RATE_LIMIT_RETRY_MS = 20 * 1000;
+const WB_STOCK_REQUEST_INTERVAL_MS = 250;
 const memoryCache = new Map<CabinetId, { createdAt: number; expiresAt: number; payload: DashboardPayload }>();
+
+type WbApiError = Error & { status?: number; retryAfterSeconds?: number };
 
 function chunks<T>(items: T[], size: number): T[][] {
   const result: T[][] = [];
   for (let index = 0; index < items.length; index += size) result.push(items.slice(index, index + size));
   return result;
+}
+
+function secondsFromHeader(value: string | null) {
+  const seconds = Number(value);
+  return Number.isFinite(seconds) && seconds > 0 ? Math.ceil(seconds) : null;
+}
+
+function rateLimitRetrySeconds(response: Response) {
+  return secondsFromHeader(response.headers.get("X-Ratelimit-Retry") ?? response.headers.get("Retry-After"))
+    ?? secondsFromHeader(response.headers.get("X-Ratelimit-Reset"))
+    ?? 30;
+}
+
+function retryAfterSeconds(error: unknown) {
+  const apiError = error as WbApiError;
+  return apiError.status === 429 ? apiError.retryAfterSeconds ?? 30 : 0;
+}
+
+function pause(milliseconds: number, signal?: AbortSignal) {
+  return new Promise<void>((resolve, reject) => {
+    if (signal?.aborted) {
+      reject(new DOMException("The operation was aborted", "AbortError"));
+      return;
+    }
+    const timer = setTimeout(resolve, milliseconds);
+    signal?.addEventListener("abort", () => {
+      clearTimeout(timer);
+      reject(new DOMException("The operation was aborted", "AbortError"));
+    }, { once: true });
+  });
 }
 
 async function wbFetch<T>(token: string, url: string, init?: RequestInit, signal?: AbortSignal): Promise<T> {
@@ -116,8 +148,9 @@ async function wbFetch<T>(token: string, url: string, init?: RequestInit, signal
   });
 
   if (!response.ok) {
-    const error = new Error(`WB API ${response.status}`);
-    (error as Error & { status?: number }).status = response.status;
+    const error = new Error(`WB API ${response.status}`) as WbApiError;
+    error.status = response.status;
+    if (response.status === 429) error.retryAfterSeconds = rateLimitRetrySeconds(response);
     throw error;
   }
 
@@ -179,10 +212,12 @@ async function getFbsStocks(token: string, cards: WbCard[], warehouses: Array<{ 
   const chrtIds = [...chrtToNmId.keys()];
   if (!chrtIds.length || !warehouses.length) return { stockByWarehouse: new Map<string, Map<number, number>>(), syncedWarehouseIds: [] as string[], errors: [] as Array<{ warehouse: string; reason: unknown }> };
 
-  const results = await Promise.all(warehouses.map(async (warehouse) => {
+  const results: Array<{ warehouse: { id: number; name: string }; stock: Map<number, number>; error: unknown }> = [];
+  for (const [warehouseIndex, warehouse] of warehouses.entries()) {
     try {
       const stock = new Map<number, number>();
-      for (const chunk of chunks(chrtIds, 1000)) {
+      for (const [chunkIndex, chunk] of chunks(chrtIds, 1000).entries()) {
+        if (warehouseIndex > 0 || chunkIndex > 0) await pause(WB_STOCK_REQUEST_INTERVAL_MS, signal);
         const response = await wbFetch<{ stocks?: WbFbsStock[] }>(token, `${WB_MARKETPLACE}/api/v3/stocks/${warehouse.id}`, {
           method: "POST",
           body: JSON.stringify({ chrtIds: chunk }),
@@ -193,11 +228,11 @@ async function getFbsStocks(token: string, cards: WbCard[], warehouses: Array<{ 
           stock.set(nmId, (stock.get(nmId) ?? 0) + Math.max(0, Number(item.amount) || 0));
         }
       }
-      return { warehouse, stock, error: null as unknown };
+      results.push({ warehouse, stock, error: null });
     } catch (error) {
-      return { warehouse, stock: new Map<number, number>(), error };
+      results.push({ warehouse, stock: new Map<number, number>(), error });
     }
-  }));
+  }
 
   return {
     stockByWarehouse: new Map(results.filter((result) => !result.error).map((result) => [String(result.warehouse.id), result.stock])),
@@ -547,10 +582,12 @@ export async function GET(request: Request) {
     return priority[a.status] - priority[b.status] || a.name.localeCompare(b.name, "ru");
   });
 
-  const rateLimited = [cardsResult, wbStocksResult, ordersResult, sellerWarehousesResult]
-    .some((result) => result.status === "rejected" && (result.reason as Error & { status?: number })?.status === 429)
-    || fbsStockResult.errors.some((failure) => (failure.reason as Error & { status?: number })?.status === 429);
-  const retryAt = rateLimited ? new Date(now + WB_RATE_LIMIT_RETRY_MS).toISOString() : null;
+  const rateLimitDelays = [cardsResult, wbStocksResult, ordersResult, sellerWarehousesResult]
+    .filter((result): result is PromiseRejectedResult => result.status === "rejected")
+    .map((result) => retryAfterSeconds(result.reason))
+    .concat(fbsStockResult.errors.map((failure) => retryAfterSeconds(failure.reason)))
+    .filter((seconds) => seconds > 0);
+  const retryAt = rateLimitDelays.length ? new Date(now + Math.max(...rateLimitDelays) * 1000).toISOString() : null;
 
   if (!rows.length && warnings.length) {
     return NextResponse.json(
