@@ -15,6 +15,7 @@ export type FfSettlement = {
   quantity: number;
   rateKopecks: number;
   totalKopecks: number;
+  untrackedHandoverQuantity: number;
   trackingStartedAt: string | null;
 };
 
@@ -32,7 +33,7 @@ export async function getFfSettlement(input: { cabinetId: CabinetId; warehouseId
   const d1 = getD1();
   const start = `${input.from}T00:00:00.000Z`;
   const end = `${input.to}T23:59:59.999Z`;
-  const [ordersResult, trackingResult] = await Promise.all([
+  const [ordersResult, untrackedResult, trackingResult] = await Promise.all([
     d1.prepare(`
       SELECT order_id AS orderId, handed_over_at AS handedOverAt
       FROM fbs_order_handover_metrics
@@ -43,6 +44,14 @@ export async function getFfSettlement(input: { cabinetId: CabinetId; warehouseId
         AND handed_over_at <= ?
       ORDER BY handed_over_at ASC, order_id ASC
     `).bind(input.cabinetId, String(warehouse.wbWarehouseId), start, end).all<FfSettlementOrder>(),
+    d1.prepare(`
+      SELECT COUNT(*) AS count
+      FROM fbs_order_handover_metrics
+      WHERE cabinet_id = ?
+        AND warehouse_id = ?
+        AND first_state = 'handover'
+        AND handed_over_at IS NULL
+    `).bind(input.cabinetId, String(warehouse.wbWarehouseId)).first<{ count: number }>(),
     d1.prepare("SELECT MIN(first_seen_at) AS trackingStartedAt FROM fbs_order_handover_metrics WHERE cabinet_id = ?").bind(input.cabinetId).first<{ trackingStartedAt: string | null }>(),
   ]);
   const orders = (ordersResult.results ?? []).map((order) => ({
@@ -58,6 +67,7 @@ export async function getFfSettlement(input: { cabinetId: CabinetId; warehouseId
     quantity: orders.length,
     rateKopecks,
     totalKopecks: orders.length * rateKopecks,
+    untrackedHandoverQuantity: Math.max(0, Number(untrackedResult?.count) || 0),
     trackingStartedAt: trackingResult?.trackingStartedAt ?? null,
   };
 }

@@ -125,6 +125,7 @@ type FfSettlement = {
   quantity: number;
   rateKopecks: number;
   totalKopecks: number;
+  untrackedHandoverQuantity: number;
   trackingStartedAt: string | null;
 };
 
@@ -826,7 +827,7 @@ export default function Home() {
   const fulfillmentListMeta: Record<FulfillmentList, { kicker: string; title: string; empty: string; primary: string; footer: string }> = {
     available: { kicker: "ОСТАТКИ НА ФФ", title: "Доступный остаток по артикулам", empty: "На этом ФФ нет доступного остатка", primary: "Доступно ФФ", footer: "Из остатка вычтены только новые и собираемые заказы FBS" },
     reserved: { kicker: "НОВЫЕ FBS", title: "Новые заказы FBS", empty: "Нет новых заказов FBS", primary: "Новые FBS", footer: "Статусы new / confirm: заказ ещё на ФФ и вычтен из доступного остатка" },
-    receiving: { kicker: "ПЕРЕДАНЫ WB", title: "Заказы, переданные Wildberries", empty: "Нет заказов, переданных WB", primary: "Переданы WB", footer: "Статус complete: WB принял заказ в доставку или на сортировку, без второго вычета" },
+    receiving: { kicker: "В ДОСТАВКЕ WB", title: "Заказы, переданные Wildberries", empty: "Нет заказов, переданных WB", primary: "В доставке WB", footer: "Статус complete: ФФ передал заказ WB. Это одна оплачиваемая обработка, без повторного учёта после завершения." },
     toSale: { kicker: "ПРОДАНО", title: "Фактически выкупленные товары", empty: "Нет выкупленных товаров", primary: "Продано", footer: "Только wbStatus sold: выкуп покупателем, без отмен" },
   };
   const activeFulfillmentListMeta = fulfillmentListMeta[fulfillmentList];
@@ -1341,7 +1342,7 @@ export default function Home() {
           ) : activeView === "payments" ? (
             <section className="settlement-panel">
               <div className="settlement-heading">
-                <div><span className="section-kicker">СВЕРКА С ФУЛФИЛМЕНТОМ</span><h2>Сколько оплатить ФФ</h2><p>Берём только заказы, которые WB принял в доставку: один переданный заказ = одна обработанная единица.</p></div>
+                <div><span className="section-kicker">СВЕРКА С ФУЛФИЛМЕНТОМ</span><h2>Сколько оплатить ФФ</h2><p>Оплата возникает, когда заказ впервые перешёл во «В доставке»: ФФ передал его Wildberries. Поздний переход в «Завершённые», выкуп или отмена повторно не оплачиваются.</p></div>
                 {canManage && <button type="button" className="secondary-btn" onClick={() => navigateTo("manual")}>Настроить ставки</button>}
               </div>
               <form className="settlement-controls" onSubmit={(event) => { event.preventDefault(); void loadSettlement(); }}>
@@ -1353,14 +1354,15 @@ export default function Home() {
               {settlementError && <div className="settlement-error" role="alert">{settlementError}</div>}
               {settlement && <>
                 <div className="settlement-summary">
-                  <article><span>Передано WB</span><strong>{formatNumber.format(settlement.quantity)} <small>ед.</small></strong><p>За {shortDate(settlement.from)} — {shortDate(settlement.to)}</p></article>
+                  <article><span>В доставке WB · к оплате</span><strong>{formatNumber.format(settlement.quantity)} <small>ед.</small></strong><p>За {shortDate(settlement.from)} — {shortDate(settlement.to)}</p></article>
                   <article><span>Ставка ФФ</span><strong>{settlement.rateKopecks > 0 ? `${formatRate.format(kopecksToRubles(settlement.rateKopecks))} ₽` : "—"}<small>{settlement.rateKopecks > 0 ? " / ед." : ""}</small></strong><p>{settlement.rateKopecks > 0 ? "Настроена владельцем" : "Ставка пока не задана"}</p></article>
                   <article className="settlement-total"><span>К оплате</span><strong>{settlement.rateKopecks > 0 ? formatMoney.format(kopecksToRubles(settlement.totalKopecks)) : "—"}</strong><p>{settlement.rateKopecks > 0 ? `${formatNumber.format(settlement.quantity)} ед. × ${formatRate.format(kopecksToRubles(settlement.rateKopecks))} ₽` : "Владелец должен задать ставку ФФ"}</p></article>
+                  {settlement.untrackedHandoverQuantity > 0 && <article className="settlement-safety"><span>Не включены автоматически</span><strong>{formatNumber.format(settlement.untrackedHandoverQuantity)} <small>ед.</small></strong><p>Они уже были «В доставке» при старте учёта; точное время передачи WB неизвестно.</p></article>}
                 </div>
                 <section className="settlement-orders">
-                  <div className="settlement-orders-heading"><div><span className="section-kicker">ОСНОВАНИЕ ДЛЯ СЧЁТА</span><h3>Переданные WB заказы</h3></div><span>{settlement.orders.length} ед.</span></div>
-                  <div className="settlement-table-wrap"><table><thead><tr><th>Заказ WB</th><th>Передан WB</th><th>Количество</th><th>Сумма</th></tr></thead><tbody>{settlement.orders.map((order) => <tr key={order.orderId}><td><b>№ {order.orderId}</b></td><td>{formatDateTime(order.handedOverAt)}</td><td>1 ед.</td><td>{settlement.rateKopecks > 0 ? formatMoney.format(kopecksToRubles(settlement.rateKopecks)) : "—"}</td></tr>)}</tbody></table>{!settlement.orders.length && <div className="empty-state"><strong>За этот период переданных WB заказов пока нет</strong><span>Сумма к оплате появится после перехода заказа из «Новые» в «Переданы WB».</span></div>}</div>
-                  <footer>Сверка считает только подтверждённый переход new / confirm → complete. Заказ со стикером доставки не считается второй раз.</footer>
+                  <div className="settlement-orders-heading"><div><span className="section-kicker">ОСНОВАНИЕ ДЛЯ СЧЁТА</span><h3>Заказы, переданные WB</h3></div><span>{settlement.orders.length} ед.</span></div>
+                  <div className="settlement-table-wrap"><table><thead><tr><th>Заказ WB</th><th>Передан WB</th><th>Количество</th><th>Сумма</th></tr></thead><tbody>{settlement.orders.map((order) => <tr key={order.orderId}><td><b>№ {order.orderId}</b></td><td>{formatDateTime(order.handedOverAt)}</td><td>1 ед.</td><td>{settlement.rateKopecks > 0 ? formatMoney.format(kopecksToRubles(settlement.rateKopecks)) : "—"}</td></tr>)}</tbody></table>{!settlement.orders.length && <div className="empty-state"><strong>За этот период новых передач WB пока нет</strong><span>Сумма появится после перехода заказа из «Новые / На сборке» во «В доставке».</span></div>}</div>
+                  <footer>Уникальный ID заказа попадает в сверку один раз — в момент передачи WB. Дальнейшие статусы, стикер доставки, «Завершённые», выкуп и отмена сумму не дублируют.</footer>
                 </section>
                 <p className="settlement-note">{settlement.trackingStartedAt ? `Учёт переходов ведётся с ${formatDateTime(settlement.trackingStartedAt)}. Для прошлых периодов до этой даты WB не передаёт точный момент передачи заказа.` : "После ближайшего обновления начнём фиксировать передачи WB для сверки."}</p>
               </>}

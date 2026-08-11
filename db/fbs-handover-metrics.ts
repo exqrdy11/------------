@@ -61,10 +61,11 @@ function isParsableDate(value: string | null) {
 }
 
 /**
- * WB does not expose the timestamp of the FBS handover. We therefore start
- * timing only when the dashboard observes an order before handover and later
- * observes it in `complete`. This prevents old orders from being counted with
- * a made-up handover time.
+ * WB does not expose the timestamp of the FBS handover. We therefore record a
+ * payable handover only when the dashboard first sees the order before handover
+ * and later sees it in `complete`. An order that was already in delivery on
+ * the first observation is deliberately not backdated: this prevents charging
+ * the same unit twice during the initial reconciliation.
  */
 export async function recordFbsHandoverObservations(input: { cabinetId: CabinetId; orders: ObservedFbsOrder[]; observedAt?: string }) {
   const observedAt = input.observedAt ?? new Date().toISOString();
@@ -85,8 +86,8 @@ export async function recordFbsHandoverObservations(input: { cabinetId: CabinetI
       d1.prepare(`
         UPDATE fbs_order_handover_metrics
         SET
-          warehouse_id = ?,
-          created_at = ?,
+          warehouse_id = CASE WHEN handed_over_at IS NULL THEN ? ELSE warehouse_id END,
+          created_at = CASE WHEN handed_over_at IS NULL THEN ? ELSE created_at END,
           handed_over_at = CASE
             WHEN handed_over_at IS NULL AND first_state = 'before' AND ? = 'handover' THEN ?
             ELSE handed_over_at
