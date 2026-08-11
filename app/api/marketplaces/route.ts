@@ -72,7 +72,9 @@ async function checkYandex(disabled: boolean): Promise<MarketplaceConnection> {
 
   try {
     const response = await fetch(`${YANDEX_MARKET_API}/v2/campaigns?limit=50`, {
-      headers: { Authorization: `Api-Key ${apiKey}`, Accept: "application/json" },
+      // Yandex Market uses its own Api-Key header. Authorization is only for
+      // legacy OAuth tokens, so placing an API key there produces a 401.
+      headers: { "Api-Key": apiKey, Accept: "application/json" },
       cache: "no-store",
       signal: timeoutSignal(),
     });
