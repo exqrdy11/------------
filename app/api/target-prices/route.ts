@@ -1,24 +1,16 @@
 import { NextResponse } from "next/server";
-import {
-  getTargetPriceCandidateSnapshot,
-  getTargetPriceRefreshCooldown,
-  listTargetPrices,
-  reserveTargetPriceRefresh,
-  saveTargetPriceCandidateSnapshot,
-  saveTargetPrices,
-  type TargetPriceCompetitor,
-  type TargetPriceRow,
-} from "@/db/target-prices";
-import { cabinetToken, getAdminCabinet, getOwnerSession } from "@/lib/admin-auth";
+import { getTargetPriceRefreshCooldown, listTargetPrices, releaseTargetPriceRefresh, reserveTargetPriceRefresh, saveTargetPrices, type TargetPriceCompetitor, type TargetPriceRow } from "@/db/target-prices";
+import { cabinetToken, getAdminCabinet, getAdminSession } from "@/lib/admin-auth";
 
 export const dynamic = "force-dynamic";
 
 const WB_CARDS_API = "https://card.wb.ru/cards/v4/detail";
-const WB_SEARCH_API = "https://search.wb.ru/exactmatch/ru/common/v18/search";
 const WB_SELLER_PRICES_API = "https://discounts-prices-api.wildberries.ru/api/v2/list/goods/filter";
 const MOSCOW_DESTINATION = "-1257786";
 const CHUNK_SIZE = 50;
-const TARGET_PRICE_REFRESH_COOLDOWN_MS = 5 * 60 * 1000;
+// A short lock protects WB from two simultaneous refreshes. It is not a
+// schedule: any user can make a new manual refresh as soon as it completes.
+const TARGET_PRICE_REFRESH_REQUEST_LOCK_MS = 30 * 1000;
 
 type WbCard = {
   id?: number;
@@ -31,7 +23,6 @@ type WbCard = {
 // WB returns `products` at the root of this public endpoint. Older examples
 // used `data.products`, so accept both shapes while the public API evolves.
 type WbCardsResponse = { products?: WbCard[]; data?: { products?: WbCard[] } };
-type WbSearchResponse = { products?: WbCard[]; data?: { products?: WbCard[] } };
 type SellerPrice = { nmId?: number; discountedPrice?: number };
 type SellerPricesResponse = { data?: { listGoods?: SellerPrice[] } };
 type PricePoint = { price: number | null; name: string | null };
@@ -89,52 +80,14 @@ async function fetchPublicPrices(nmIds: number[]) {
   return { prices, errors: [...new Set(errors)] };
 }
 
-async function fetchSearchCandidates(query: string) {
-  try {
-    const params = new URLSearchParams({
-      appType: "1",
-      curr: "rub",
-      dest: MOSCOW_DESTINATION,
-      lang: "ru",
-      query,
-      resultset: "catalog",
-      sort: "popular",
-      spp: "30",
-    });
-    const response = await fetch(`${WB_SEARCH_API}?${params}`, {
-      headers: { Accept: "application/json", "Accept-Language": "ru-RU,ru;q=0.9" },
-      cache: "no-store",
-      signal: AbortSignal.timeout(10_000),
-    });
-    if (!response.ok) return { candidates: [] as WbCard[], error: publicRefreshError(response.status) };
-    const data = await response.json() as WbSearchResponse;
-    return { candidates: data.products ?? data.data?.products ?? [], error: null };
-  } catch {
-    return { candidates: [] as WbCard[], error: publicRefreshError() };
-  }
-}
-
-function cardToCompetitor(card: WbCard, source: string): TargetPriceCompetitor | null {
-  if (!card.id) return null;
-  return {
-    nmId: card.id,
-    price: priceFromCard(card),
-    source,
-    name: [card.brand, card.name].filter(Boolean).join(" · ") || null,
-    updatedAt: null,
-    error: null,
-  };
-}
-
 function findTargetPriceRow(rows: TargetPriceRow[], sku: unknown, nmId: unknown) {
   const normalizedSku = typeof sku === "string" ? sku.trim() : "";
   const normalizedNmId = Number(nmId);
   return rows.find((row) => (normalizedNmId && row.nmId === normalizedNmId) || (normalizedSku && row.sku === normalizedSku));
 }
 
-function cooldownMessage(cooldownUntil: string | null, kind: "prices" | "competitors") {
-  const subject = kind === "prices" ? "Цены" : "Подбор конкурентов";
-  return `${subject} уже обновляются или были обновлены недавно. Следующая попытка доступна после общего 5-минутного таймера.`;
+function cooldownMessage() {
+  return "Цены уже обновляет другой пользователь. Дождитесь завершения текущего запроса и повторите попытку.";
 }
 
 async function fetchSellerPrices(token: string, nmIds: number[]) {
@@ -161,60 +114,17 @@ export async function GET(request: Request) {
   const cabinetId = await getAdminCabinet(request);
   if (!cabinetId) return NextResponse.json({ error: "Требуется вход администратора" }, { status: 401, headers: { "Cache-Control": "no-store" } });
   const rows = await listTargetPrices(cabinetId);
-  const url = new URL(request.url);
-  const sku = url.searchParams.get("sku");
-  const nmId = url.searchParams.get("nmId");
-  if (url.searchParams.get("candidates") === "1") {
-    const row = findTargetPriceRow(rows, sku, nmId);
-    if (!row) return NextResponse.json({ error: "Товар для подбора конкурента не найден" }, { status: 404, headers: { "Cache-Control": "no-store" } });
-    const [snapshot, cooldownUntil] = await Promise.all([
-      getTargetPriceCandidateSnapshot(cabinetId, row),
-      getTargetPriceRefreshCooldown(cabinetId, "competitors"),
-    ]);
-    return NextResponse.json({
-      candidates: snapshot?.candidates ?? [],
-      query: snapshot?.query ?? row.searchQuery?.trim() ?? row.sku,
-      updatedAt: snapshot?.updatedAt ?? null,
-      warning: snapshot?.warning ?? null,
-      cooldownUntil,
-    }, { headers: { "Cache-Control": "no-store" } });
-  }
   const latest = rows.reduce<string | null>((result, row) => row.refreshedAt && (!result || row.refreshedAt > result) ? row.refreshedAt : result, null);
   const cooldownUntil = await getTargetPriceRefreshCooldown(cabinetId, "prices");
   return NextResponse.json({ rows, updatedAt: latest, cooldownUntil }, { headers: { "Cache-Control": "no-store" } });
 }
 
 export async function POST(request: Request) {
-  const session = await getOwnerSession(request);
-  if (!session) return NextResponse.json({ error: "Обновлять цены может только владелец кабинета" }, { status: 403, headers: { "Cache-Control": "no-store" } });
+  const session = await getAdminSession(request);
+  if (!session) return NextResponse.json({ error: "Требуется вход администратора" }, { status: 401, headers: { "Cache-Control": "no-store" } });
   const body = await request.json().catch(() => null) as { action?: unknown; sku?: unknown; nmId?: unknown; competitorNmId?: unknown } | null;
-  if (body?.action === "refresh-candidates") {
-    const rows = await listTargetPrices(session.cabinetId);
-    const row = findTargetPriceRow(rows, body.sku, body.nmId);
-    if (!row) return NextResponse.json({ error: "Товар для подбора конкурента не найден" }, { status: 404, headers: { "Cache-Control": "no-store" } });
-    const reservation = await reserveTargetPriceRefresh(session.cabinetId, "competitors", TARGET_PRICE_REFRESH_COOLDOWN_MS);
-    if (!reservation.reserved) return NextResponse.json({ error: cooldownMessage(reservation.cooldownUntil, "competitors"), cooldownUntil: reservation.cooldownUntil }, { status: 429, headers: { "Cache-Control": "no-store" } });
-
-    const previous = await getTargetPriceCandidateSnapshot(session.cabinetId, row);
-    const query = row.searchQuery?.trim() || row.sku;
-    const excluded = new Set([row.nmId, ...row.competitors.map((competitor) => competitor.nmId)].filter((id): id is number => Boolean(id)));
-    const result = query ? await fetchSearchCandidates(query) : { candidates: [] as WbCard[], error: "У товара нет запроса для поиска конкурентов" };
-    const candidates = result.candidates
-      .flatMap((card) => {
-        const competitor = cardToCompetitor(card, "поиск WB");
-        return competitor && !excluded.has(competitor.nmId) ? [competitor] : [];
-      })
-      .filter((candidate, index, all) => all.findIndex((item) => item.nmId === candidate.nmId) === index)
-      .slice(0, 12)
-      .map((candidate) => ({ ...candidate, updatedAt: new Date().toISOString() }));
-    const warning = result.error ? `${result.error}${previous?.candidates.length ? " Показана предыдущая сохранённая подборка." : ""}` : null;
-    const snapshot = result.error && previous
-      ? { ...previous, warning }
-      : { query, candidates, updatedAt: new Date().toISOString(), warning };
-    if (!result.error) await saveTargetPriceCandidateSnapshot(session.cabinetId, row, snapshot);
-    return NextResponse.json({ ...snapshot, cooldownUntil: reservation.cooldownUntil }, { headers: { "Cache-Control": "no-store" } });
-  }
   if (body?.action === "add-competitor" || body?.action === "remove-competitor") {
+    if (session.role !== "owner") return NextResponse.json({ error: "Менять список конкурентов может только владелец кабинета" }, { status: 403, headers: { "Cache-Control": "no-store" } });
     const rows = await listTargetPrices(session.cabinetId);
     const row = findTargetPriceRow(rows, body.sku, body.nmId);
     if (!row) return NextResponse.json({ error: "Товар для изменения конкурентов не найден" }, { status: 404, headers: { "Cache-Control": "no-store" } });
@@ -224,15 +134,13 @@ export async function POST(request: Request) {
     if (body.action === "remove-competitor") {
       competitors = competitors.filter((competitor) => competitor.nmId !== competitorNmId);
     } else if (!competitors.some((competitor) => competitor.nmId === competitorNmId)) {
-      const snapshot = await getTargetPriceCandidateSnapshot(session.cabinetId, row);
-      const selectedCandidate = snapshot?.candidates.find((candidate) => candidate.nmId === competitorNmId);
       competitors = [...competitors, {
         nmId: competitorNmId,
-        price: selectedCandidate?.price ?? null,
+        price: null,
         source: "выбран вручную",
-        name: selectedCandidate?.name ?? null,
-        updatedAt: selectedCandidate?.updatedAt ?? null,
-        error: selectedCandidate ? selectedCandidate.error : "Цена появится после отдельного обновления цен.",
+        name: null,
+        updatedAt: null,
+        error: "Цена появится после обновления цен.",
       }];
     }
     const updatedRows = rows.map((item) => item.sku === row.sku && item.nmId === row.nmId
@@ -249,38 +157,42 @@ export async function POST(request: Request) {
   const token = cabinetToken(session.cabinetId);
   if (!token) return NextResponse.json({ error: "Токен Wildberries ещё не подключён" }, { status: 503, headers: { "Cache-Control": "no-store" } });
 
-  const reservation = await reserveTargetPriceRefresh(session.cabinetId, "prices", TARGET_PRICE_REFRESH_COOLDOWN_MS);
-  if (!reservation.reserved) return NextResponse.json({ error: cooldownMessage(reservation.cooldownUntil, "prices"), cooldownUntil: reservation.cooldownUntil }, { status: 429, headers: { "Cache-Control": "no-store" } });
+  const reservation = await reserveTargetPriceRefresh(session.cabinetId, "prices", TARGET_PRICE_REFRESH_REQUEST_LOCK_MS);
+  if (!reservation.reserved) return NextResponse.json({ error: cooldownMessage(), cooldownUntil: reservation.cooldownUntil }, { status: 429, headers: { "Cache-Control": "no-store" } });
 
-  const rows = await listTargetPrices(session.cabinetId);
-  const publicIds = [...new Set(rows.flatMap((row) => [row.nmId, ...row.competitors.map((competitor) => competitor.nmId)]).filter((id): id is number => Boolean(id)))];
-  const ownIds = [...new Set(rows.map((row) => row.nmId).filter((id): id is number => Boolean(id)))];
-  const [publicResult, sellerResult] = await Promise.all([fetchPublicPrices(publicIds), fetchSellerPrices(token, ownIds)]);
-  const refreshedAt = new Date().toISOString();
-  const sharedErrors = [...publicResult.errors, ...(sellerResult.error ? [sellerResult.error] : [])];
-  const refreshed = rows.map<TargetPriceRow>((row) => {
-    const publicOwn = row.nmId ? publicResult.prices.get(row.nmId) : undefined;
-    const sellerPrice = row.nmId ? sellerResult.prices.get(row.nmId) : undefined;
-    const competitors = row.competitors.map<TargetPriceCompetitor>((competitor) => {
-      const point = publicResult.prices.get(competitor.nmId);
-      if (!point) return { ...competitor, error: publicResult.errors[0] ?? competitor.error };
-      return { ...competitor, price: point.price ?? competitor.price, name: point.name ?? competitor.name, updatedAt: refreshedAt, error: point.price === null ? "WB не отдал цену этой карточки" : null };
+  try {
+    const rows = await listTargetPrices(session.cabinetId);
+    const publicIds = [...new Set(rows.flatMap((row) => [row.nmId, ...row.competitors.map((competitor) => competitor.nmId)]).filter((id): id is number => Boolean(id)))];
+    const ownIds = [...new Set(rows.map((row) => row.nmId).filter((id): id is number => Boolean(id)))];
+    const [publicResult, sellerResult] = await Promise.all([fetchPublicPrices(publicIds), fetchSellerPrices(token, ownIds)]);
+    const refreshedAt = new Date().toISOString();
+    const sharedErrors = [...publicResult.errors, ...(sellerResult.error ? [sellerResult.error] : [])];
+    const refreshed = rows.map<TargetPriceRow>((row) => {
+      const publicOwn = row.nmId ? publicResult.prices.get(row.nmId) : undefined;
+      const sellerPrice = row.nmId ? sellerResult.prices.get(row.nmId) : undefined;
+      const competitors = row.competitors.map<TargetPriceCompetitor>((competitor) => {
+        const point = publicResult.prices.get(competitor.nmId);
+        if (!point) return { ...competitor, error: publicResult.errors[0] ?? competitor.error };
+        return { ...competitor, price: point.price ?? competitor.price, name: point.name ?? competitor.name, updatedAt: refreshedAt, error: point.price === null ? "WB не отдал цену этой карточки" : null };
+      });
+      const currentPrice = publicOwn?.price ?? row.currentPrice;
+      const priceBeforeSpp = sellerPrice ?? row.priceBeforeSpp;
+      const sppPercent = sellerPrice && currentPrice && sellerPrice > currentPrice ? 1 - currentPrice / sellerPrice : row.sppPercent;
+      const rowErrors = [...sharedErrors, ...competitors.flatMap((competitor) => competitor.error ? [competitor.error] : [])];
+      return {
+        ...row,
+        currentPrice,
+        priceBeforeSpp,
+        sppPercent,
+        competitors,
+        updatedAt: publicOwn?.price !== undefined || sellerPrice !== undefined ? refreshedAt : row.updatedAt,
+        refreshedAt,
+        refreshError: rowErrors.length ? [...new Set(rowErrors)].join(" ") : null,
+      };
     });
-    const currentPrice = publicOwn?.price ?? row.currentPrice;
-    const priceBeforeSpp = sellerPrice ?? row.priceBeforeSpp;
-    const sppPercent = sellerPrice && currentPrice && sellerPrice > currentPrice ? 1 - currentPrice / sellerPrice : row.sppPercent;
-    const rowErrors = [...sharedErrors, ...competitors.flatMap((competitor) => competitor.error ? [competitor.error] : [])];
-    return {
-      ...row,
-      currentPrice,
-      priceBeforeSpp,
-      sppPercent,
-      competitors,
-      updatedAt: publicOwn?.price !== undefined || sellerPrice !== undefined ? refreshedAt : row.updatedAt,
-      refreshedAt,
-      refreshError: rowErrors.length ? [...new Set(rowErrors)].join(" ") : null,
-    };
-  });
-  await saveTargetPrices(session.cabinetId, refreshed);
-  return NextResponse.json({ rows: refreshed, updatedAt: refreshedAt, warnings: sharedErrors, cooldownUntil: reservation.cooldownUntil }, { headers: { "Cache-Control": "no-store" } });
+    await saveTargetPrices(session.cabinetId, refreshed);
+    return NextResponse.json({ rows: refreshed, updatedAt: refreshedAt, warnings: sharedErrors, cooldownUntil: null }, { headers: { "Cache-Control": "no-store" } });
+  } finally {
+    await releaseTargetPriceRefresh(session.cabinetId, "prices").catch(() => undefined);
+  }
 }

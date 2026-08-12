@@ -40,17 +40,6 @@ const createTargetPricesTableSql = `
   )
 `;
 const createTargetPricesIndexSql = "CREATE INDEX IF NOT EXISTS target_price_products_cabinet_orders ON target_price_products (cabinet_id, orders DESC)";
-const createTargetPriceCandidatesTableSql = `
-  CREATE TABLE IF NOT EXISTS target_price_candidate_snapshots (
-    cabinet_id TEXT NOT NULL,
-    product_key TEXT NOT NULL,
-    query TEXT NOT NULL,
-    candidates_json TEXT NOT NULL DEFAULT '[]',
-    updated_at TEXT,
-    warning TEXT,
-    PRIMARY KEY (cabinet_id, product_key)
-  )
-`;
 const createTargetPriceRefreshLocksTableSql = `
   CREATE TABLE IF NOT EXISTS target_price_refresh_locks (
     cabinet_id TEXT NOT NULL,
@@ -80,21 +69,7 @@ type TargetPriceDbRow = {
   refresh_error: string | null;
 };
 
-type TargetPriceCandidateDbRow = {
-  query: string;
-  candidates_json: string;
-  updated_at: string | null;
-  warning: string | null;
-};
-
-export type TargetPriceCandidateSnapshot = {
-  query: string;
-  candidates: TargetPriceCompetitor[];
-  updatedAt: string | null;
-  warning: string | null;
-};
-
-export type TargetPriceRefreshKind = "prices" | "competitors";
+export type TargetPriceRefreshKind = "prices";
 
 let initializePromise: Promise<D1Database> | null = null;
 
@@ -156,7 +131,6 @@ async function getTargetPricesDb() {
       await d1.batch([
         d1.prepare(createTargetPricesTableSql),
         d1.prepare(createTargetPricesIndexSql),
-        d1.prepare(createTargetPriceCandidatesTableSql),
         d1.prepare(createTargetPriceRefreshLocksTableSql),
       ]);
       return d1;
@@ -255,43 +229,6 @@ export async function saveTargetPrices(cabinetId: CabinetId, rows: TargetPriceRo
   )));
 }
 
-export async function getTargetPriceCandidateSnapshot(cabinetId: CabinetId, row: Pick<TargetPriceRow, "sku" | "nmId">) {
-  const d1 = await getTargetPricesDb();
-  const snapshot = await d1.prepare(`
-    SELECT query, candidates_json, updated_at, warning
-    FROM target_price_candidate_snapshots
-    WHERE cabinet_id = ? AND product_key = ?
-  `).bind(cabinetId, productKey(row)).first<TargetPriceCandidateDbRow>();
-  if (!snapshot) return null;
-  return {
-    query: snapshot.query,
-    candidates: parseCompetitors(snapshot.candidates_json),
-    updatedAt: snapshot.updated_at,
-    warning: snapshot.warning,
-  } satisfies TargetPriceCandidateSnapshot;
-}
-
-export async function saveTargetPriceCandidateSnapshot(cabinetId: CabinetId, row: Pick<TargetPriceRow, "sku" | "nmId">, snapshot: TargetPriceCandidateSnapshot) {
-  const d1 = await getTargetPricesDb();
-  await d1.prepare(`
-    INSERT INTO target_price_candidate_snapshots (
-      cabinet_id, product_key, query, candidates_json, updated_at, warning
-    ) VALUES (?, ?, ?, ?, ?, ?)
-    ON CONFLICT(cabinet_id, product_key) DO UPDATE SET
-      query = excluded.query,
-      candidates_json = excluded.candidates_json,
-      updated_at = excluded.updated_at,
-      warning = excluded.warning
-  `).bind(
-    cabinetId,
-    productKey(row),
-    snapshot.query,
-    JSON.stringify(snapshot.candidates),
-    snapshot.updatedAt,
-    snapshot.warning,
-  ).run();
-}
-
 export async function getTargetPriceRefreshCooldown(cabinetId: CabinetId, refreshKind: TargetPriceRefreshKind) {
   const d1 = await getTargetPricesDb();
   const lock = await d1.prepare(`
@@ -320,4 +257,9 @@ export async function reserveTargetPriceRefresh(cabinetId: CabinetId, refreshKin
   `).bind(cabinetId, refreshKind, cooldownUntil, nowIso, nowIso).all<{ available_at: string }>();
   if (reserved.results?.length) return { reserved: true, cooldownUntil };
   return { reserved: false, cooldownUntil: await getTargetPriceRefreshCooldown(cabinetId, refreshKind) };
+}
+
+export async function releaseTargetPriceRefresh(cabinetId: CabinetId, refreshKind: TargetPriceRefreshKind) {
+  const d1 = await getTargetPricesDb();
+  await d1.prepare("DELETE FROM target_price_refresh_locks WHERE cabinet_id = ? AND refresh_kind = ?").bind(cabinetId, refreshKind).run();
 }

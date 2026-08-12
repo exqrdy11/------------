@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { batchesForProduct, emptyFfBatches, emptyFfExpiry, emptyFfStock, expiryForProduct, listFfStocks, listFfWarehouses, stockForProduct, syncWbFbsWarehouses, type FfBatches, type FfExpiry, type FfStock, type ManualWarehouse } from "@/db/ff-stocks";
 import { fbsHandoverMetrics, recordFbsHandoverObservations, type HandoverMetrics } from "@/db/fbs-handover-metrics";
-import { getInventoryRefreshCooldown, loadInventorySnapshot, reserveInventoryRefresh, saveInventorySnapshot } from "@/db/inventory-snapshots";
+import { getInventoryRefreshCooldown, loadInventorySnapshot, releaseInventoryRefresh, reserveInventoryRefresh, saveInventorySnapshot } from "@/db/inventory-snapshots";
 import { cabinetSummary, cabinetToken, getAdminCabinet, type CabinetId, type CabinetSummary } from "@/lib/admin-auth";
 
 export const dynamic = "force-dynamic";
@@ -92,8 +92,10 @@ type DashboardPayload = {
   handoverTiming: HandoverMetrics & { byLocation?: Record<string, HandoverTiming> };
 };
 
-const MANUAL_REFRESH_COOLDOWN_MS = 5 * 60 * 1000;
 const INVENTORY_REFRESH_TIMEOUT_MS = 25 * 1000;
+// This is an in-progress lock, not a user-facing refresh interval. It only
+// prevents two browsers from starting the same heavy WB refresh at once.
+const INVENTORY_REFRESH_REQUEST_LOCK_MS = INVENTORY_REFRESH_TIMEOUT_MS + 5 * 1000;
 const WB_STOCK_REQUEST_INTERVAL_MS = 250;
 const memoryCache = new Map<CabinetId, { payload: DashboardPayload }>();
 
@@ -475,9 +477,10 @@ export async function GET(request: Request) {
     return NextResponse.json(await attachFfStocks(snapshot, cabinetId), { headers: { "Cache-Control": "private, max-age=0" } });
   }
 
-  // The lock is stored in D1, not in a browser or process cache. Ten users
-  // pressing refresh therefore produce one WB request for the whole cabinet.
-  const reservation = await reserveInventoryRefresh(cabinetId, MANUAL_REFRESH_COOLDOWN_MS);
+  // The lock is stored in D1, not in a browser or process cache. It lasts
+  // only while the current request can still be running, not for minutes
+  // after a successful update.
+  const reservation = await reserveInventoryRefresh(cabinetId, INVENTORY_REFRESH_REQUEST_LOCK_MS);
   if (!reservation.reserved) {
     if (lastKnown) {
       const snapshot = {
@@ -497,7 +500,6 @@ export async function GET(request: Request) {
     );
   }
 
-  const manualCooldownUntil = reservation.cooldownUntil;
   const now = Date.now();
 
   const refreshController = new AbortController();
@@ -518,7 +520,7 @@ export async function GET(request: Request) {
     if (refreshTimedOut && lastKnown) {
       const fallback = {
         ...lastKnown,
-        retryAt: laterRetryAt(lastKnown.retryAt, manualCooldownUntil),
+        retryAt: lastKnown.retryAt,
         warnings: [...new Set([...lastKnown.warnings, "WB отвечает дольше 25 секунд — показаны последние корректные данные"])],
       };
       return NextResponse.json(await attachFfStocks(fallback, cabinetId), { headers: { "Cache-Control": "private, max-age=0" } });
@@ -556,7 +558,7 @@ export async function GET(request: Request) {
   if (refreshTimedOut && lastKnown) {
     const fallback = {
       ...lastKnown,
-      retryAt: laterRetryAt(lastKnown.retryAt, manualCooldownUntil),
+      retryAt: lastKnown.retryAt,
       warnings: [...new Set([...lastKnown.warnings, "WB отвечает дольше 25 секунд — показаны последние корректные данные"])],
     };
     return NextResponse.json(await attachFfStocks(fallback, cabinetId), { headers: { "Cache-Control": "private, max-age=0" } });
@@ -691,7 +693,7 @@ export async function GET(request: Request) {
         configured: true,
         error: "Wildberries не вернул данные. Проверьте категории токена: Контент, Маркетплейс и Аналитика.",
         warnings,
-        retryAt: laterRetryAt(retryAt, manualCooldownUntil),
+        retryAt,
       },
       { status: 502, headers: { "Cache-Control": "no-store" } },
     );
@@ -728,8 +730,9 @@ export async function GET(request: Request) {
     await saveInventorySnapshot(cabinetId, payload, updatedAt).catch(() => undefined);
   }
 
-  return NextResponse.json(await attachFfStocks({ ...payload, retryAt: laterRetryAt(retryAt, manualCooldownUntil) }, cabinetId), { headers: { "Cache-Control": "private, max-age=0" } });
+  return NextResponse.json(await attachFfStocks({ ...payload, retryAt }, cabinetId), { headers: { "Cache-Control": "private, max-age=0" } });
   } finally {
     clearTimeout(refreshTimeout);
+    await releaseInventoryRefresh(cabinetId).catch(() => undefined);
   }
 }

@@ -57,58 +57,61 @@ test("артикул в таргете цен открывает рынок и �
   assert.match(page, /catalog\/\$\{competitor\.nmId\}\/detail\.aspx/);
 });
 
-test("в таргете цен можно подобрать и сохранить замену конкурента из WB", async () => {
+test("в таргете цен конкуренты добавляются только вручную", async () => {
   const [page, route, storage] = await Promise.all([
     readFile(new URL("app/page.tsx", root), "utf8"),
     readFile(new URL("app/api/target-prices/route.ts", root), "utf8"),
     readFile(new URL("db/target-prices.ts", root), "utf8"),
   ]);
 
-  assert.match(route, /WB_SEARCH_API/);
-  assert.match(route, /searchParams\.get\("candidates"\) === "1"/);
-  assert.match(route, /getTargetPriceCandidateSnapshot/);
   assert.match(route, /add-competitor/);
   assert.match(route, /remove-competitor/);
   assert.match(route, /выбран вручную/);
-  assert.match(page, /Обновить подбор WB/);
+  assert.match(page, /Добавить вручную/);
   assert.match(page, /Артикул WB конкурента/);
-  assert.match(page, /Добавить в сравнение/);
+  assert.match(page, /Цена конкурента появится после отдельного обновления цен/);
   assert.match(page, /Убрать/);
   assert.match(storage, /competitors_json/);
+  assert.doesNotMatch(route, /WB_SEARCH_API/);
+  assert.doesNotMatch(route, /refresh-candidates/);
+  assert.doesNotMatch(route, /getTargetPriceCandidateSnapshot/);
+  assert.doesNotMatch(page, /Обновить подбор WB/);
+  assert.doesNotMatch(storage, /target_price_candidate_snapshots/);
 });
 
-test("цены и подбор конкурентов обновляются раздельно и имеют общий лимит пять минут", async () => {
+test("цены обновляются вручную для владельца и гостя, без пятиминутного ограничения", async () => {
   const [page, route, storage] = await Promise.all([
     readFile(new URL("app/page.tsx", root), "utf8"),
     readFile(new URL("app/api/target-prices/route.ts", root), "utf8"),
     readFile(new URL("db/target-prices.ts", root), "utf8"),
   ]);
 
-  assert.match(route, /TARGET_PRICE_REFRESH_COOLDOWN_MS = 5 \* 60 \* 1000/);
-  assert.match(route, /action === "refresh-candidates"/);
-  assert.match(route, /reserveTargetPriceRefresh\(session\.cabinetId, "competitors"/);
+  assert.match(route, /TARGET_PRICE_REFRESH_REQUEST_LOCK_MS = 30 \* 1000/);
+  assert.match(route, /getAdminSession/);
+  assert.match(route, /session\.role !== "owner"/);
   assert.match(route, /reserveTargetPriceRefresh\(session\.cabinetId, "prices"/);
-  assert.match(route, /getTargetPriceCandidateSnapshot/);
-  assert.match(storage, /target_price_candidate_snapshots/);
   assert.match(storage, /target_price_refresh_locks/);
   assert.match(page, /Сохранённый снимок цен WB/);
-  assert.match(page, /Обновить подбор WB/);
-  assert.match(page, /Подбор через \$\{formatCountdown/);
+  assert.match(page, /Обновить цены/);
+  assert.match(page, /Рекомендованный интервал обновления — 2 минуты/);
+  assert.doesNotMatch(route, /reserveTargetPriceRefresh\(session\.cabinetId, "competitors"/);
+  assert.doesNotMatch(storage, /target_price_candidate_snapshots/);
 });
 
-test("главная открывается из сохранённого снимка, а WB обновляется вручную раз в пять минут", async () => {
+test("главная открывается из сохранённого снимка, а обновление защищено только на время текущего запроса", async () => {
   const [route, snapshots] = await Promise.all([
     readFile(new URL("app/api/inventory/route.ts", root), "utf8"),
     readFile(new URL("db/inventory-snapshots.ts", root), "utf8"),
   ]);
 
-  assert.match(route, /MANUAL_REFRESH_COOLDOWN_MS = 5 \* 60 \* 1000/);
+  assert.match(route, /INVENTORY_REFRESH_REQUEST_LOCK_MS = INVENTORY_REFRESH_TIMEOUT_MS \+ 5 \* 1000/);
   assert.match(route, /if \(!force && lastKnown\)/);
   assert.match(route, /Opening the dashboard never calls Wildberries/);
-  assert.match(route, /reserveInventoryRefresh\(cabinetId, MANUAL_REFRESH_COOLDOWN_MS\)/);
-  assert.match(route, /Ten users/);
+  assert.match(route, /reserveInventoryRefresh\(cabinetId, INVENTORY_REFRESH_REQUEST_LOCK_MS\)/);
+  assert.match(route, /only while the current request/);
   assert.match(snapshots, /inventory_refresh_locks/);
   assert.match(snapshots, /reserveInventoryRefresh/);
+  assert.match(snapshots, /releaseInventoryRefresh/);
   assert.match(snapshots, /getInventoryRefreshCooldown/);
 });
 

@@ -78,3 +78,8 @@ export async function reserveInventoryRefresh(cabinetId: CabinetId, cooldownMill
   if (reserved.results?.length) return { reserved: true, cooldownUntil };
   return { reserved: false, cooldownUntil: await getInventoryRefreshCooldown(cabinetId) };
 }
+
+export async function releaseInventoryRefresh(cabinetId: CabinetId) {
+  const d1 = await getInventorySnapshotsDb();
+  await d1.prepare("DELETE FROM inventory_refresh_locks WHERE cabinet_id = ?").bind(cabinetId).run();
+}

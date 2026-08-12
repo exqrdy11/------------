@@ -135,14 +135,6 @@ type TargetPriceCompetitor = {
   updatedAt: string | null;
   error: string | null;
 };
-type TargetPriceCandidatesResponse = {
-  candidates?: TargetPriceCompetitor[];
-  query?: string;
-  updatedAt?: string | null;
-  warning?: string | null;
-  cooldownUntil?: string | null;
-  error?: string;
-};
 type TargetPriceRow = {
   sku: string;
   nmId: number | null;
@@ -272,7 +264,7 @@ function median(values: number[]) {
 
 function buildPriceRecommendation(row: TargetPriceRow): PriceRecommendation {
   const market = row.competitors.map((item) => item.price).filter((price): price is number => Boolean(price && price > 0));
-  const needsReview = row.sourceStatus === "нужен подбор" || row.sourceStatus?.includes("ошибка");
+  const needsReview = row.sourceStatus === "нужен подбор" || row.sourceStatus === "нужен конкурент" || row.sourceStatus?.includes("ошибка");
   if (!row.currentPrice || !market.length) {
     return {
       row, low: null, median: null, high: null, target: null, delta: null,
@@ -289,7 +281,7 @@ function buildPriceRecommendation(row: TargetPriceRow): PriceRecommendation {
   if (needsReview) {
     return {
       row, low, median: middle, high, target, delta,
-      action: "review", label: "Проверить рынок", detail: row.candidateNmId ? `Есть автокандидат WB ${row.candidateNmId}${row.score ? ` · score ${Math.round(row.score * 100)}%` : ""}.` : "Источник или карточку конкурента нужно подтвердить.",
+      action: "review", label: "Проверить рынок", detail: row.candidateNmId ? `Проверьте вручную карточку WB ${row.candidateNmId}${row.score ? ` · score ${Math.round(row.score * 100)}%` : ""}.` : "Добавьте карточку конкурента вручную для сравнения.",
       priority: row.orders + Math.abs(delta) * 1_000,
     };
   }
@@ -522,7 +514,7 @@ function MarketplaceConnectionCard({
     <div className="cabinet-platform-head"><span className={`platform-mark ${platform === "yandex" ? "ym-mark" : "oz-mark"}`}>{mark}</span><div><strong>{title}</strong><small>{disabled ? "Подключение отключено" : connected ? "Подключено по API" : configured ? "Нужна проверка подключения" : "Настраивается на сервере"}</small></div></div>
     {disabled ? <div className="platform-connect"><strong>Подключение отключено</strong><span>Ключи остаются в защищённой настройке сервера. Включение выполняется только на сервере.</span></div> : connected ? <div className="platform-connect connected"><strong>{connection?.accountName || title}</strong><span>{connection?.details.length ? connection.details.join(" · ") : "Доступ к кабинету подтверждён"}</span></div> : <div className="platform-connect"><strong>{configured ? "Ключ на сервере" : "Ключ не настроен"}</strong><span>{configured ? connection?.error || "Проверьте подключение." : "API-ключи вводятся только в защищённой настройке сервера и не доступны в браузере."}</span></div>}
     {canManage && configured && !disabled && <><button className="marketplace-check-btn" type="button" onClick={onCheck} disabled={checking || disabling}>{checking ? "Проверяем…" : connected ? "Проверить снова" : "Проверить подключение"}</button><button className="marketplace-link-btn marketplace-disable-btn" type="button" onClick={() => void disable()} disabled={checking || disabling}>{disabling ? "Отключаем…" : "Отключить"}</button></>}
-    {!canManage && <p>Гостевой доступ: можно смотреть статусы, но API-ключи и настройки скрыты.</p>}
+    {!canManage && <p>Гостевой доступ: можно обновлять статусы, но API-ключи и настройки скрыты.</p>}
     {canManage && configured && !disabled && !connected && <p>После успешной проверки сюда попадут доступные кампании или склады.</p>}
     {canManage && connected && <p>Следующий этап: подтянем товары, остатки и заказы в отдельный контур этого маркетплейса.</p>}
   </article>;
@@ -560,11 +552,6 @@ export default function Home() {
   const [targetPricesError, setTargetPricesError] = useState<string | null>(null);
   const [targetPricesWarnings, setTargetPricesWarnings] = useState<string[]>([]);
   const [selectedPricingRow, setSelectedPricingRow] = useState<TargetPriceRow | null>(null);
-  const [pricingCandidates, setPricingCandidates] = useState<TargetPriceCompetitor[]>([]);
-  const [pricingCandidatesQuery, setPricingCandidatesQuery] = useState<string | null>(null);
-  const [pricingCandidatesUpdatedAt, setPricingCandidatesUpdatedAt] = useState<string | null>(null);
-  const [pricingCandidatesCooldownUntil, setPricingCandidatesCooldownUntil] = useState<string | null>(null);
-  const [pricingCandidatesLoading, setPricingCandidatesLoading] = useState(false);
   const [pricingCandidatesError, setPricingCandidatesError] = useState<string | null>(null);
   const [pricingCandidateUpdatingId, setPricingCandidateUpdatingId] = useState<number | null>(null);
   const [manualCompetitorNmId, setManualCompetitorNmId] = useState("");
@@ -694,64 +681,8 @@ export default function Home() {
 
   const openPricingRow = useCallback((row: TargetPriceRow) => {
     setSelectedPricingRow(row);
-    setPricingCandidates([]);
-    setPricingCandidatesQuery(null);
-    setPricingCandidatesUpdatedAt(null);
-    setPricingCandidatesCooldownUntil(null);
     setPricingCandidatesError(null);
     setManualCompetitorNmId("");
-  }, []);
-
-  const loadPricingCandidates = useCallback(async (row: TargetPriceRow) => {
-    setPricingCandidatesLoading(true);
-    setPricingCandidatesError(null);
-    try {
-      const params = new URLSearchParams({ candidates: "1", sku: row.sku });
-      if (row.nmId) params.set("nmId", String(row.nmId));
-      const response = await fetch(`/api/target-prices?${params}`, { cache: "no-store" });
-      const data = await response.json() as TargetPriceCandidatesResponse;
-      if (response.status === 401) {
-        setAuthState("unauthenticated");
-        return;
-      }
-      if (!response.ok) throw new Error(data.error || "Не удалось подобрать конкурентов");
-      setPricingCandidates(data.candidates ?? []);
-      setPricingCandidatesQuery(data.query ?? row.searchQuery ?? row.sku);
-      setPricingCandidatesUpdatedAt(data.updatedAt ?? null);
-      setPricingCandidatesCooldownUntil(data.cooldownUntil ?? null);
-      if (data.warning) setPricingCandidatesError(data.warning);
-    } catch (candidateError) {
-      setPricingCandidatesError(candidateError instanceof Error ? candidateError.message : "Не удалось подобрать конкурентов");
-    } finally {
-      setPricingCandidatesLoading(false);
-    }
-  }, []);
-
-  const refreshPricingCandidates = useCallback(async (row: TargetPriceRow) => {
-    setPricingCandidatesLoading(true);
-    setPricingCandidatesError(null);
-    try {
-      const response = await fetch("/api/target-prices", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ action: "refresh-candidates", sku: row.sku, nmId: row.nmId }),
-      });
-      const data = await response.json() as TargetPriceCandidatesResponse;
-      if (response.status === 401) {
-        setAuthState("unauthenticated");
-        return;
-      }
-      setPricingCandidatesCooldownUntil(data.cooldownUntil ?? null);
-      if (!response.ok) throw new Error(data.error || "Не удалось подобрать конкурентов");
-      setPricingCandidates(data.candidates ?? []);
-      setPricingCandidatesQuery(data.query ?? row.searchQuery ?? row.sku);
-      setPricingCandidatesUpdatedAt(data.updatedAt ?? new Date().toISOString());
-      if (data.warning) setPricingCandidatesError(data.warning);
-    } catch (candidateError) {
-      setPricingCandidatesError(candidateError instanceof Error ? candidateError.message : "Не удалось подобрать конкурентов");
-    } finally {
-      setPricingCandidatesLoading(false);
-    }
   }, []);
 
   const updatePricingCompetitor = useCallback(async (row: TargetPriceRow, competitorNmId: number, action: "add-competitor" | "remove-competitor") => {
@@ -769,7 +700,6 @@ export default function Home() {
       const updated = updatedRows.find((item) => item.sku === row.sku && item.nmId === row.nmId) ?? null;
       setTargetPriceRows(updatedRows);
       setSelectedPricingRow(updated);
-      setPricingCandidates((items) => action === "add-competitor" ? items.filter((item) => item.nmId !== competitorNmId) : items);
       setManualCompetitorNmId("");
     } catch (competitorError) {
       setPricingCandidatesError(competitorError instanceof Error ? competitorError.message : "Не удалось обновить список конкурентов");
@@ -889,12 +819,6 @@ export default function Home() {
     return Number.isFinite(milliseconds) ? Math.max(0, Math.ceil(milliseconds / 1000)) : null;
   }, [pricingClock, targetPricesCooldownUntil]);
 
-  const pricingCandidatesCooldownSeconds = useMemo(() => {
-    if (!pricingCandidatesCooldownUntil) return null;
-    const milliseconds = Date.parse(pricingCandidatesCooldownUntil) - pricingClock;
-    return Number.isFinite(milliseconds) ? Math.max(0, Math.ceil(milliseconds / 1000)) : null;
-  }, [pricingCandidatesCooldownUntil, pricingClock]);
-
   const inventoryRefreshSeconds = useMemo(() => {
     if (!loading || !inventoryLoadingStartedAt) return null;
     return Math.min(25, Math.max(0, Math.floor((inventoryClock - inventoryLoadingStartedAt) / 1000)));
@@ -936,12 +860,6 @@ export default function Home() {
   }, [activeView, authState, loadTargetPrices]);
 
   useEffect(() => {
-    if (!selectedPricingRow) return;
-    const timer = window.setTimeout(() => void loadPricingCandidates(selectedPricingRow), 0);
-    return () => window.clearTimeout(timer);
-  }, [loadPricingCandidates, selectedPricingRow]);
-
-  useEffect(() => {
     if (authState !== "authenticated" || activeView !== "payments" || !settlementWarehouseId) return;
     const timer = window.setTimeout(() => void loadSettlement(), 0);
     return () => window.clearTimeout(timer);
@@ -966,10 +884,10 @@ export default function Home() {
   }, [inventoryRetryAt, loading]);
 
   useEffect(() => {
-    if (!targetPricesCooldownUntil && !pricingCandidatesCooldownUntil) return;
+    if (!targetPricesCooldownUntil) return;
     const timer = window.setInterval(() => setPricingClock(Date.now()), 1_000);
     return () => window.clearInterval(timer);
-  }, [pricingCandidatesCooldownUntil, targetPricesCooldownUntil]);
+  }, [targetPricesCooldownUntil]);
 
   const visibleManualWarehouses = useMemo(() => manualWarehouses.filter((warehouse) => !warehouse.isHidden), [manualWarehouses]);
 
@@ -1469,11 +1387,11 @@ export default function Home() {
           <button type="button" className={`nav-item ${activeView === "payments" ? "active" : ""}`} onClick={() => navigateTo("payments")}><span className="nav-symbol">₽</span>Оплаты ФФ</button>
           <button type="button" className={`nav-item ${activeView === "reports" ? "active" : ""}`} onClick={() => navigateTo("reports")}><span className="nav-symbol">≡</span>Отчёты</button>
         </nav>
-        <div className="sidebar-bottom"><div className="connection"><span className={error ? "live-dot offline" : "live-dot"} />{error ? "Нужна проверка подключения" : "Подключено к WB API"}</div><button type="button" className="profile" onClick={() => navigateTo("cabinets")}><span className="avatar">WB</span><span><strong>{cabinet?.name ?? "Wildberries"}</strong><small>{role === "viewer" ? "Гость · только просмотр" : configured ? "Владелец · кабинеты и ключи" : "Владелец · токен не добавлен"}</small></span><span className="chevron">›</span></button></div>
+        <div className="sidebar-bottom"><div className="connection"><span className={error ? "live-dot offline" : "live-dot"} />{error ? "Нужна проверка подключения" : "Подключено к WB API"}</div><button type="button" className="profile" onClick={() => navigateTo("cabinets")}><span className="avatar">WB</span><span><strong>{cabinet?.name ?? "Wildberries"}</strong><small>{role === "viewer" ? "Гость · просмотр и обновление" : configured ? "Владелец · кабинеты и ключи" : "Владелец · токен не добавлен"}</small></span><span className="chevron">›</span></button></div>
       </aside>
 
       <section className="workspace">
-        <header className="topbar"><div><p className="eyebrow">{viewTitles[activeView].eyebrow}</p><h1>{viewTitles[activeView].title}</h1></div><div className="header-actions"><div className="sync-state"><span className={error ? "live-dot offline" : "live-dot"} /><span>Последнее обновление<br/><strong>{formatSyncTime(updatedAt)} МСК</strong></span></div><button className="logout-btn" type="button" onClick={() => void logoutAdmin()}>Выйти</button><button className="secondary-btn" type="button" onClick={() => void loadData(true)} disabled={loading || Boolean(inventoryRetrySeconds)} title={inventoryRetrySeconds ? "Общее ограничение: один запрос к WB на кабинет для всех пользователей" : loading ? "Обновление займёт не больше 25 секунд" : undefined}><span className={loading ? "spin" : ""}>↻</span>{loading ? `Обновляем ${inventoryRefreshSeconds ?? 0}/25 с` : inventoryRetrySeconds ? `Через ${formatCountdown(inventoryRetrySeconds)}` : "Обновить"}</button><button className="primary-btn" type="button" onClick={() => downloadCsv(filteredRows, "ostatki-wb")} disabled={!rows.length}>Экспорт<span>↓</span></button></div></header>
+        <header className="topbar"><div><p className="eyebrow">{viewTitles[activeView].eyebrow}</p><h1>{viewTitles[activeView].title}</h1></div><div className="header-actions"><span className="refresh-guidance">Можно обновить вручную · рекомендуем раз в 2 мин</span><div className="sync-state"><span className={error ? "live-dot offline" : "live-dot"} /><span>Последнее обновление<br/><strong>{formatSyncTime(updatedAt)} МСК</strong></span></div><button className="logout-btn" type="button" onClick={() => void logoutAdmin()}>Выйти</button><button className="secondary-btn" type="button" onClick={() => void loadData(true)} disabled={loading || Boolean(inventoryRetrySeconds)} title={inventoryRetrySeconds ? "Общий запрос к WB уже выполняется" : loading ? "Обновление займёт не больше 25 секунд" : "Можно обновить вручную в любой момент. Рекомендованный интервал — 2 минуты."}><span className={loading ? "spin" : ""}>↻</span>{loading ? `Обновляем ${inventoryRefreshSeconds ?? 0}/25 с` : inventoryRetrySeconds ? `Через ${formatCountdown(inventoryRetrySeconds)}` : "Обновить"}</button><button className="primary-btn" type="button" onClick={() => downloadCsv(filteredRows, "ostatki-wb")} disabled={!rows.length}>Экспорт<span>↓</span></button></div></header>
 
         <div className="content" id="overview">
           {cabinet && <section className={`cabinet-strip ${cabinet.configured ? "ready" : "waiting"}`}>
@@ -1483,7 +1401,7 @@ export default function Home() {
           </section>}
           {error && <section className="api-notice" role="alert"><span className="api-notice-icon">!</span><div><strong>{error}</strong><p>{configured ? "Для полной загрузки токену нужны категории: Контент, Маркетплейс и Аналитика." : "Безопасный токен хранится только на сервере и не передаётся в браузер."}</p></div><button type="button" onClick={() => void loadData(true)}>Проверить снова</button></section>}
           {!error && warnings.length > 0 && <section className="warning-strip"><span>!</span><p>{warnings.join(" · ")}</p></section>}
-          {inventoryRetrySeconds !== null && inventoryRetrySeconds > 0 && <section className="inventory-retry-timer" role="status"><span>↻</span><div><strong>Следующее обновление доступно через {formatCountdown(inventoryRetrySeconds)}</strong><p>Общий лимит для кабинета: один запрос к WB раз в 5 минут. Пока показываем сохранённые данные.</p></div></section>}
+          {inventoryRetrySeconds !== null && inventoryRetrySeconds > 0 && <section className="inventory-retry-timer" role="status"><span>↻</span><div><strong>Текущий запрос к WB ещё выполняется: {formatCountdown(inventoryRetrySeconds)}</strong><p>После завершения можно обновить снова. Рекомендованный интервал — раз в 2 минуты.</p></div></section>}
 
           {activeView === "cabinets" ? (
             <section className="cabinet-manager">
@@ -1516,10 +1434,10 @@ export default function Home() {
                   <h2>Рынок, таргет и решение по цене</h2>
                   <p className="section-note">Тянем цены ваших карточек и уже выбранных конкурентов напрямую из витрины WB. Эта витрина ничего не меняет на WB — решение по цене остаётся за тобой.</p>
                 </div>
-                {canManage ? <button className="secondary-btn pricing-source-link" type="button" onClick={() => void refreshTargetPrices()} disabled={targetPricesRefreshing || Boolean(targetPricesCooldownSeconds)} title={targetPricesCooldownSeconds ? "Общее ограничение — один запрос для всех пользователей" : undefined}>{targetPricesRefreshing ? "Обновляем цены…" : targetPricesCooldownSeconds ? `Цены через ${formatCountdown(targetPricesCooldownSeconds)}` : "Обновить цены"}</button> : <span className="pricing-viewer-note">Обновление цен — у владельца</span>}
+                <button className="secondary-btn pricing-source-link" type="button" onClick={() => void refreshTargetPrices()} disabled={targetPricesRefreshing || Boolean(targetPricesCooldownSeconds)} title={targetPricesCooldownSeconds ? "Обновление цен уже запущено другим пользователем" : "Можно обновить вручную в любой момент. Рекомендованный интервал — 2 минуты."}>{targetPricesRefreshing ? "Обновляем цены…" : targetPricesCooldownSeconds ? `Цены через ${formatCountdown(targetPricesCooldownSeconds)}` : "Обновить цены"}</button>
               </div>
 
-              <div className={`pricing-source-strip ${targetPricesError || targetPricesWarnings.length ? "has-warning" : ""}`}><span>{targetPricesError || targetPricesWarnings.length ? "!" : "✓"}</span><div><strong>{targetPricesError || targetPricesWarnings.length ? "Часть цен пока не обновилась" : "Сохранённый снимок цен WB"}</strong><p>{targetPricesError || targetPricesWarnings[0] || (targetPricesUpdatedAt ? `Последнее обновление: ${formatDateTime(targetPricesUpdatedAt)}. Все видят этот снимок; новый запрос только вручную.` : "Пока показана стартовая база; нажмите «Обновить цены», чтобы сохранить актуальные значения для всех.")}{targetPricesCooldownSeconds && targetPricesCooldownSeconds > 0 ? ` Следующий общий запрос через ${formatCountdown(targetPricesCooldownSeconds)}.` : ""}</p></div></div>
+              <div className={`pricing-source-strip ${targetPricesError || targetPricesWarnings.length ? "has-warning" : ""}`}><span>{targetPricesError || targetPricesWarnings.length ? "!" : "✓"}</span><div><strong>{targetPricesError || targetPricesWarnings.length ? "Часть цен пока не обновилась" : "Сохранённый снимок цен WB"}</strong><p>{targetPricesError || targetPricesWarnings[0] || (targetPricesUpdatedAt ? `Последнее обновление: ${formatDateTime(targetPricesUpdatedAt)}. Все видят этот снимок; новый запрос только вручную.` : "Пока показана стартовая база; нажмите «Обновить цены», чтобы сохранить актуальные значения для всех.")}{targetPricesCooldownSeconds && targetPricesCooldownSeconds > 0 ? ` Сейчас идёт общий запрос: ещё ${formatCountdown(targetPricesCooldownSeconds)}.` : " Рекомендованный интервал обновления — 2 минуты."}</p></div></div>
 
               <div className="pricing-kpi-grid">
                 <article className="pricing-kpi tracked"><span>Под контролем</span><strong>{pricingCounts.all}</strong><p>карточек WB в мониторинге</p></article>
@@ -1565,10 +1483,9 @@ export default function Home() {
                   {selectedPricingRow.nmId && <a className="pricing-own-link" href={`https://www.wildberries.ru/catalog/${selectedPricingRow.nmId}/detail.aspx`} target="_blank" rel="noreferrer">Открыть свою карточку на WB ↗</a>}
                   <div className="pricing-modal-summary"><span>Цена на витрине WB <b>{selectedPricingRow.currentPrice ? formatMoney.format(selectedPricingRow.currentPrice) : "—"}</b></span><span>Таргет <b>{recommendation.target ? formatMoney.format(recommendation.target) : "—"}</b></span><span>Решение <b>{recommendation.label}</b></span></div>
                   <div className="pricing-competitor-list"><h4>В сравнении</h4>{selectedPricingRow.competitors.map((competitor) => <article key={competitor.nmId}><div><strong>{competitor.name || `Карточка WB ${competitor.nmId}`}</strong><small>{competitor.source || "добавлен в мониторинг"}{competitor.updatedAt ? ` · ${formatDateTime(competitor.updatedAt)}` : ""}</small>{competitor.error && <em>{competitor.error}</em>}</div><div className="pricing-competitor-actions"><a href={`https://www.wildberries.ru/catalog/${competitor.nmId}/detail.aspx`} target="_blank" rel="noreferrer">{competitor.price ? formatMoney.format(competitor.price) : "Нет цены"} ↗</a>{canManage && <button type="button" className="pricing-competitor-remove" onClick={() => void updatePricingCompetitor(selectedRow, competitor.nmId, "remove-competitor")} disabled={pricingCandidateUpdatingId === competitor.nmId}>{pricingCandidateUpdatingId === competitor.nmId ? "…" : "Убрать"}</button>}</div></article>)}{!selectedPricingRow.competitors.length && <p>Для этой карточки пока не назначены конкуренты.</p>}</div>
-                  {canManage && <section className="pricing-candidate-picker"><div className="pricing-candidate-heading"><div><span className="section-kicker">ЗАМЕНА КОНКУРЕНТА</span><h4>Выбрать из поиска WB</h4><p>Показана последняя сохранённая подборка. Кнопка ниже отдельно запрашивает WB и не обновляет цены.</p></div><button type="button" className="secondary-btn" onClick={() => void refreshPricingCandidates(selectedRow)} disabled={pricingCandidatesLoading || Boolean(pricingCandidatesCooldownSeconds)} title={pricingCandidatesCooldownSeconds ? "Общее ограничение — один поиск для всех пользователей" : undefined}>{pricingCandidatesLoading ? "Ищем на WB…" : pricingCandidatesCooldownSeconds ? `Подбор через ${formatCountdown(pricingCandidatesCooldownSeconds)}` : "Обновить подбор WB"}</button></div>
+                  {canManage && <section className="pricing-candidate-picker"><div className="pricing-candidate-heading"><div><span className="section-kicker">КОНКУРЕНТЫ</span><h4>Добавить вручную</h4><p>Вставь артикул WB нужной карточки. Цена конкурента появится после отдельного обновления цен.</p></div></div>
                     <form className="pricing-manual-candidate" onSubmit={(event) => { event.preventDefault(); const nmId = Number(manualCompetitorNmId); if (Number.isInteger(nmId) && nmId > 0) void updatePricingCompetitor(selectedRow, nmId, "add-competitor"); }}><label><span>Артикул WB конкурента</span><input value={manualCompetitorNmId} onChange={(event) => setManualCompetitorNmId(event.target.value.replace(/\D/g, ""))} inputMode="numeric" placeholder="Например, 123456789" /></label><button className="primary-btn" type="submit" disabled={!manualCompetitorNmId || pricingCandidateUpdatingId !== null}>{pricingCandidateUpdatingId ? "Добавляем…" : "Добавить"}</button></form>
-                    {pricingCandidatesQuery && <p className="pricing-candidate-query">Результаты WB по запросу: «{pricingCandidatesQuery}»{pricingCandidatesUpdatedAt ? ` · снимок ${formatDateTime(pricingCandidatesUpdatedAt)}` : ""}</p>}{pricingCandidatesError && <p className="pricing-candidate-error">{pricingCandidatesError}</p>}
-                    {!!pricingCandidates.length && <div className="pricing-candidate-list">{pricingCandidates.map((candidate) => <article key={candidate.nmId}><div><strong>{candidate.name || `Карточка WB ${candidate.nmId}`}</strong><small>WB {candidate.nmId}{candidate.price ? ` · ${formatMoney.format(candidate.price)}` : " · цену WB не отдал"}</small></div><button type="button" onClick={() => void updatePricingCompetitor(selectedRow, candidate.nmId, "add-competitor")} disabled={pricingCandidateUpdatingId !== null}>{pricingCandidateUpdatingId === candidate.nmId ? "Добавляем…" : "Добавить в сравнение"}</button></article>)}</div>}</section>}
+                    {pricingCandidatesError && <p className="pricing-candidate-error">{pricingCandidatesError}</p>}</section>}
                   <footer>{recommendation.detail}{selectedPricingRow.refreshError ? ` ${selectedPricingRow.refreshError}` : ""}</footer>
                 </section></div>;
               })()}
@@ -1694,7 +1611,7 @@ export default function Home() {
             <section className="analytics-panel">
               <div className="analytics-heading">
                 <div><span className="section-kicker">УПРАВЛЕНЧЕСКИЙ ОБЗОР · WILDBERRIES</span><h2>Продажи по каналам</h2><p>Сравнение FBS и FBO, а также эффективность каждого вашего ФФ за выбранный период.</p></div>
-                <button className="secondary-btn analytics-refresh" type="button" onClick={() => void loadAnalytics(analyticsRange, true)} disabled={analyticsLoading || Boolean(analyticsRetrySeconds)} title={analyticsRetrySeconds ? "WB временно ограничил запросы" : undefined}><span className={analyticsLoading ? "spin" : ""}>↻</span>{analyticsLoading ? "Считаем" : analyticsRetrySeconds ? `Через ${formatCountdown(analyticsRetrySeconds)}` : "Обновить"}</button>
+                <button className="secondary-btn analytics-refresh" type="button" onClick={() => void loadAnalytics(analyticsRange, true)} disabled={analyticsLoading || Boolean(analyticsRetrySeconds)} title={analyticsRetrySeconds ? "WB временно ограничил запросы" : "Можно обновить вручную в любой момент. Рекомендованный интервал — 2 минуты."}><span className={analyticsLoading ? "spin" : ""}>↻</span>{analyticsLoading ? "Считаем" : analyticsRetrySeconds ? `Через ${formatCountdown(analyticsRetrySeconds)}` : "Обновить"}</button>
               </div>
 
               <div className="analytics-controls"><div className="analytics-periods" role="group" aria-label="Период аналитики">{[{ id: "7d", label: "Неделя" }, { id: "14d", label: "2 недели" }, { id: "30d", label: "Месяц" }, { id: "custom", label: "Свои даты" }].map((item) => <button type="button" key={item.id} className={analyticsPeriod === item.id ? "active" : ""} onClick={() => chooseAnalyticsPeriod(item.id as "7d" | "14d" | "30d" | "custom")}>{item.label}</button>)}</div><span className="analytics-period-label">{shortDate(analyticsRange.from)} — {shortDate(analyticsRange.to)}</span></div>
