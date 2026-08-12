@@ -57,6 +57,26 @@ test("артикул в таргете цен открывает рынок и �
   assert.match(page, /catalog\/\$\{competitor\.nmId\}\/detail\.aspx/);
 });
 
+test("в таргете цен можно подобрать и сохранить замену конкурента из WB", async () => {
+  const [page, route, storage] = await Promise.all([
+    readFile(new URL("app/page.tsx", root), "utf8"),
+    readFile(new URL("app/api/target-prices/route.ts", root), "utf8"),
+    readFile(new URL("db/target-prices.ts", root), "utf8"),
+  ]);
+
+  assert.match(route, /WB_SEARCH_API/);
+  assert.match(route, /searchParams\.get\("candidates"\) === "1"/);
+  assert.match(route, /сохранённый кандидат WB/);
+  assert.match(route, /add-competitor/);
+  assert.match(route, /remove-competitor/);
+  assert.match(route, /выбран вручную/);
+  assert.match(page, /Подобрать на WB/);
+  assert.match(page, /Артикул WB конкурента/);
+  assert.match(page, /Добавить в сравнение/);
+  assert.match(page, /Убрать/);
+  assert.match(storage, /competitors_json/);
+});
+
 test("новые FBS остаются на ФФ, но не входят в свободный остаток", async () => {
   const page = await readFile(new URL("app/page.tsx", root), "utf8");
 
@@ -65,6 +85,7 @@ test("новые FBS остаются на ФФ, но не входят в св�
   assert.match(page, /ещё лежат на ФФ/);
   assert.match(page, /physical: \{ kicker: "ФАКТИЧЕСКИ НА ФФ"/);
   assert.match(page, /function physicalFfStock/);
-  assert.match(page, /return availableFfStock\(row, warehouseId\) \+ \(row\.fbsByLocation\[warehouseId\] \?\? 0\)/);
+  assert.match(page, /return Math\.max\(0, \(row\.ffStock\[warehouseId\] \?\? 0\) - \(row\.fbsByLocation\[warehouseId\] \?\? 0\)\)/);
+  assert.match(page, /return row\.ffStock\[warehouseId\] \?\? 0/);
   assert.match(page, /Фактически на ФФ \{formatNumber\.format\(ffPhysicalTotal\)\}/);
 });

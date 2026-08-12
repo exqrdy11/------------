@@ -135,6 +135,12 @@ type TargetPriceCompetitor = {
   updatedAt: string | null;
   error: string | null;
 };
+type TargetPriceCandidatesResponse = {
+  candidates?: TargetPriceCompetitor[];
+  query?: string;
+  warning?: string | null;
+  error?: string;
+};
 type TargetPriceRow = {
   sku: string;
   nmId: number | null;
@@ -192,13 +198,14 @@ function stockTotal(row: StockRow) {
 }
 
 function availableFfStock(row: StockRow, warehouseId: string) {
-  // WB returns the free FBS balance. New / confirm orders are already excluded
-  // from it, but still physically sit at the fulfilment warehouse.
-  return row.ffStock[warehouseId] ?? 0;
+  // The FBS balance contains goods physically at the fulfilment warehouse.
+  // New / confirm orders have already reserved their units, but have not left
+  // the warehouse yet, so subtract them only from the free-to-sell balance.
+  return Math.max(0, (row.ffStock[warehouseId] ?? 0) - (row.fbsByLocation[warehouseId] ?? 0));
 }
 
 function physicalFfStock(row: StockRow, warehouseId: string) {
-  return availableFfStock(row, warehouseId) + (row.fbsByLocation[warehouseId] ?? 0);
+  return row.ffStock[warehouseId] ?? 0;
 }
 
 function hasFbsMovement(row: StockRow) {
@@ -550,6 +557,12 @@ export default function Home() {
   const [targetPricesError, setTargetPricesError] = useState<string | null>(null);
   const [targetPricesWarnings, setTargetPricesWarnings] = useState<string[]>([]);
   const [selectedPricingRow, setSelectedPricingRow] = useState<TargetPriceRow | null>(null);
+  const [pricingCandidates, setPricingCandidates] = useState<TargetPriceCompetitor[]>([]);
+  const [pricingCandidatesQuery, setPricingCandidatesQuery] = useState<string | null>(null);
+  const [pricingCandidatesLoading, setPricingCandidatesLoading] = useState(false);
+  const [pricingCandidatesError, setPricingCandidatesError] = useState<string | null>(null);
+  const [pricingCandidateUpdatingId, setPricingCandidateUpdatingId] = useState<number | null>(null);
+  const [manualCompetitorNmId, setManualCompetitorNmId] = useState("");
   const [salesWarehouseId, setSalesWarehouseId] = useState("all");
   const [salesProductScope, setSalesProductScope] = useState<"ff" | "all">("ff");
   const [salesTargetDays, setSalesTargetDays] = useState(14);
@@ -668,6 +681,61 @@ export default function Home() {
       setTargetPricesError(pricingRefreshError instanceof Error ? pricingRefreshError.message : "Не удалось обновить цены");
     } finally {
       setTargetPricesRefreshing(false);
+    }
+  }, []);
+
+  const openPricingRow = useCallback((row: TargetPriceRow) => {
+    setSelectedPricingRow(row);
+    setPricingCandidates([]);
+    setPricingCandidatesQuery(null);
+    setPricingCandidatesError(null);
+    setManualCompetitorNmId("");
+  }, []);
+
+  const loadPricingCandidates = useCallback(async (row: TargetPriceRow) => {
+    setPricingCandidatesLoading(true);
+    setPricingCandidatesError(null);
+    try {
+      const params = new URLSearchParams({ candidates: "1", sku: row.sku });
+      if (row.nmId) params.set("nmId", String(row.nmId));
+      const response = await fetch(`/api/target-prices?${params}`, { cache: "no-store" });
+      const data = await response.json() as TargetPriceCandidatesResponse;
+      if (response.status === 401) {
+        setAuthState("unauthenticated");
+        return;
+      }
+      if (!response.ok) throw new Error(data.error || "Не удалось подобрать конкурентов");
+      setPricingCandidates(data.candidates ?? []);
+      setPricingCandidatesQuery(data.query ?? row.searchQuery ?? row.sku);
+      if (data.warning) setPricingCandidatesError(data.warning);
+    } catch (candidateError) {
+      setPricingCandidatesError(candidateError instanceof Error ? candidateError.message : "Не удалось подобрать конкурентов");
+    } finally {
+      setPricingCandidatesLoading(false);
+    }
+  }, []);
+
+  const updatePricingCompetitor = useCallback(async (row: TargetPriceRow, competitorNmId: number, action: "add-competitor" | "remove-competitor") => {
+    setPricingCandidateUpdatingId(competitorNmId);
+    setPricingCandidatesError(null);
+    try {
+      const response = await fetch("/api/target-prices", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action, sku: row.sku, nmId: row.nmId, competitorNmId }),
+      });
+      const data = await response.json() as TargetPricesResponse;
+      if (!response.ok) throw new Error(data.error || "Не удалось обновить список конкурентов");
+      const updatedRows = data.rows ?? [];
+      const updated = updatedRows.find((item) => item.sku === row.sku && item.nmId === row.nmId) ?? null;
+      setTargetPriceRows(updatedRows);
+      setSelectedPricingRow(updated);
+      setPricingCandidates((items) => action === "add-competitor" ? items.filter((item) => item.nmId !== competitorNmId) : items);
+      setManualCompetitorNmId("");
+    } catch (competitorError) {
+      setPricingCandidatesError(competitorError instanceof Error ? competitorError.message : "Не удалось обновить список конкурентов");
+    } finally {
+      setPricingCandidateUpdatingId(null);
     }
   }, []);
 
@@ -869,18 +937,18 @@ export default function Home() {
   const ffReservedFromStockTotal = useMemo(() => visibleManualWarehouses.reduce((sum, warehouse) => (
     sum + (totals.fbsByLocation[warehouse.id] ?? 0)
   ), 0), [visibleManualWarehouses, totals.fbsByLocation]);
-  const ffAvailableTotal = totals.ffTotal;
-  const ffPhysicalTotal = ffAvailableTotal + ffReservedFromStockTotal;
+  const ffPhysicalTotal = totals.ffTotal;
+  const ffAvailableTotal = Math.max(0, ffPhysicalTotal - ffReservedFromStockTotal);
 
   const fulfillmentWarehouses = useMemo(() => visibleManualWarehouses.map((warehouse) => {
     const products = rows.filter((row) => (row.ffStock[warehouse.id] ?? 0) > 0 || (row.fbsByLocation[warehouse.id] ?? 0) > 0 || (row.receivingByLocation[warehouse.id] ?? 0) > 0 || (row.toSaleByLocation[warehouse.id] ?? 0) > 0);
-    const availableStock = totals.ffStock[warehouse.id] ?? 0;
+    const physicalStock = totals.ffStock[warehouse.id] ?? 0;
     const fbs = totals.fbsByLocation[warehouse.id] ?? 0;
     return {
       warehouse,
       products: products.length,
-      physicalStock: availableStock + fbs,
-      stock: availableStock,
+      physicalStock,
+      stock: Math.max(0, physicalStock - fbs),
       fbs,
       receiving: products.reduce((sum, row) => sum + (row.receivingByLocation[warehouse.id] ?? 0), 0),
       toSale: products.reduce((sum, row) => sum + (row.toSaleByLocation[warehouse.id] ?? 0), 0),
@@ -1411,8 +1479,8 @@ export default function Home() {
 
               <section className="pricing-table-card">
                 <div className="pricing-table-heading"><div><span className="section-kicker">РЕКОМЕНДАЦИИ</span><h3>Что проверить в первую очередь</h3></div><span>{pricingRows.length} из {pricingCounts.all} карточек</span></div>
-                <div className="pricing-table-wrap">{targetPricesLoading ? <div className="empty-state"><strong>Загружаем мониторинг цен…</strong></div> : <table><thead><tr><th>Товар / артикул</th><th>Цена на<br/>витрине WB</th><th>Рынок</th><th>Таргет</th><th>Изменение</th><th>Решение</th></tr></thead><tbody>{pricingRows.map((item) => <tr key={item.row.sku} className="pricing-row-open" role="button" tabIndex={0} aria-label={`Открыть рынок и конкурентов: ${item.row.sku}`} onClick={() => setSelectedPricingRow(item.row)} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); setSelectedPricingRow(item.row); } }}>
-                  <td><button className="pricing-product pricing-product-open" type="button" onClick={() => setSelectedPricingRow(item.row)}><strong>{item.row.sku}</strong><small>{item.row.searchQuery || "Запрос не указан"}{item.row.nmId ? ` · WB ${item.row.nmId}` : ""}</small><span>Открыть рынок и конкурентов →</span></button></td>
+                <div className="pricing-table-wrap">{targetPricesLoading ? <div className="empty-state"><strong>Загружаем мониторинг цен…</strong></div> : <table><thead><tr><th>Товар / артикул</th><th>Цена на<br/>витрине WB</th><th>Рынок</th><th>Таргет</th><th>Изменение</th><th>Решение</th></tr></thead><tbody>{pricingRows.map((item) => <tr key={item.row.sku} className="pricing-row-open" role="button" tabIndex={0} aria-label={`Открыть рынок и конкурентов: ${item.row.sku}`} onClick={() => openPricingRow(item.row)} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); openPricingRow(item.row); } }}>
+                  <td><button className="pricing-product pricing-product-open" type="button" onClick={() => openPricingRow(item.row)}><strong>{item.row.sku}</strong><small>{item.row.searchQuery || "Запрос не указан"}{item.row.nmId ? ` · WB ${item.row.nmId}` : ""}</small><span>Открыть рынок и конкурентов →</span></button></td>
                   <td><b>{item.row.currentPrice ? formatMoney.format(item.row.currentPrice) : "—"}</b><small>{item.row.sppPercent !== null ? `СПП ${Math.round(item.row.sppPercent * 100)}%` : "СПП не указан"}</small></td>
                   <td>{item.low !== null && item.high !== null ? <><b>{formatMoney.format(item.low)}–{formatMoney.format(item.high)}</b><small>{item.row.competitors.length} конкурента · середина {item.median ? formatMoney.format(item.median) : "—"}</small></> : <span className="pricing-empty">Нет цен</span>}</td>
                   <td><b>{item.target ? formatMoney.format(item.target) : "—"}</b><small>{item.target ? "после СПП" : "нужен рынок"}</small></td>
@@ -1427,12 +1495,17 @@ export default function Home() {
               </section>
               {selectedPricingRow && (() => {
                 const recommendation = buildPriceRecommendation(selectedPricingRow);
+                const selectedRow = selectedPricingRow;
                 return <div className="pricing-modal-backdrop" role="presentation" onMouseDown={() => setSelectedPricingRow(null)}><section className="pricing-modal" role="dialog" aria-modal="true" aria-label={`Конкуренты ${selectedPricingRow.sku}`} onMouseDown={(event) => event.stopPropagation()}>
                   <button className="pricing-modal-close" type="button" onClick={() => setSelectedPricingRow(null)} aria-label="Закрыть">×</button>
                   <span className="section-kicker">КАРТОЧКА РЫНКА</span><h3>{selectedPricingRow.sku}</h3><p>{selectedPricingRow.searchQuery || "Поисковый запрос не указан"}{selectedPricingRow.nmId ? ` · ваша карточка WB ${selectedPricingRow.nmId}` : ""}</p>
                   {selectedPricingRow.nmId && <a className="pricing-own-link" href={`https://www.wildberries.ru/catalog/${selectedPricingRow.nmId}/detail.aspx`} target="_blank" rel="noreferrer">Открыть свою карточку на WB ↗</a>}
                   <div className="pricing-modal-summary"><span>Цена на витрине WB <b>{selectedPricingRow.currentPrice ? formatMoney.format(selectedPricingRow.currentPrice) : "—"}</b></span><span>Таргет <b>{recommendation.target ? formatMoney.format(recommendation.target) : "—"}</b></span><span>Решение <b>{recommendation.label}</b></span></div>
-                  <div className="pricing-competitor-list"><h4>Конкуренты</h4>{selectedPricingRow.competitors.map((competitor) => <article key={competitor.nmId}><div><strong>{competitor.name || `Карточка WB ${competitor.nmId}`}</strong><small>{competitor.source || "добавлен в мониторинг"}{competitor.updatedAt ? ` · ${formatDateTime(competitor.updatedAt)}` : ""}</small>{competitor.error && <em>{competitor.error}</em>}</div><a href={`https://www.wildberries.ru/catalog/${competitor.nmId}/detail.aspx`} target="_blank" rel="noreferrer">{competitor.price ? formatMoney.format(competitor.price) : "Нет цены"} ↗</a></article>)}{!selectedPricingRow.competitors.length && <p>Для этой карточки пока не назначены конкуренты.</p>}</div>
+                  <div className="pricing-competitor-list"><h4>В сравнении</h4>{selectedPricingRow.competitors.map((competitor) => <article key={competitor.nmId}><div><strong>{competitor.name || `Карточка WB ${competitor.nmId}`}</strong><small>{competitor.source || "добавлен в мониторинг"}{competitor.updatedAt ? ` · ${formatDateTime(competitor.updatedAt)}` : ""}</small>{competitor.error && <em>{competitor.error}</em>}</div><div className="pricing-competitor-actions"><a href={`https://www.wildberries.ru/catalog/${competitor.nmId}/detail.aspx`} target="_blank" rel="noreferrer">{competitor.price ? formatMoney.format(competitor.price) : "Нет цены"} ↗</a>{canManage && <button type="button" className="pricing-competitor-remove" onClick={() => void updatePricingCompetitor(selectedRow, competitor.nmId, "remove-competitor")} disabled={pricingCandidateUpdatingId === competitor.nmId}>{pricingCandidateUpdatingId === competitor.nmId ? "…" : "Убрать"}</button>}</div></article>)}{!selectedPricingRow.competitors.length && <p>Для этой карточки пока не назначены конкуренты.</p>}</div>
+                  {canManage && <section className="pricing-candidate-picker"><div><span className="section-kicker">ЗАМЕНА КОНКУРЕНТА</span><h4>Выбрать из поиска WB</h4><p>Поиск идёт по запросу товара. Выбранная карточка сразу добавляется в сравнение и становится основным кандидатом на замену.</p></div><button type="button" className="secondary-btn" onClick={() => void loadPricingCandidates(selectedRow)} disabled={pricingCandidatesLoading}>{pricingCandidatesLoading ? "Ищем на WB…" : "Подобрать на WB"}</button>
+                    <form className="pricing-manual-candidate" onSubmit={(event) => { event.preventDefault(); const nmId = Number(manualCompetitorNmId); if (Number.isInteger(nmId) && nmId > 0) void updatePricingCompetitor(selectedRow, nmId, "add-competitor"); }}><label><span>Артикул WB конкурента</span><input value={manualCompetitorNmId} onChange={(event) => setManualCompetitorNmId(event.target.value.replace(/\D/g, ""))} inputMode="numeric" placeholder="Например, 123456789" /></label><button className="primary-btn" type="submit" disabled={!manualCompetitorNmId || pricingCandidateUpdatingId !== null}>{pricingCandidateUpdatingId ? "Добавляем…" : "Добавить"}</button></form>
+                    {pricingCandidatesQuery && <p className="pricing-candidate-query">Результаты WB по запросу: «{pricingCandidatesQuery}»</p>}{pricingCandidatesError && <p className="pricing-candidate-error">{pricingCandidatesError}</p>}
+                    {!!pricingCandidates.length && <div className="pricing-candidate-list">{pricingCandidates.map((candidate) => <article key={candidate.nmId}><div><strong>{candidate.name || `Карточка WB ${candidate.nmId}`}</strong><small>WB {candidate.nmId}{candidate.price ? ` · ${formatMoney.format(candidate.price)}` : " · цену WB не отдал"}</small></div><button type="button" onClick={() => void updatePricingCompetitor(selectedRow, candidate.nmId, "add-competitor")} disabled={pricingCandidateUpdatingId !== null}>{pricingCandidateUpdatingId === candidate.nmId ? "Добавляем…" : "Добавить в сравнение"}</button></article>)}</div>}</section>}
                   <footer>{recommendation.detail}{selectedPricingRow.refreshError ? ` ${selectedPricingRow.refreshError}` : ""}</footer>
                 </section></div>;
               })()}
@@ -1623,9 +1696,9 @@ export default function Home() {
               <article className="delivery-kpi delivery-time"><strong>{formatHandoverTime(handoverTiming.overall.averageHours)}</strong><div><i /></div><p>Среднее до передачи WB · все ФФ</p></article>
             </section>
 
-            <section className={`movement-card ${activeView !== "overview" && activeView !== "fbs" ? "view-hidden" : ""}`} id="movement"><div className="section-heading"><div><span className="section-kicker">ОСТАТКИ WB, ФФ И ДВИЖЕНИЕ FBS</span><h2>Фактические и свободные остатки отдельно</h2></div><span className="period-pill">Актуальные заказы за 30 дней</span></div><div className="movement-grid"><article className="wb-stock-fact"><span className="wb-stock-mark">WB</span><div><small>ФАКТИЧЕСКИЙ ОСТАТОК НА WB</small><strong>{formatNumber.format(totals.available)} <em>шт.</em></strong><p>Уже находится на складах Wildberries и не является доступным запасом для FBS.</p></div></article><div className="fbs-overview"><div className="movement-subhead"><span>ОСТАТКИ ФФ · WB API</span>{canManage && <button className="text-action" type="button" onClick={() => navigateTo("manual")}>Настроить склады</button>}</div><div className="fbs-location-grid manual-location-grid dynamic-locations">{visibleManualWarehouses.map((item) => { const free = totals.ffStock[item.id] ?? 0; const reserved = totals.fbsByLocation[item.id] ?? 0; const physical = free + reserved; return <article className="fbs-location-card manual" key={item.id}><span>{item.city}</span><strong>{formatNumber.format(physical)}</strong><small>{item.name} · свободно {free} · новые FBS {reserved}</small></article>; })}</div><div className="movement-subhead orders"><span>FBS-ЗАКАЗЫ ПО ЭТАПАМ</span><small>По данным WB API</small></div><div className="fbs-location-grid order-location-grid">{fbsLocations.map((location) => <article className="fbs-location-card" key={location.id}><span>{location.city}</span><strong>{formatNumber.format(activeFbsByLocation[location.id] ?? 0)}</strong><small>{location.label}</small></article>)}</div><div className="fbs-stage-strip"><span><b>{totals.fbs}</b> новые · ещё на ФФ</span><i>→</i><span><b>{totals.receiving}</b> переданы WB</span><i>→</i><span className="sale-stage"><b>{totals.toSale}</b> продано</span></div></div></div></section>
+            <section className={`movement-card ${activeView !== "overview" && activeView !== "fbs" ? "view-hidden" : ""}`} id="movement"><div className="section-heading"><div><span className="section-kicker">ОСТАТКИ WB, ФФ И ДВИЖЕНИЕ FBS</span><h2>Фактические и свободные остатки отдельно</h2></div><span className="period-pill">Актуальные заказы за 30 дней</span></div><div className="movement-grid"><article className="wb-stock-fact"><span className="wb-stock-mark">WB</span><div><small>ФАКТИЧЕСКИЙ ОСТАТОК НА WB</small><strong>{formatNumber.format(totals.available)} <em>шт.</em></strong><p>Уже находится на складах Wildberries и не является доступным запасом для FBS.</p></div></article><div className="fbs-overview"><div className="movement-subhead"><span>ОСТАТКИ ФФ · WB API</span>{canManage && <button className="text-action" type="button" onClick={() => navigateTo("manual")}>Настроить склады</button>}</div><div className="fbs-location-grid manual-location-grid dynamic-locations">{visibleManualWarehouses.map((item) => { const physical = totals.ffStock[item.id] ?? 0; const reserved = totals.fbsByLocation[item.id] ?? 0; const free = Math.max(0, physical - reserved); return <article className="fbs-location-card manual" key={item.id}><span>{item.city}</span><strong>{formatNumber.format(physical)}</strong><small>{item.name} · свободно {free} · новые FBS {reserved}</small></article>; })}</div><div className="movement-subhead orders"><span>FBS-ЗАКАЗЫ ПО ЭТАПАМ</span><small>По данным WB API</small></div><div className="fbs-location-grid order-location-grid">{fbsLocations.map((location) => <article className="fbs-location-card" key={location.id}><span>{location.city}</span><strong>{formatNumber.format(activeFbsByLocation[location.id] ?? 0)}</strong><small>{location.label}</small></article>)}</div><div className="fbs-stage-strip"><span><b>{totals.fbs}</b> новые · ещё на ФФ</span><i>→</i><span><b>{totals.receiving}</b> переданы WB</span><i>→</i><span className="sale-stage"><b>{totals.toSale}</b> продано</span></div></div></div></section>
 
-            <section className={`stock-card ${activeView === "reports" ? "view-hidden" : ""}`} id="stock"><div className="stock-header"><div><span className="section-kicker">ОСТАТКИ ПО АРТИКУЛАМ</span><h2>{stockTitle}</h2></div><div className="stock-tools"><label className="search-field"><span>⌕</span><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Артикул или название" aria-label="Поиск по товарам"/></label><label className="select-wrap"><span>Склад:</span><select value={warehouse} onChange={(event) => setWarehouse(event.target.value)} aria-label="Выбрать склад"><option>Все склады</option>{warehouseNames.map((item) => <option key={item}>{item}</option>)}</select></label></div></div><div className="filter-row"><div className="filter-tabs" role="tablist" aria-label="Фильтр остатков">{[{ name: "Все", count: counts.all }, { name: "Дефицит", count: counts.risk }, { name: "Активные FBS", count: counts.transit }].map((item) => <button type="button" key={item.name} className={filter === item.name ? "active" : ""} onClick={() => setFilter(item.name)}>{item.name}<span>{item.count}</span></button>)}</div><span className="result-count">Показано {filteredRows.length} из {viewTotal} артикулов</span></div><div className="table-wrap"><table><thead><tr><th>Товар / артикул</th><th>{warehouse === "Все склады" ? "Остаток WB" : "Выбранный склад WB"}</th>{visibleManualWarehouses.map((item) => <th className="ff-column-head" key={item.id}><span>{item.city}</span><small>{item.name}</small></th>)}<th>Активные FBS</th><th>Продано</th><th>Статус</th><th /></tr></thead><tbody>{filteredRows.map((row) => <tr key={row.key} onClick={() => openProduct(row)} tabIndex={0} onKeyDown={(event) => { if (event.key === "Enter") openProduct(row); }}><td><div className="product-cell"><span className="product-swatch" style={{ background: row.color }}>{row.name.charAt(0).toUpperCase()}</span><span><strong>{row.name}</strong><small>{row.sku}{row.nmId ? ` · WB ${row.nmId}` : ""} · {row.category}</small></span></div></td><td><b>{formatNumber.format(warehouse === "Все склады" ? stockTotal(row) : row.warehouses[warehouse] ?? 0)}</b><small> шт.</small></td>{visibleManualWarehouses.map((item) => <td key={item.id}><span className={`manual-stock-value ${(row.ffStock[item.id] ?? 0) === 0 ? "zero" : ""}`} title={`Остаток WB FBS: ${formatManualWarehouse(item)}`}>{formatNumber.format(row.ffStock[item.id] ?? 0)}<small> шт.</small></span></td>)}<td><span className="number-pill blue-pill">{row.fbs + row.receiving}</span></td><td><span className="number-pill green-pill">{row.toSale}</span></td><td><span className={`status ${row.status === "В норме" ? "ok" : row.status === "Мало" ? "low" : "critical"}`}><i />{row.status}</span></td><td><button type="button" className="row-action" aria-label={`Открыть ${row.name}`}>›</button></td></tr>)}</tbody></table>{loading && <div className="loading-state"><span className="loader"/><strong>Загружаем данные из Wildberries</strong><small>Остатки и статусы FBS собираются в единый отчёт</small></div>}{!loading && !filteredRows.length && <div className="empty-state"><strong>{error ? "Данные пока не загружены" : "Ничего не найдено"}</strong><span>{error ? "Проверьте подключение WB API." : "Попробуйте изменить поиск или фильтры."}</span></div>}</div><footer className="table-footer"><span><i className={error ? "live-dot offline" : "live-dot"} />{updatedAt ? `Остатки обновлены в ${formatSyncTime(updatedAt)} МСК` : "Ожидаем синхронизацию"}</span><button type="button" onClick={() => { setQuery(""); setFilter("Все"); setWarehouse("Все склады"); }}>Сбросить фильтры</button></footer></section>
+            <section className={`stock-card ${activeView === "reports" ? "view-hidden" : ""}`} id="stock"><div className="stock-header"><div><span className="section-kicker">ОСТАТКИ ПО АРТИКУЛАМ</span><h2>{stockTitle}</h2></div><div className="stock-tools"><label className="search-field"><span>⌕</span><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Артикул или название" aria-label="Поиск по товарам"/></label><label className="select-wrap"><span>Склад:</span><select value={warehouse} onChange={(event) => setWarehouse(event.target.value)} aria-label="Выбрать склад"><option>Все склады</option>{warehouseNames.map((item) => <option key={item}>{item}</option>)}</select></label></div></div><div className="filter-row"><div className="filter-tabs" role="tablist" aria-label="Фильтр остатков">{[{ name: "Все", count: counts.all }, { name: "Дефицит", count: counts.risk }, { name: "Активные FBS", count: counts.transit }].map((item) => <button type="button" key={item.name} className={filter === item.name ? "active" : ""} onClick={() => setFilter(item.name)}>{item.name}<span>{item.count}</span></button>)}</div><span className="result-count">Показано {filteredRows.length} из {viewTotal} артикулов</span></div><div className="table-wrap"><table><thead><tr><th>Товар / артикул</th><th>{warehouse === "Все склады" ? "Остаток WB" : "Выбранный склад WB"}</th>{visibleManualWarehouses.map((item) => <th className="ff-column-head" key={item.id}><span>{item.city}</span><small>{item.name}</small></th>)}<th>Активные FBS</th><th>Продано</th><th>Статус</th><th /></tr></thead><tbody>{filteredRows.map((row) => <tr key={row.key} onClick={() => openProduct(row)} tabIndex={0} onKeyDown={(event) => { if (event.key === "Enter") openProduct(row); }}><td><div className="product-cell"><span className="product-swatch" style={{ background: row.color }}>{row.name.charAt(0).toUpperCase()}</span><span><strong>{row.name}</strong><small>{row.sku}{row.nmId ? ` · WB ${row.nmId}` : ""} · {row.category}</small></span></div></td><td><b>{formatNumber.format(warehouse === "Все склады" ? stockTotal(row) : row.warehouses[warehouse] ?? 0)}</b><small> шт.</small></td>{visibleManualWarehouses.map((item) => { const free = availableFfStock(row, item.id); return <td key={item.id}><span className={`manual-stock-value ${free === 0 ? "zero" : ""}`} title={`Свободно к продаже на ФФ: ${formatManualWarehouse(item)}`}>{formatNumber.format(free)}<small> шт.</small></span></td>; })}<td><span className="number-pill blue-pill">{row.fbs + row.receiving}</span></td><td><span className="number-pill green-pill">{row.toSale}</span></td><td><span className={`status ${row.status === "В норме" ? "ok" : row.status === "Мало" ? "low" : "critical"}`}><i />{row.status}</span></td><td><button type="button" className="row-action" aria-label={`Открыть ${row.name}`}>›</button></td></tr>)}</tbody></table>{loading && <div className="loading-state"><span className="loader"/><strong>Загружаем данные из Wildberries</strong><small>Остатки и статусы FBS собираются в единый отчёт</small></div>}{!loading && !filteredRows.length && <div className="empty-state"><strong>{error ? "Данные пока не загружены" : "Ничего не найдено"}</strong><span>{error ? "Проверьте подключение WB API." : "Попробуйте изменить поиск или фильтры."}</span></div>}</div><footer className="table-footer"><span><i className={error ? "live-dot offline" : "live-dot"} />{updatedAt ? `Остатки обновлены в ${formatSyncTime(updatedAt)} МСК` : "Ожидаем синхронизацию"}</span><button type="button" onClick={() => { setQuery(""); setFilter("Все"); setWarehouse("Все склады"); }}>Сбросить фильтры</button></footer></section>
 
             {activeView === "reports" && <section className="reports-panel" id="reports"><div className="section-heading"><div><span className="section-kicker">ГОТОВЫЕ ВЫГРУЗКИ</span><h2>Скачать данные из кабинета</h2></div><span className="period-pill">CSV · Excel</span></div><div className="reports-grid"><article className="report-card"><span className="report-symbol blue">□</span><div><strong>Все остатки</strong><p>Артикулы и количество по каждому складу</p><small>{rows.length} артикулов · {warehouseNames.length} складов WB</small></div><button type="button" onClick={() => downloadCsv(rows, "vse-ostatki-wb")} disabled={!rows.length}>Скачать ↓</button></article><article className="report-card"><span className="report-symbol amber">→</span><div><strong>FBS-движение</strong><p>Новые, переданные WB и фактически выкупленные товары</p><small>{counts.transit} артикулов · {activeFbsTotal} активных единиц</small></div><button type="button" onClick={() => downloadCsv(rows.filter(hasFbsMovement), "fbs-wb")} disabled={!counts.transit}>Скачать ↓</button></article><article className="report-card"><span className="report-symbol green">▤</span><div><strong>Остатки ФФ из WB API</strong><p>Видимые FBS-склады и остатки по артикулам</p><small>{visibleManualWarehouses.length} складов ФФ</small></div><button type="button" onClick={() => downloadCsv(rows, "ostatki-ff")} disabled={!rows.length}>Скачать ↓</button></article></div></section>}
           </>}
