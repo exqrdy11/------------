@@ -57,12 +57,14 @@ test("артикул в таргете цен открывает рынок и �
   assert.match(page, /catalog\/\$\{competitor\.nmId\}\/detail\.aspx/);
 });
 
-test("новые FBS остаются в физическом остатке ФФ и отдельно резервируются", async () => {
+test("новые FBS остаются на ФФ, но не входят в свободный остаток", async () => {
   const page = await readFile(new URL("app/page.tsx", root), "utf8");
 
   assert.match(page, /Фактически на ФФ/);
   assert.match(page, /Свободно к продаже/);
   assert.match(page, /ещё лежат на ФФ/);
   assert.match(page, /physical: \{ kicker: "ФАКТИЧЕСКИ НА ФФ"/);
-  assert.match(page, /fulfillmentList === "physical" \? physicalStock/);
+  assert.match(page, /function physicalFfStock/);
+  assert.match(page, /return availableFfStock\(row, warehouseId\) \+ \(row\.fbsByLocation\[warehouseId\] \?\? 0\)/);
+  assert.match(page, /Фактически на ФФ \{formatNumber\.format\(ffPhysicalTotal\)\}/);
 });
