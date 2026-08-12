@@ -15,6 +15,7 @@ test("таргет цен работает через API WB, а не через
   assert.match(page, /Конкуренты/);
   assert.match(route, /https:\/\/card\.wb\.ru\/cards\/v4\/detail/);
   assert.match(route, /cabinetToken\(session\.cabinetId\)/);
+  assert.match(route, /data\.products \?\? data\.data\?\.products/);
   assert.match(route, /export async function GET/);
   assert.match(route, /export async function POST/);
 });
@@ -45,4 +46,13 @@ test("остатки ФФ и движение FBS переживают врем�
   assert.match(route, /partial response must never become the new baseline/);
   assert.match(snapshots, /inventory_snapshots/);
   assert.match(snapshots, /ON CONFLICT\(cabinet_id\) DO UPDATE/);
+});
+
+test("артикул в таргете цен открывает рынок и ссылки на конкурентов", async () => {
+  const page = await readFile(new URL("app/page.tsx", root), "utf8");
+
+  assert.match(page, /pricing-row-open/);
+  assert.match(page, /Открыть рынок и конкурентов/);
+  assert.match(page, /Открыть свою карточку на WB/);
+  assert.match(page, /catalog\/\$\{competitor\.nmId\}\/detail\.aspx/);
 });

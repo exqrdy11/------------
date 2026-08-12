@@ -15,7 +15,9 @@ type WbCard = {
   brand?: string;
   sizes?: Array<{ price?: { product?: number } }>;
 };
-type WbCardsResponse = { data?: { products?: WbCard[] } };
+// WB returns `products` at the root of this public endpoint. Older examples
+// used `data.products`, so accept both shapes while the public API evolves.
+type WbCardsResponse = { products?: WbCard[]; data?: { products?: WbCard[] } };
 type SellerPrice = { nmId?: number; discountedPrice?: number };
 type SellerPricesResponse = { data?: { listGoods?: SellerPrice[] } };
 type PricePoint = { price: number | null; name: string | null };
@@ -55,7 +57,8 @@ async function fetchPublicPrices(nmIds: number[]) {
         continue;
       }
       const data = await response.json() as WbCardsResponse;
-      for (const card of data.data?.products ?? []) {
+      const cards = data.products ?? data.data?.products ?? [];
+      for (const card of cards) {
         if (!card.id) continue;
         prices.set(card.id, {
           price: priceFromCard(card),
