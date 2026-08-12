@@ -66,15 +66,50 @@ test("в таргете цен можно подобрать и сохранит
 
   assert.match(route, /WB_SEARCH_API/);
   assert.match(route, /searchParams\.get\("candidates"\) === "1"/);
-  assert.match(route, /сохранённый кандидат WB/);
+  assert.match(route, /getTargetPriceCandidateSnapshot/);
   assert.match(route, /add-competitor/);
   assert.match(route, /remove-competitor/);
   assert.match(route, /выбран вручную/);
-  assert.match(page, /Подобрать на WB/);
+  assert.match(page, /Обновить подбор WB/);
   assert.match(page, /Артикул WB конкурента/);
   assert.match(page, /Добавить в сравнение/);
   assert.match(page, /Убрать/);
   assert.match(storage, /competitors_json/);
+});
+
+test("цены и подбор конкурентов обновляются раздельно и имеют общий лимит пять минут", async () => {
+  const [page, route, storage] = await Promise.all([
+    readFile(new URL("app/page.tsx", root), "utf8"),
+    readFile(new URL("app/api/target-prices/route.ts", root), "utf8"),
+    readFile(new URL("db/target-prices.ts", root), "utf8"),
+  ]);
+
+  assert.match(route, /TARGET_PRICE_REFRESH_COOLDOWN_MS = 5 \* 60 \* 1000/);
+  assert.match(route, /action === "refresh-candidates"/);
+  assert.match(route, /reserveTargetPriceRefresh\(session\.cabinetId, "competitors"/);
+  assert.match(route, /reserveTargetPriceRefresh\(session\.cabinetId, "prices"/);
+  assert.match(route, /getTargetPriceCandidateSnapshot/);
+  assert.match(storage, /target_price_candidate_snapshots/);
+  assert.match(storage, /target_price_refresh_locks/);
+  assert.match(page, /Сохранённый снимок цен WB/);
+  assert.match(page, /Обновить подбор WB/);
+  assert.match(page, /Подбор через \$\{formatCountdown/);
+});
+
+test("главная открывается из сохранённого снимка, а WB обновляется вручную раз в пять минут", async () => {
+  const [route, snapshots] = await Promise.all([
+    readFile(new URL("app/api/inventory/route.ts", root), "utf8"),
+    readFile(new URL("db/inventory-snapshots.ts", root), "utf8"),
+  ]);
+
+  assert.match(route, /MANUAL_REFRESH_COOLDOWN_MS = 5 \* 60 \* 1000/);
+  assert.match(route, /if \(!force && lastKnown\)/);
+  assert.match(route, /Opening the dashboard never calls Wildberries/);
+  assert.match(route, /reserveInventoryRefresh\(cabinetId, MANUAL_REFRESH_COOLDOWN_MS\)/);
+  assert.match(route, /Ten users/);
+  assert.match(snapshots, /inventory_refresh_locks/);
+  assert.match(snapshots, /reserveInventoryRefresh/);
+  assert.match(snapshots, /getInventoryRefreshCooldown/);
 });
 
 test("новые FBS остаются на ФФ, но не входят в свободный остаток", async () => {

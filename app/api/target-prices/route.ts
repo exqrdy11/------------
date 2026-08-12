@@ -1,5 +1,14 @@
 import { NextResponse } from "next/server";
-import { listTargetPrices, saveTargetPrices, type TargetPriceCompetitor, type TargetPriceRow } from "@/db/target-prices";
+import {
+  getTargetPriceCandidateSnapshot,
+  getTargetPriceRefreshCooldown,
+  listTargetPrices,
+  reserveTargetPriceRefresh,
+  saveTargetPriceCandidateSnapshot,
+  saveTargetPrices,
+  type TargetPriceCompetitor,
+  type TargetPriceRow,
+} from "@/db/target-prices";
 import { cabinetToken, getAdminCabinet, getOwnerSession } from "@/lib/admin-auth";
 
 export const dynamic = "force-dynamic";
@@ -9,6 +18,7 @@ const WB_SEARCH_API = "https://search.wb.ru/exactmatch/ru/common/v18/search";
 const WB_SELLER_PRICES_API = "https://discounts-prices-api.wildberries.ru/api/v2/list/goods/filter";
 const MOSCOW_DESTINATION = "-1257786";
 const CHUNK_SIZE = 50;
+const TARGET_PRICE_REFRESH_COOLDOWN_MS = 5 * 60 * 1000;
 
 type WbCard = {
   id?: number;
@@ -122,6 +132,11 @@ function findTargetPriceRow(rows: TargetPriceRow[], sku: unknown, nmId: unknown)
   return rows.find((row) => (normalizedNmId && row.nmId === normalizedNmId) || (normalizedSku && row.sku === normalizedSku));
 }
 
+function cooldownMessage(cooldownUntil: string | null, kind: "prices" | "competitors") {
+  const subject = kind === "prices" ? "Цены" : "Подбор конкурентов";
+  return `${subject} уже обновляются или были обновлены недавно. Следующая попытка доступна после общего 5-минутного таймера.`;
+}
+
 async function fetchSellerPrices(token: string, nmIds: number[]) {
   try {
     const response = await fetch(WB_SELLER_PRICES_API, {
@@ -152,43 +167,53 @@ export async function GET(request: Request) {
   if (url.searchParams.get("candidates") === "1") {
     const row = findTargetPriceRow(rows, sku, nmId);
     if (!row) return NextResponse.json({ error: "Товар для подбора конкурента не найден" }, { status: 404, headers: { "Cache-Control": "no-store" } });
-    const query = row.searchQuery?.trim() || row.sku;
-    const excluded = new Set([row.nmId, ...row.competitors.map((competitor) => competitor.nmId)].filter((id): id is number => Boolean(id)));
-    const savedCandidateIds = row.candidateNmId && !excluded.has(row.candidateNmId) ? [row.candidateNmId] : [];
-    const [result, savedCandidates] = await Promise.all([
-      query ? fetchSearchCandidates(query) : Promise.resolve({ candidates: [] as WbCard[], error: "У товара нет запроса для поиска конкурентов" }),
-      savedCandidateIds.length ? fetchPublicPrices(savedCandidateIds) : Promise.resolve({ prices: new Map<number, PricePoint>(), errors: [] as string[] }),
+    const [snapshot, cooldownUntil] = await Promise.all([
+      getTargetPriceCandidateSnapshot(cabinetId, row),
+      getTargetPriceRefreshCooldown(cabinetId, "competitors"),
     ]);
-    const saved = savedCandidateIds.flatMap((candidateNmId): TargetPriceCompetitor[] => {
-      const point = savedCandidates.prices.get(candidateNmId);
-      return [{
-        nmId: candidateNmId,
-        price: point?.price ?? null,
-        source: "сохранённый кандидат WB",
-        name: point?.name ?? null,
-        updatedAt: point ? new Date().toISOString() : null,
-        error: point ? null : savedCandidates.errors[0] ?? null,
-      }];
-    });
-    const searched = result.candidates
-      .flatMap((card) => {
-        const competitor = cardToCompetitor(card, "поиск WB");
-        return competitor && !excluded.has(competitor.nmId) ? [competitor] : [];
-      });
-    const candidates = [...saved, ...searched]
-      .filter((candidate, index, all) => all.findIndex((item) => item.nmId === candidate.nmId) === index)
-      .slice(0, 12);
-    const warnings = [result.error, ...savedCandidates.errors].filter((message): message is string => Boolean(message));
-    return NextResponse.json({ candidates, query, warning: warnings.length ? [...new Set(warnings)].join(" ") : null }, { headers: { "Cache-Control": "no-store" } });
+    return NextResponse.json({
+      candidates: snapshot?.candidates ?? [],
+      query: snapshot?.query ?? row.searchQuery?.trim() ?? row.sku,
+      updatedAt: snapshot?.updatedAt ?? null,
+      warning: snapshot?.warning ?? null,
+      cooldownUntil,
+    }, { headers: { "Cache-Control": "no-store" } });
   }
   const latest = rows.reduce<string | null>((result, row) => row.refreshedAt && (!result || row.refreshedAt > result) ? row.refreshedAt : result, null);
-  return NextResponse.json({ rows, updatedAt: latest }, { headers: { "Cache-Control": "no-store" } });
+  const cooldownUntil = await getTargetPriceRefreshCooldown(cabinetId, "prices");
+  return NextResponse.json({ rows, updatedAt: latest, cooldownUntil }, { headers: { "Cache-Control": "no-store" } });
 }
 
 export async function POST(request: Request) {
   const session = await getOwnerSession(request);
   if (!session) return NextResponse.json({ error: "Обновлять цены может только владелец кабинета" }, { status: 403, headers: { "Cache-Control": "no-store" } });
   const body = await request.json().catch(() => null) as { action?: unknown; sku?: unknown; nmId?: unknown; competitorNmId?: unknown } | null;
+  if (body?.action === "refresh-candidates") {
+    const rows = await listTargetPrices(session.cabinetId);
+    const row = findTargetPriceRow(rows, body.sku, body.nmId);
+    if (!row) return NextResponse.json({ error: "Товар для подбора конкурента не найден" }, { status: 404, headers: { "Cache-Control": "no-store" } });
+    const reservation = await reserveTargetPriceRefresh(session.cabinetId, "competitors", TARGET_PRICE_REFRESH_COOLDOWN_MS);
+    if (!reservation.reserved) return NextResponse.json({ error: cooldownMessage(reservation.cooldownUntil, "competitors"), cooldownUntil: reservation.cooldownUntil }, { status: 429, headers: { "Cache-Control": "no-store" } });
+
+    const previous = await getTargetPriceCandidateSnapshot(session.cabinetId, row);
+    const query = row.searchQuery?.trim() || row.sku;
+    const excluded = new Set([row.nmId, ...row.competitors.map((competitor) => competitor.nmId)].filter((id): id is number => Boolean(id)));
+    const result = query ? await fetchSearchCandidates(query) : { candidates: [] as WbCard[], error: "У товара нет запроса для поиска конкурентов" };
+    const candidates = result.candidates
+      .flatMap((card) => {
+        const competitor = cardToCompetitor(card, "поиск WB");
+        return competitor && !excluded.has(competitor.nmId) ? [competitor] : [];
+      })
+      .filter((candidate, index, all) => all.findIndex((item) => item.nmId === candidate.nmId) === index)
+      .slice(0, 12)
+      .map((candidate) => ({ ...candidate, updatedAt: new Date().toISOString() }));
+    const warning = result.error ? `${result.error}${previous?.candidates.length ? " Показана предыдущая сохранённая подборка." : ""}` : null;
+    const snapshot = result.error && previous
+      ? { ...previous, warning }
+      : { query, candidates, updatedAt: new Date().toISOString(), warning };
+    if (!result.error) await saveTargetPriceCandidateSnapshot(session.cabinetId, row, snapshot);
+    return NextResponse.json({ ...snapshot, cooldownUntil: reservation.cooldownUntil }, { headers: { "Cache-Control": "no-store" } });
+  }
   if (body?.action === "add-competitor" || body?.action === "remove-competitor") {
     const rows = await listTargetPrices(session.cabinetId);
     const row = findTargetPriceRow(rows, body.sku, body.nmId);
@@ -199,15 +224,15 @@ export async function POST(request: Request) {
     if (body.action === "remove-competitor") {
       competitors = competitors.filter((competitor) => competitor.nmId !== competitorNmId);
     } else if (!competitors.some((competitor) => competitor.nmId === competitorNmId)) {
-      const result = await fetchPublicPrices([competitorNmId]);
-      const point = result.prices.get(competitorNmId);
+      const snapshot = await getTargetPriceCandidateSnapshot(session.cabinetId, row);
+      const selectedCandidate = snapshot?.candidates.find((candidate) => candidate.nmId === competitorNmId);
       competitors = [...competitors, {
         nmId: competitorNmId,
-        price: point?.price ?? null,
+        price: selectedCandidate?.price ?? null,
         source: "выбран вручную",
-        name: point?.name ?? null,
-        updatedAt: point ? new Date().toISOString() : null,
-        error: point ? null : result.errors[0] ?? "WB не отдал цену этой карточки",
+        name: selectedCandidate?.name ?? null,
+        updatedAt: selectedCandidate?.updatedAt ?? null,
+        error: selectedCandidate ? selectedCandidate.error : "Цена появится после отдельного обновления цен.",
       }];
     }
     const updatedRows = rows.map((item) => item.sku === row.sku && item.nmId === row.nmId
@@ -223,6 +248,9 @@ export async function POST(request: Request) {
   }
   const token = cabinetToken(session.cabinetId);
   if (!token) return NextResponse.json({ error: "Токен Wildberries ещё не подключён" }, { status: 503, headers: { "Cache-Control": "no-store" } });
+
+  const reservation = await reserveTargetPriceRefresh(session.cabinetId, "prices", TARGET_PRICE_REFRESH_COOLDOWN_MS);
+  if (!reservation.reserved) return NextResponse.json({ error: cooldownMessage(reservation.cooldownUntil, "prices"), cooldownUntil: reservation.cooldownUntil }, { status: 429, headers: { "Cache-Control": "no-store" } });
 
   const rows = await listTargetPrices(session.cabinetId);
   const publicIds = [...new Set(rows.flatMap((row) => [row.nmId, ...row.competitors.map((competitor) => competitor.nmId)]).filter((id): id is number => Boolean(id)))];
@@ -254,5 +282,5 @@ export async function POST(request: Request) {
     };
   });
   await saveTargetPrices(session.cabinetId, refreshed);
-  return NextResponse.json({ rows: refreshed, updatedAt: refreshedAt, warnings: sharedErrors }, { headers: { "Cache-Control": "no-store" } });
+  return NextResponse.json({ rows: refreshed, updatedAt: refreshedAt, warnings: sharedErrors, cooldownUntil: reservation.cooldownUntil }, { headers: { "Cache-Control": "no-store" } });
 }

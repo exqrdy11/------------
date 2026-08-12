@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { batchesForProduct, emptyFfBatches, emptyFfExpiry, emptyFfStock, expiryForProduct, listFfStocks, listFfWarehouses, stockForProduct, syncWbFbsWarehouses, type FfBatches, type FfExpiry, type FfStock, type ManualWarehouse } from "@/db/ff-stocks";
 import { fbsHandoverMetrics, recordFbsHandoverObservations, type HandoverMetrics } from "@/db/fbs-handover-metrics";
-import { loadInventorySnapshot, saveInventorySnapshot } from "@/db/inventory-snapshots";
+import { getInventoryRefreshCooldown, loadInventorySnapshot, reserveInventoryRefresh, saveInventorySnapshot } from "@/db/inventory-snapshots";
 import { cabinetSummary, cabinetToken, getAdminCabinet, type CabinetId, type CabinetSummary } from "@/lib/admin-auth";
 
 export const dynamic = "force-dynamic";
@@ -92,11 +92,10 @@ type DashboardPayload = {
   handoverTiming: HandoverMetrics & { byLocation?: Record<string, HandoverTiming> };
 };
 
-const CACHE_LIFETIME_MS = 2 * 60 * 1000;
-const FORCE_REFRESH_COOLDOWN_MS = 20 * 1000;
+const MANUAL_REFRESH_COOLDOWN_MS = 5 * 60 * 1000;
 const INVENTORY_REFRESH_TIMEOUT_MS = 25 * 1000;
 const WB_STOCK_REQUEST_INTERVAL_MS = 250;
-const memoryCache = new Map<CabinetId, { createdAt: number; expiresAt: number; payload: DashboardPayload }>();
+const memoryCache = new Map<CabinetId, { payload: DashboardPayload }>();
 
 type WbApiError = Error & { status?: number; retryAfterSeconds?: number };
 
@@ -120,6 +119,14 @@ function rateLimitRetrySeconds(response: Response) {
 function retryAfterSeconds(error: unknown) {
   const apiError = error as WbApiError;
   return apiError.status === 429 ? apiError.retryAfterSeconds ?? 30 : 0;
+}
+
+function laterRetryAt(...values: Array<string | null | undefined>) {
+  return values.reduce<string | null>((latest, value) => {
+    if (!value) return latest;
+    if (!latest || Date.parse(value) > Date.parse(latest)) return value;
+    return latest;
+  }, null);
 }
 
 function pause(milliseconds: number, signal?: AbortSignal) {
@@ -451,24 +458,47 @@ export async function GET(request: Request) {
   }
 
   const force = new URL(request.url).searchParams.get("refresh") === "1";
-  const now = Date.now();
   const cached = memoryCache.get(cabinetId);
-  const cachedRetryAt = cached?.payload.retryAt ? Date.parse(cached.payload.retryAt) : Number.NaN;
-  const cacheIsWaitingForWb = Number.isFinite(cachedRetryAt) && cachedRetryAt > now;
-  const retryWindowExpired = Number.isFinite(cachedRetryAt) && cachedRetryAt <= now;
-  const forceIsTooSoon = force && cached && now - cached.createdAt < FORCE_REFRESH_COOLDOWN_MS && !retryWindowExpired;
-  // A cooldown is a hard stop, not an invitation to keep retrying in the
-  // background. The person looking at the dashboard chooses the next refresh.
-  if (cached && cacheIsWaitingForWb) {
-    return NextResponse.json(await attachFfStocks(cached.payload, cabinetId), { headers: { "Cache-Control": "private, max-age=0" } });
-  }
-  if (cached && cached.expiresAt > now && (!force || forceIsTooSoon)) {
-    return NextResponse.json(await attachFfStocks({ ...cached.payload, retryAt: cacheIsWaitingForWb ? cached.payload.retryAt : null }, cabinetId), { headers: { "Cache-Control": "private, max-age=0" } });
-  }
-
   const persisted = await loadInventorySnapshot<DashboardPayload>(cabinetId).catch(() => null);
   const durableSnapshot = persisted && Array.isArray(persisted.rows) ? persisted : null;
   const lastKnown = cached?.payload ?? durableSnapshot;
+  const currentCooldownUntil = await getInventoryRefreshCooldown(cabinetId).catch(() => null);
+
+  // Opening the dashboard never calls Wildberries when a shared snapshot is
+  // available. Everyone sees the same persisted figures until somebody makes
+  // a deliberate manual refresh.
+  if (!force && lastKnown) {
+    const snapshot = {
+      ...lastKnown,
+      retryAt: laterRetryAt(lastKnown.retryAt, currentCooldownUntil),
+    };
+    return NextResponse.json(await attachFfStocks(snapshot, cabinetId), { headers: { "Cache-Control": "private, max-age=0" } });
+  }
+
+  // The lock is stored in D1, not in a browser or process cache. Ten users
+  // pressing refresh therefore produce one WB request for the whole cabinet.
+  const reservation = await reserveInventoryRefresh(cabinetId, MANUAL_REFRESH_COOLDOWN_MS);
+  if (!reservation.reserved) {
+    if (lastKnown) {
+      const snapshot = {
+        ...lastKnown,
+        retryAt: laterRetryAt(lastKnown.retryAt, reservation.cooldownUntil),
+      };
+      return NextResponse.json(await attachFfStocks(snapshot, cabinetId), { headers: { "Cache-Control": "private, max-age=0" } });
+    }
+    return NextResponse.json(
+      {
+        configured: true,
+        cabinet,
+        error: "Обновление уже запущено другим пользователем. Повторите после таймера.",
+        retryAt: reservation.cooldownUntil,
+      },
+      { status: 429, headers: { "Cache-Control": "no-store" } },
+    );
+  }
+
+  const manualCooldownUntil = reservation.cooldownUntil;
+  const now = Date.now();
 
   const refreshController = new AbortController();
   let refreshTimedOut = false;
@@ -488,7 +518,7 @@ export async function GET(request: Request) {
     if (refreshTimedOut && lastKnown) {
       const fallback = {
         ...lastKnown,
-        retryAt: null,
+        retryAt: laterRetryAt(lastKnown.retryAt, manualCooldownUntil),
         warnings: [...new Set([...lastKnown.warnings, "WB отвечает дольше 25 секунд — показаны последние корректные данные"])],
       };
       return NextResponse.json(await attachFfStocks(fallback, cabinetId), { headers: { "Cache-Control": "private, max-age=0" } });
@@ -526,7 +556,7 @@ export async function GET(request: Request) {
   if (refreshTimedOut && lastKnown) {
     const fallback = {
       ...lastKnown,
-      retryAt: null,
+      retryAt: laterRetryAt(lastKnown.retryAt, manualCooldownUntil),
       warnings: [...new Set([...lastKnown.warnings, "WB отвечает дольше 25 секунд — показаны последние корректные данные"])],
     };
     return NextResponse.json(await attachFfStocks(fallback, cabinetId), { headers: { "Cache-Control": "private, max-age=0" } });
@@ -657,7 +687,12 @@ export async function GET(request: Request) {
 
   if (!rows.length && warnings.length) {
     return NextResponse.json(
-      { configured: true, error: "Wildberries не вернул данные. Проверьте категории токена: Контент, Маркетплейс и Аналитика.", warnings, retryAt },
+      {
+        configured: true,
+        error: "Wildberries не вернул данные. Проверьте категории токена: Контент, Маркетплейс и Аналитика.",
+        warnings,
+        retryAt: laterRetryAt(retryAt, manualCooldownUntil),
+      },
       { status: 502, headers: { "Cache-Control": "no-store" } },
     );
   }
@@ -688,12 +723,12 @@ export async function GET(request: Request) {
     ...fallbackFbsWarehouseIds,
   ])];
   const payload: DashboardPayload = { configured: true, cabinet, rows, warehouseNames, manualWarehouses: [], fbsStockSyncedWarehouseIds, totals, warnings, retryAt, updatedAt, handoverTiming };
-  memoryCache.set(cabinetId, { createdAt: now, expiresAt: now + CACHE_LIFETIME_MS, payload });
+  memoryCache.set(cabinetId, { payload });
   if (snapshotIsComplete) {
     await saveInventorySnapshot(cabinetId, payload, updatedAt).catch(() => undefined);
   }
 
-  return NextResponse.json(await attachFfStocks(payload, cabinetId), { headers: { "Cache-Control": "private, max-age=0" } });
+  return NextResponse.json(await attachFfStocks({ ...payload, retryAt: laterRetryAt(retryAt, manualCooldownUntil) }, cabinetId), { headers: { "Cache-Control": "private, max-age=0" } });
   } finally {
     clearTimeout(refreshTimeout);
   }
