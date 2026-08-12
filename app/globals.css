@@ -228,6 +228,9 @@ tbody tr { cursor: pointer; transition: background .15s; outline: 0; }tbody tr:h
 }
 
 /* Manual WB price monitoring and the competitor detail card. */
+.fulfillment-metric-grid-five { grid-template-columns: repeat(5, minmax(0, 1fr)); }.fulfillment-metric.physical { border-color: #cfdfd7; background: #f5fbf7; }.fulfillment-metric.physical strong { color: #238961; }.fulfillment-metric.physical.active { border-color: #79bc9f; background: #effaf4; }.fulfillment-metric.physical.active strong { color: #238961; }
+@media (max-width: 1120px) { .fulfillment-metric-grid-five { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
+@media (max-width: 760px) { .fulfillment-metric-grid-five { grid-template-columns: 1fr 1fr; } }
 .pricing-viewer-note { padding: 10px 12px; border: 1px solid #e2e7ed; border-radius: 9px; color: #7b8798; background: #fafcff; font-size: 10px; font-weight: 700; }
 .pricing-source-strip.has-warning { border-color: #f0d5a1; background: #fffaf1; }.pricing-source-strip.has-warning > span { color: #ad711a; background: #fff0ce; }.pricing-source-strip.has-warning strong { color: #8e641e; }.pricing-source-strip.has-warning p { color: #9e7d48; }
 .pricing-row-open { cursor: pointer; }.pricing-row-open:hover td { background: #fafcff; }.pricing-row-open:focus-visible { outline: 2px solid #9bb4ff; outline-offset: -2px; }.pricing-product-open { width: 100%; padding: 0; border: 0; color: inherit; background: transparent; font: inherit; text-align: left; cursor: pointer; }.pricing-product-open:hover strong, .pricing-product-open:focus-visible strong { color: #315de2; text-decoration: underline; }.pricing-product-open:focus-visible { outline: 2px solid #9bb4ff; outline-offset: 3px; border-radius: 4px; }.pricing-product-open span { margin-top: 5px; display: inline-flex; color: #3d60c7; font-size: 8px; font-weight: 750; }
