@@ -9,7 +9,15 @@ export const dynamic = "force-dynamic";
 
 type FbsBreakdown = Record<string, number>;
 type HandoverTiming = { sampleSize: number; averageHours: number | null };
-type OzonStock = { warehouse_id?: number | string; warehouse_name?: string; present?: number; reserved?: number; type?: string; warehouse_type?: string };
+type OzonStock = {
+  warehouse_id?: number | string;
+  warehouse_name?: string;
+  warehouse_ids?: Array<number | string>;
+  present?: number;
+  reserved?: number;
+  type?: string;
+  warehouse_type?: string;
+};
 type OzonStockItem = { product_id?: number; offer_id?: string; name?: string; stocks?: OzonStock[] };
 type OzonProduct = { id?: number; product_id?: number; offer_id?: string; name?: string };
 type OzonPostingProduct = { product_id?: number; offer_id?: string; name?: string; quantity?: number };
@@ -79,7 +87,10 @@ function dateKey(value: string | undefined) {
 
 function isSellerFbsStock(stock: OzonStock, sellerIds: Set<number>) {
   const type = `${stock.type ?? ""} ${stock.warehouse_type ?? ""}`.toLowerCase();
-  return sellerIds.has(Number(stock.warehouse_id)) || type.includes("fbs") || type.includes("seller");
+  return sellerIds.has(Number(stock.warehouse_id))
+    || (stock.warehouse_ids ?? []).some((id) => sellerIds.has(Number(id)))
+    || type.includes("fbs")
+    || type.includes("seller");
 }
 
 function physicalStock(stock: OzonStock) {
@@ -98,17 +109,17 @@ async function getOzonWarehouses(signal: AbortSignal) {
 
 async function getOzonStocks(signal: AbortSignal) {
   const items: OzonStockItem[] = [];
-  let lastId = "";
+  let cursor = "";
   for (let page = 0; page < 30; page += 1) {
-    const data = await ozonFetch<{ result?: { items?: OzonStockItem[]; last_id?: string; lastId?: string }; items?: OzonStockItem[] }>("/v3/product/info/stocks", {
+    const data = await ozonFetch<{ items?: OzonStockItem[]; cursor?: string }>("/v4/product/info/stocks", {
       method: "POST",
-      body: JSON.stringify({ filter: { offer_id: [], product_id: [], visibility: "ALL" }, last_id: lastId, limit: 1000 }),
+      body: JSON.stringify({ filter: { offer_id: [], product_id: [], visibility: "ALL" }, cursor, limit: 1000 }),
     }, signal);
-    const batch = data.result?.items ?? data.items ?? [];
+    const batch = data.items ?? [];
     items.push(...batch);
-    const next = data.result?.last_id ?? data.result?.lastId ?? "";
-    if (!batch.length || !next || next === lastId) break;
-    lastId = next;
+    const next = data.cursor ?? "";
+    if (!batch.length || !next || next === cursor) break;
+    cursor = next;
   }
   return items;
 }
@@ -117,7 +128,7 @@ async function enrichProductNames(items: OzonStockItem[], signal: AbortSignal) {
   const ids = [...new Set(items.map((item) => Number(item.product_id)).filter((id) => Number.isInteger(id) && id > 0))];
   const names = new Map<number, { name: string; offerId: string }>();
   for (const idsChunk of chunks(ids, 1000)) {
-    const data = await ozonFetch<{ items?: OzonProduct[]; result?: { items?: OzonProduct[] } }>("/v2/product/info/list", {
+    const data = await ozonFetch<{ items?: OzonProduct[]; result?: { items?: OzonProduct[] } }>("/v3/product/info/list", {
       method: "POST",
       body: JSON.stringify({ product_id: idsChunk }),
     }, signal);
@@ -235,11 +246,13 @@ async function refreshOzonInventory(signal: AbortSignal): Promise<OzonPayload> {
     for (const stock of item.stocks ?? []) {
       const quantity = physicalStock(stock);
       if (!quantity) continue;
-      const warehouseId = Number(stock.warehouse_id);
+      const warehouseIds = [stock.warehouse_id, ...(stock.warehouse_ids ?? [])]
+        .map((id) => Number(id))
+        .filter((id) => Number.isInteger(id) && id > 0);
       if (isSellerFbsStock(stock, sellerIds)) {
-        if (Number.isInteger(warehouseId) && warehouseId > 0) increment(row.fbsStockByWbWarehouse, String(warehouseId), quantity);
+        for (const warehouseId of warehouseIds) increment(row.fbsStockByWbWarehouse, String(warehouseId), quantity);
       } else {
-        const name = `Ozon · ${stock.warehouse_name?.trim() || `FBO ${warehouseId || "склад"}`}`;
+        const name = `Ozon · ${stock.warehouse_name?.trim() || "FBO"}`;
         row.warehouses[name] = (row.warehouses[name] ?? 0) + quantity;
       }
     }
