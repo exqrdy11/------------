@@ -15,7 +15,7 @@ type FfStock = Record<string, number>;
 type FfExpiry = Record<string, string | null>;
 type FfBatch = { location: string; batchCode: string; expiresAt: string | null; quantity: number };
 type FfBatches = Record<string, FfBatch[]>;
-type CabinetSummary = { id: "metanutrix" | "ozon"; name: string; configured: boolean; marketplace: "wb" | "ozon" };
+type CabinetSummary = { id: "metanutrix" | "ozon" | "yandex"; name: string; configured: boolean; marketplace: "wb" | "ozon" | "yandex" };
 type UserRole = "owner" | "viewer";
 type MarketplaceConnection = {
   platform: "yandex" | "ozon";
@@ -569,6 +569,7 @@ export default function Home() {
   const [pricingCandidatesError, setPricingCandidatesError] = useState<string | null>(null);
   const [pricingCandidateUpdatingId, setPricingCandidateUpdatingId] = useState<number | null>(null);
   const [manualCompetitorNmId, setManualCompetitorNmId] = useState("");
+  const [competitorPriceDrafts, setCompetitorPriceDrafts] = useState<Record<number, string>>({});
   const [pricingClock, setPricingClock] = useState(() => Date.now());
   const [salesWarehouseId, setSalesWarehouseId] = useState("all");
   const [salesProductScope, setSalesProductScope] = useState<"ff" | "all">("ff");
@@ -617,8 +618,11 @@ export default function Home() {
   const [importError, setImportError] = useState<string | null>(null);
   const canManage = role === "owner";
   const isOzon = cabinet?.marketplace === "ozon";
-  const marketplaceName = isOzon ? "Ozon" : "Wildberries";
-  const marketplaceCode = isOzon ? "OZ" : "WB";
+  const isYandex = cabinet?.marketplace === "yandex";
+  const marketplaceName = isOzon ? "Ozon" : isYandex ? "Яндекс Маркет" : "Wildberries";
+  const marketplaceCode = isOzon ? "OZ" : isYandex ? "ЯМ" : "WB";
+  const marketplaceWarehouseIdLabel = isYandex ? "ID кампании FBS ЯМ" : `ID склада ${marketplaceCode}`;
+  const marketplaceFboLabel = isYandex ? "FBY" : "FBO";
   const wbCabinets = useMemo(() => availableCabinets.filter((item) => item.marketplace === "wb"), [availableCabinets]);
 
   const loadManualWarehouses = useCallback(async () => {
@@ -702,16 +706,17 @@ export default function Home() {
     setSelectedPricingRow(row);
     setPricingCandidatesError(null);
     setManualCompetitorNmId("");
+    setCompetitorPriceDrafts(Object.fromEntries(row.competitors.map((competitor) => [competitor.nmId, competitor.price ? String(competitor.price) : ""])));
   }, []);
 
-  const updatePricingCompetitor = useCallback(async (row: TargetPriceRow, competitorNmId: number, action: "add-competitor" | "remove-competitor") => {
+  const updatePricingCompetitor = useCallback(async (row: TargetPriceRow, competitorNmId: number, action: "add-competitor" | "remove-competitor" | "set-competitor-price", competitorPrice?: string) => {
     setPricingCandidateUpdatingId(competitorNmId);
     setPricingCandidatesError(null);
     try {
       const response = await fetch("/api/target-prices", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ action, sku: row.sku, nmId: row.nmId, competitorNmId }),
+        body: JSON.stringify({ action, sku: row.sku, nmId: row.nmId, competitorNmId, competitorPrice }),
       });
       const data = await response.json() as TargetPricesResponse;
       if (!response.ok) throw new Error(data.error || "Не удалось обновить список конкурентов");
@@ -720,6 +725,7 @@ export default function Home() {
       setTargetPriceRows(updatedRows);
       setSelectedPricingRow(updated);
       setManualCompetitorNmId("");
+      if (updated) setCompetitorPriceDrafts(Object.fromEntries(updated.competitors.map((competitor) => [competitor.nmId, competitor.price ? String(competitor.price) : ""])));
     } catch (competitorError) {
       setPricingCandidatesError(competitorError instanceof Error ? competitorError.message : "Не удалось обновить список конкурентов");
     } finally {
@@ -748,7 +754,8 @@ export default function Home() {
     setError(null);
     try {
       const targetMarketplace = marketplaceOverride ?? cabinet?.marketplace;
-      const response = await fetch(`${targetMarketplace === "ozon" ? "/api/ozon/inventory" : "/api/inventory"}${force ? "?refresh=1" : ""}`, { cache: "no-store" });
+      const inventoryEndpoint = targetMarketplace === "ozon" ? "/api/ozon/inventory" : targetMarketplace === "yandex" ? "/api/yandex/inventory" : "/api/inventory";
+      const response = await fetch(`${inventoryEndpoint}${force ? "?refresh=1" : ""}`, { cache: "no-store" });
       const data = await response.json() as InventoryResponse;
       if (response.status === 401) {
         setAuthState("unauthenticated");
@@ -759,7 +766,8 @@ export default function Home() {
       setInventoryRetryAt(data.retryAt ?? null);
       if (data.cabinet) setCabinet(data.cabinet);
       if (data.manualWarehouses) setManualWarehouses(data.manualWarehouses);
-      if (!response.ok) throw new Error(data.error || `Не удалось получить данные ${targetMarketplace === "ozon" ? "Ozon" : "Wildberries"}`);
+      const targetName = targetMarketplace === "ozon" ? "Ozon" : targetMarketplace === "yandex" ? "Яндекс Маркет" : "Wildberries";
+      if (!response.ok) throw new Error(data.error || `Не удалось получить данные ${targetName}`);
       setRows(data.rows ?? []);
       setWarehouseNames(data.warehouseNames ?? []);
       setTotals(data.totals ? { ...emptyTotals, ...data.totals, ffStock: data.totals.ffStock ?? {}, fbsByLocation: { ...emptyFbsBreakdown, ...data.totals.fbsByLocation } } : emptyTotals);
@@ -1053,12 +1061,12 @@ export default function Home() {
   const stockTitle = activeView === "fbs" ? "Артикулы в FBS-движении" : `Все товары ${marketplaceName}`;
   const currentViewTitle = useMemo(() => {
     const base = viewTitles[activeView];
-    if (!isOzon) return base;
+    if (!isOzon && !isYandex) return base;
     return {
-      eyebrow: base.eyebrow.replace("WILDBERRIES", "OZON").replace("РЫНОК WB", "РЫНОК OZON"),
-      title: base.title.replace("FBS и FBO", "FBS и FBO Ozon"),
+      eyebrow: base.eyebrow.replace("WILDBERRIES", isOzon ? "OZON" : "ЯНДЕКС МАРКЕТ").replace("РЫНОК WB", isOzon ? "РЫНОК OZON" : "РЫНОК ЯНДЕКС МАРКЕТА"),
+      title: base.title.replace("FBS и FBO", isOzon ? "FBS и FBO Ozon" : "FBS и FBY Яндекс Маркета"),
     };
-  }, [activeView, isOzon]);
+  }, [activeView, isOzon, isYandex]);
   const analyticsFactAvailable = Boolean(analytics?.source.factAvailable);
   const analyticsTrendChannel: AnalyticsChannel = analyticsChannel;
   const analyticsTrend = useMemo(() => {
@@ -1081,7 +1089,7 @@ export default function Home() {
   }, [analytics, analyticsTrendChannel]);
   const activeAnalyticsPoint = useMemo(() => analyticsHoverDate ? analytics?.daily.find((point) => point.date === analyticsHoverDate) ?? null : null, [analytics, analyticsHoverDate]);
   const activeAnalyticsTrendPoint = useMemo(() => analyticsHoverDate ? analyticsTrend.points.find((point) => point.date === analyticsHoverDate) ?? null : null, [analyticsHoverDate, analyticsTrend.points]);
-  const analyticsChannelTitle = analyticsTrendChannel === "all" ? "FBS и FBO" : analyticsTrendChannel.toUpperCase();
+  const analyticsChannelTitle = analyticsTrendChannel === "all" ? `FBS и ${marketplaceFboLabel}` : analyticsTrendChannel === "fbo" ? marketplaceFboLabel : "FBS";
   const analyticsTrendTitle = analyticsFactAvailable ? `${analyticsChannelTitle} по дням` : "Факт продаж временно недоступен";
   const strongestFbsWarehouse = useMemo(() => analytics?.fbsWarehouses.find((warehouse) => warehouse.value > 0) ?? null, [analytics]);
 
@@ -1159,7 +1167,7 @@ export default function Home() {
     const rawWbWarehouseId = draft.wbWarehouseId.trim();
     const wbWarehouseId = rawWbWarehouseId ? Number(rawWbWarehouseId) : null;
     if (rawWbWarehouseId && (!Number.isInteger(wbWarehouseId) || wbWarehouseId <= 0 || wbWarehouseId > 2_147_483_647)) {
-      setWarehouseError("ID склада WB должен быть положительным целым числом");
+      setWarehouseError(`${marketplaceWarehouseIdLabel} должен быть положительным целым числом`);
       return;
     }
     const serviceRateKopecks = parseRateKopecks(draft.serviceRate);
@@ -1366,7 +1374,7 @@ export default function Home() {
     setFfOrdersExportMessage(null);
     setFfOrdersExportError(null);
     if (!warehouse.wbWarehouseId) {
-      setFfOrdersExportError(`Сначала привяжите этот ФФ к складу ${marketplaceName} — укажите ID склада в настройках.`);
+      setFfOrdersExportError(`Сначала привяжите этот ФФ к ${isYandex ? "кампании FBS Яндекс Маркета" : `складу ${marketplaceName}`} — укажите ID в настройках.`);
       return;
     }
     setFfOrdersExportLoading(true);
@@ -1419,7 +1427,7 @@ export default function Home() {
       </aside>
 
       <section className="workspace">
-        <header className="topbar"><div><p className="eyebrow">{currentViewTitle.eyebrow}</p><h1>{currentViewTitle.title}</h1></div><div className="header-actions"><span className="refresh-guidance">Можно обновить вручную · рекомендуем раз в 2 мин</span><div className="sync-state"><span className={error ? "live-dot offline" : "live-dot"} /><span>Последнее обновление<br/><strong>{formatSyncTime(updatedAt)} МСК</strong></span></div><button className="logout-btn" type="button" onClick={() => void logoutAdmin()}>Выйти</button><button className="secondary-btn" type="button" onClick={() => void loadData(true)} disabled={loading || Boolean(inventoryRetrySeconds)} title={inventoryRetrySeconds ? `Общий запрос к ${marketplaceName} уже выполняется` : loading ? "Обновление займёт не больше 25 секунд" : "Можно обновить вручную в любой момент. Рекомендованный интервал — 2 минуты."}><span className={loading ? "spin" : ""}>↻</span>{loading ? `Обновляем ${inventoryRefreshSeconds ?? 0}/25 с` : inventoryRetrySeconds ? `Через ${formatCountdown(inventoryRetrySeconds)}` : "Обновить"}</button><button className="primary-btn" type="button" onClick={() => downloadCsv(filteredRows, `ostatki-${isOzon ? "ozon" : "wb"}`)} disabled={!rows.length}>Экспорт<span>↓</span></button></div></header>
+        <header className="topbar"><div><p className="eyebrow">{currentViewTitle.eyebrow}</p><h1>{currentViewTitle.title}</h1></div><div className="header-actions"><span className="refresh-guidance">Можно обновить вручную · рекомендуем раз в 2 мин</span><div className="sync-state"><span className={error ? "live-dot offline" : "live-dot"} /><span>Последнее обновление<br/><strong>{formatSyncTime(updatedAt)} МСК</strong></span></div><button className="logout-btn" type="button" onClick={() => void logoutAdmin()}>Выйти</button><button className="secondary-btn" type="button" onClick={() => void loadData(true)} disabled={loading || Boolean(inventoryRetrySeconds)} title={inventoryRetrySeconds ? `Общий запрос к ${marketplaceName} уже выполняется` : loading ? "Обновление займёт не больше 25 секунд" : "Можно обновить вручную в любой момент. Рекомендованный интервал — 2 минуты."}><span className={loading ? "spin" : ""}>↻</span>{loading ? `Обновляем ${inventoryRefreshSeconds ?? 0}/25 с` : inventoryRetrySeconds ? `Через ${formatCountdown(inventoryRetrySeconds)}` : "Обновить"}</button><button className="primary-btn" type="button" onClick={() => downloadCsv(filteredRows, `ostatki-${isOzon ? "ozon" : isYandex ? "yandex" : "wb"}`)} disabled={!rows.length}>Экспорт<span>↓</span></button></div></header>
 
         <div className="content" id="overview">
           {cabinet && <section className={`cabinet-strip ${cabinet.configured ? "ready" : "waiting"}`}>
@@ -1427,7 +1435,7 @@ export default function Home() {
             <p>{cabinet.configured ? "Свои товары, ФФ-склады и сроки годности. Переключение кабинетов не требует нового входа." : `Ожидает ключ API ${marketplaceName}. Вход и отдельные склады уже готовы.`}</p>
             <button type="button" onClick={() => navigateTo("cabinets")}>Сменить кампанию</button>
           </section>}
-          {error && <section className="api-notice" role="alert"><span className="api-notice-icon">!</span><div><strong>{error}</strong><p>{configured ? isOzon ? "Проверьте права ключа Ozon на товары, остатки и FBS-заказы." : "Для полной загрузки токену нужны категории: Контент, Маркетплейс и Аналитика." : "Безопасный ключ хранится только на сервере и не передаётся в браузер."}</p></div><button type="button" onClick={() => void loadData(true)}>Проверить снова</button></section>}
+          {error && <section className="api-notice" role="alert"><span className="api-notice-icon">!</span><div><strong>{error}</strong><p>{configured ? isOzon ? "Проверьте права ключа Ozon на товары, остатки и FBS-заказы." : isYandex ? "Проверьте права ключа Яндекс Маркета на товары, остатки и FBS-заказы." : "Для полной загрузки токену нужны категории: Контент, Маркетплейс и Аналитика." : "Безопасный ключ хранится только на сервере и не передаётся в браузер."}</p></div><button type="button" onClick={() => void loadData(true)}>Проверить снова</button></section>}
           {!error && warnings.length > 0 && <section className="warning-strip"><span>!</span><p>{warnings.join(" · ")}</p></section>}
           {inventoryRetrySeconds !== null && inventoryRetrySeconds > 0 && <section className="inventory-retry-timer" role="status"><span>↻</span><div><strong>Текущий запрос к {marketplaceName} ещё выполняется: {formatCountdown(inventoryRetrySeconds)}</strong><p>После завершения можно обновить снова. Рекомендованный интервал — раз в 2 минуты.</p></div></section>}
 
@@ -1449,7 +1457,7 @@ export default function Home() {
                   {cabinetSwitchError && <p className="cabinet-switch-error">{cabinetSwitchError}</p>}
                   {!cabinetSwitchError && <p>Выберите кампанию — повторный логин не нужен.</p>}
                 </article>
-                <MarketplaceConnectionCard platform="yandex" mark="ЯМ" title="Яндекс Маркет" connection={marketplaceConnections.find((item) => item.platform === "yandex")} onCheck={() => void loadMarketplaceConnections()} onDisable={disableMarketplaceConnection} canManage={canManage} checking={marketplaceConnectionsLoading} />
+                <MarketplaceConnectionCard platform="yandex" mark="ЯМ" title="Яндекс Маркет" connection={marketplaceConnections.find((item) => item.platform === "yandex")} onCheck={() => void loadMarketplaceConnections()} onDisable={disableMarketplaceConnection} canManage={canManage} checking={marketplaceConnectionsLoading} onOpen={() => void switchCabinet("yandex")} opening={cabinetSwitchingId === "yandex"} />
                 <MarketplaceConnectionCard platform="ozon" mark="OZ" title="Ozon Seller" connection={marketplaceConnections.find((item) => item.platform === "ozon")} onCheck={() => void loadMarketplaceConnections()} onDisable={disableMarketplaceConnection} canManage={canManage} checking={marketplaceConnectionsLoading} onOpen={() => void switchCabinet("ozon")} opening={cabinetSwitchingId === "ozon"} />
               </div>
               <p className="cabinet-manager-note">Каждый маркетплейс получит отдельный контур: свои товары, склады, остатки, заказы и будущие таргет-цены. Данные между площадками не смешиваются.</p>
@@ -1465,7 +1473,7 @@ export default function Home() {
                 <button className="secondary-btn pricing-source-link" type="button" onClick={() => void refreshTargetPrices()} disabled={targetPricesRefreshing || Boolean(targetPricesCooldownSeconds)} title={targetPricesCooldownSeconds ? "Обновление цен уже запущено другим пользователем" : "Можно обновить вручную в любой момент. Рекомендованный интервал — 2 минуты."}>{targetPricesRefreshing ? "Обновляем цены…" : targetPricesCooldownSeconds ? `Цены через ${formatCountdown(targetPricesCooldownSeconds)}` : "Обновить цены"}</button>
               </div>
 
-              <div className={`pricing-source-strip ${targetPricesError || targetPricesWarnings.length ? "has-warning" : ""}`}><span>{targetPricesError || targetPricesWarnings.length ? "!" : "✓"}</span><div><strong>{targetPricesError || targetPricesWarnings.length ? "Часть цен пока не обновилась" : isOzon ? "Сохранённый снимок цен Ozon" : "Сохранённый снимок цен WB"}</strong><p>{targetPricesError || targetPricesWarnings[0] || (targetPricesUpdatedAt ? `Последнее обновление: ${formatDateTime(targetPricesUpdatedAt)}. Все видят этот снимок; новый запрос только вручную.` : "Пока показана стартовая база; нажмите «Обновить цены», чтобы сохранить актуальные значения для всех.")}{targetPricesCooldownSeconds && targetPricesCooldownSeconds > 0 ? ` Сейчас идёт общий запрос: ещё ${formatCountdown(targetPricesCooldownSeconds)}.` : " Рекомендованный интервал обновления — 2 минуты."}</p></div></div>
+              <div className={`pricing-source-strip ${targetPricesError || targetPricesWarnings.length ? "has-warning" : ""}`}><span>{targetPricesError || targetPricesWarnings.length ? "!" : "✓"}</span><div><strong>{targetPricesError || targetPricesWarnings.length ? "Часть цен пока не обновилась" : isOzon ? "Сохранённый снимок цен Ozon" : isYandex ? "Сохранённый снимок цен Яндекс Маркета" : "Сохранённый снимок цен WB"}</strong><p>{targetPricesError || targetPricesWarnings[0] || (targetPricesUpdatedAt ? `Последнее обновление: ${formatDateTime(targetPricesUpdatedAt)}. Все видят этот снимок; новый запрос только вручную.` : "Пока показана стартовая база; нажмите «Обновить цены», чтобы сохранить актуальные значения для всех.")}{targetPricesCooldownSeconds && targetPricesCooldownSeconds > 0 ? ` Сейчас идёт общий запрос: ещё ${formatCountdown(targetPricesCooldownSeconds)}.` : " Рекомендованный интервал обновления — 2 минуты."}</p></div></div>
 
               <div className="pricing-kpi-grid">
                 <article className="pricing-kpi tracked"><span>Под контролем</span><strong>{pricingCounts.all}</strong><p>карточек {marketplaceName} в мониторинге</p></article>
@@ -1508,11 +1516,11 @@ export default function Home() {
                 return <div className="pricing-modal-backdrop" role="presentation" onMouseDown={() => setSelectedPricingRow(null)}><section className="pricing-modal" role="dialog" aria-modal="true" aria-label={`Конкуренты ${selectedPricingRow.sku}`} onMouseDown={(event) => event.stopPropagation()}>
                   <button className="pricing-modal-close" type="button" onClick={() => setSelectedPricingRow(null)} aria-label="Закрыть">×</button>
                   <span className="section-kicker">КАРТОЧКА РЫНКА</span><h3>{selectedPricingRow.sku}</h3><p>{selectedPricingRow.searchQuery || "Поисковый запрос не указан"}{selectedPricingRow.nmId ? ` · ваша карточка ${marketplaceCode} ${selectedPricingRow.nmId}` : ""}</p>
-                  {selectedPricingRow.nmId && <a className="pricing-own-link" href={isOzon ? `https://www.ozon.ru/product/${selectedPricingRow.nmId}` : `https://www.wildberries.ru/catalog/${selectedPricingRow.nmId}/detail.aspx`} target="_blank" rel="noreferrer">{isOzon ? "Открыть свою карточку на Ozon ↗" : "Открыть свою карточку на WB ↗"}</a>}
+                  {selectedPricingRow.nmId && !isYandex && <a className="pricing-own-link" href={isOzon ? `https://www.ozon.ru/product/${selectedPricingRow.nmId}` : `https://www.wildberries.ru/catalog/${selectedPricingRow.nmId}/detail.aspx`} target="_blank" rel="noreferrer">{isOzon ? "Открыть свою карточку на Ozon ↗" : "Открыть свою карточку на WB ↗"}</a>}
                   <div className="pricing-modal-summary"><span>Цена на витрине {marketplaceName} <b>{selectedPricingRow.currentPrice ? formatMoney.format(selectedPricingRow.currentPrice) : "—"}</b></span><span>Таргет <b>{recommendation.target ? formatMoney.format(recommendation.target) : "—"}</b></span><span>Решение <b>{recommendation.label}</b></span></div>
-                  <div className="pricing-competitor-list"><h4>В сравнении</h4>{selectedPricingRow.competitors.map((competitor) => <article key={competitor.nmId}><div><strong>{competitor.name || `Карточка ${marketplaceCode} ${competitor.nmId}`}</strong><small>{competitor.source || "добавлен в мониторинг"}{competitor.updatedAt ? ` · ${formatDateTime(competitor.updatedAt)}` : ""}</small>{competitor.error && <em>{competitor.error}</em>}</div><div className="pricing-competitor-actions"><a href={isOzon ? `https://www.ozon.ru/product/${competitor.nmId}` : `https://www.wildberries.ru/catalog/${competitor.nmId}/detail.aspx`} target="_blank" rel="noreferrer">{competitor.price ? formatMoney.format(competitor.price) : "Нет цены"} ↗</a>{canManage && <button type="button" className="pricing-competitor-remove" onClick={() => void updatePricingCompetitor(selectedRow, competitor.nmId, "remove-competitor")} disabled={pricingCandidateUpdatingId === competitor.nmId}>{pricingCandidateUpdatingId === competitor.nmId ? "…" : "Убрать"}</button>}</div></article>)}{!selectedPricingRow.competitors.length && <p>Для этой карточки пока не назначены конкуренты.</p>}</div>
-                  {canManage && <section className="pricing-candidate-picker"><div className="pricing-candidate-heading"><div><span className="section-kicker">КОНКУРЕНТЫ</span><h4>Добавить вручную</h4><p>{isOzon ? "Вставь ID нужной карточки Ozon. Цена конкурента появится после подключения разрешённого источника рынка." : "Вставь артикул WB нужной карточки. Цена конкурента появится после отдельного обновления цен."}</p></div></div>
-                    <form className="pricing-manual-candidate" onSubmit={(event) => { event.preventDefault(); const nmId = Number(manualCompetitorNmId); if (Number.isInteger(nmId) && nmId > 0) void updatePricingCompetitor(selectedRow, nmId, "add-competitor"); }}><label><span>{isOzon ? "ID конкурента Ozon" : "Артикул WB конкурента"}</span><input value={manualCompetitorNmId} onChange={(event) => setManualCompetitorNmId(event.target.value.replace(/\D/g, ""))} inputMode="numeric" placeholder="Например, 123456789" /></label><button className="primary-btn" type="submit" disabled={!manualCompetitorNmId || pricingCandidateUpdatingId !== null}>{pricingCandidateUpdatingId ? "Добавляем…" : "Добавить"}</button></form>
+                  <div className="pricing-competitor-list"><h4>В сравнении</h4>{selectedPricingRow.competitors.map((competitor) => <article key={competitor.nmId}><div><strong>{competitor.name || `Карточка ${marketplaceCode} ${competitor.nmId}`}</strong><small>{competitor.source || "добавлен в мониторинг"}{competitor.updatedAt ? ` · ${formatDateTime(competitor.updatedAt)}` : ""}</small>{competitor.error && <em>{competitor.error}</em>}</div><div className="pricing-competitor-actions">{isOzon && canManage && <label className="pricing-competitor-price"><span>Цена, ₽</span><input value={competitorPriceDrafts[competitor.nmId] ?? ""} onChange={(event) => setCompetitorPriceDrafts((current) => ({ ...current, [competitor.nmId]: event.target.value.replace(/[^0-9,.]/g, "") }))} inputMode="decimal" placeholder="0" /></label>}{!isYandex && <a href={isOzon ? `https://www.ozon.ru/product/${competitor.nmId}` : `https://www.wildberries.ru/catalog/${competitor.nmId}/detail.aspx`} target="_blank" rel="noreferrer">{competitor.price ? formatMoney.format(competitor.price) : "Нет цены"} ↗</a>}{isYandex && <span>{competitor.price ? formatMoney.format(competitor.price) : "Нет цены"}</span>}{isOzon && canManage && <button type="button" className="pricing-competitor-save" onClick={() => void updatePricingCompetitor(selectedRow, competitor.nmId, "set-competitor-price", competitorPriceDrafts[competitor.nmId])} disabled={!competitorPriceDrafts[competitor.nmId] || pricingCandidateUpdatingId === competitor.nmId}>{pricingCandidateUpdatingId === competitor.nmId ? "…" : "Сохранить"}</button>}{canManage && <button type="button" className="pricing-competitor-remove" onClick={() => void updatePricingCompetitor(selectedRow, competitor.nmId, "remove-competitor")} disabled={pricingCandidateUpdatingId === competitor.nmId}>{pricingCandidateUpdatingId === competitor.nmId ? "…" : "Убрать"}</button>}</div></article>)}{!selectedPricingRow.competitors.length && <p>Для этой карточки пока не назначены конкуренты.</p>}</div>
+                  {canManage && <section className="pricing-candidate-picker"><div className="pricing-candidate-heading"><div><span className="section-kicker">КОНКУРЕНТЫ</span><h4>Добавить вручную</h4><p>{isOzon ? "Вставь ID нужной карточки Ozon, затем укажи её актуальную цену в списке выше. Она сразу пойдёт в расчёт таргета." : isYandex ? "Вставь числовой ID карточки Яндекс Маркета. Цены появятся после обновления цен." : "Вставь артикул WB нужной карточки. Цена конкурента появится после отдельного обновления цен."}</p></div></div>
+                    <form className="pricing-manual-candidate" onSubmit={(event) => { event.preventDefault(); const nmId = Number(manualCompetitorNmId); if (Number.isInteger(nmId) && nmId > 0) void updatePricingCompetitor(selectedRow, nmId, "add-competitor"); }}><label><span>{isOzon ? "ID конкурента Ozon" : isYandex ? "ID конкурента Яндекс Маркета" : "Артикул WB конкурента"}</span><input value={manualCompetitorNmId} onChange={(event) => setManualCompetitorNmId(event.target.value.replace(/\D/g, ""))} inputMode="numeric" placeholder="Например, 123456789" /></label><button className="primary-btn" type="submit" disabled={!manualCompetitorNmId || pricingCandidateUpdatingId !== null}>{pricingCandidateUpdatingId ? "Добавляем…" : "Добавить"}</button></form>
                     {pricingCandidatesError && <p className="pricing-candidate-error">{pricingCandidatesError}</p>}</section>}
                   <footer>{recommendation.detail}{selectedPricingRow.refreshError ? ` ${selectedPricingRow.refreshError}` : ""}</footer>
                 </section></div>;
@@ -1595,7 +1603,7 @@ export default function Home() {
                       <span className="warehouse-pin">□</span>
                       <div className="manual-warehouse-details"><strong>{item.city}</strong><small>{item.name}</small><em>{item.isHidden ? "Скрыт из витрины" : item.wbWarehouseId ? `Привязан к ${marketplaceCode} FBS · ${item.wbWarehouseName || `№${item.wbWarehouseId}`}` : `${marketplaceCode} FBS не назначен`}</em></div>
                       <form className="warehouse-link-form" onSubmit={(event) => void saveWarehouseLink(item, event)}>
-                        <label><span>ID склада {marketplaceCode}</span><input value={linkDraft.wbWarehouseId} onChange={(event) => setWarehouseLinkDrafts((current) => ({ ...current, [item.id]: { ...linkDraft, wbWarehouseId: event.target.value } }))} inputMode="numeric" placeholder="Например, 1987385" /></label>
+                        <label><span>{marketplaceWarehouseIdLabel}</span><input value={linkDraft.wbWarehouseId} onChange={(event) => setWarehouseLinkDrafts((current) => ({ ...current, [item.id]: { ...linkDraft, wbWarehouseId: event.target.value } }))} inputMode="numeric" placeholder={isYandex ? "Например, 48566976" : "Например, 1987385"} /></label>
                         <label><span>Название в {marketplaceName}</span><input value={linkDraft.wbWarehouseName} onChange={(event) => setWarehouseLinkDrafts((current) => ({ ...current, [item.id]: { ...linkDraft, wbWarehouseName: event.target.value } }))} maxLength={120} placeholder="Например, Волгоград Upakovka" /></label>
                         <label><span>Ставка, ₽ / ед.</span><input value={linkDraft.serviceRate} onChange={(event) => setWarehouseLinkDrafts((current) => ({ ...current, [item.id]: { ...linkDraft, serviceRate: event.target.value } }))} inputMode="decimal" placeholder="Например, 10" /></label>
                         <button type="submit" disabled={warehouseLinkSavingId === item.id}>{warehouseLinkSavingId === item.id ? "Сохраняем…" : "Сохранить"}</button>

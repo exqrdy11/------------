@@ -135,16 +135,19 @@ export async function GET(request: Request) {
     return NextResponse.json({ error: error instanceof Error ? error.message : "Некорректный период" }, { status: 400, headers: { "Cache-Control": "no-store" } });
   }
 
-  if (cabinetId === "ozon") {
-    type OzonSnapshot = {
+  if (cabinetId === "ozon" || cabinetId === "yandex") {
+    type MarketplaceSnapshot = {
       updatedAt?: string;
       ozonAnalytics?: { daily?: Record<string, number>; byWarehouse?: Record<string, number> };
+      yandexAnalytics?: { daily?: Record<string, number>; byWarehouse?: Record<string, number> };
     };
-    const snapshot = await loadInventorySnapshot<OzonSnapshot>("ozon").catch(() => null);
-    const daily = daysBetween(period.from, period.to).map((date) => ({ date, fbs: Math.max(0, Number(snapshot?.ozonAnalytics?.daily?.[date]) || 0), fbo: 0 }));
+    const marketplace = cabinetId === "yandex" ? "Яндекс Маркет" : "Ozon";
+    const snapshot = await loadInventorySnapshot<MarketplaceSnapshot>(cabinetId).catch(() => null);
+    const analytics = cabinetId === "yandex" ? snapshot?.yandexAnalytics : snapshot?.ozonAnalytics;
+    const daily = daysBetween(period.from, period.to).map((date) => ({ date, fbs: Math.max(0, Number(analytics?.daily?.[date]) || 0), fbo: 0 }));
     const fbs = daily.reduce((sum, point) => sum + point.fbs, 0);
-    const manualWarehouses = await listFfWarehouses("ozon");
-    const byMarketplaceWarehouse = snapshot?.ozonAnalytics?.byWarehouse ?? {};
+    const manualWarehouses = await listFfWarehouses(cabinetId);
+    const byMarketplaceWarehouse = analytics?.byWarehouse ?? {};
     const fbsWarehouses = warehouseResult(manualWarehouses, new Map(manualWarehouses.map((warehouse) => [warehouse.id, Math.max(0, Number(byMarketplaceWarehouse[String(warehouse.wbWarehouseId ?? "")]) || 0)])));
     return NextResponse.json({
       from: period.from,
@@ -153,7 +156,7 @@ export async function GET(request: Request) {
       daily,
       fbsWarehouses,
       source: { factAvailable: Boolean(snapshot), retryAt: null, retryExact: true },
-      warnings: snapshot ? ["Ozon: динамика показывает созданные FBS-заказы за выбранный период. Факт выкупа FBO подключается отдельным финансовым источником."] : ["Сначала обновите остатки Ozon, чтобы собрать аналитику."],
+      warnings: snapshot ? [`${marketplace}: динамика показывает созданные FBS-заказы за выбранный период. Факт выкупа ${cabinetId === "yandex" ? "FBY" : "FBO"} подключается отдельным финансовым источником.`] : [`Сначала обновите остатки ${marketplace}, чтобы собрать аналитику.`],
       updatedAt: snapshot?.updatedAt ?? new Date().toISOString(),
     } satisfies AnalyticsPayload, { headers: { "Cache-Control": "private, max-age=0" } });
   }

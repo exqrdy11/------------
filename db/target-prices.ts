@@ -167,7 +167,11 @@ async function seedSnapshot(cabinetId: CabinetId) {
       reason: "Конкуренты импортированы из листа «КОНКУРЕНТЫ.02». Цены Ozon появятся после отдельного обновления.",
       sourceStatus: "готово",
     }))
-    : targetPriceSnapshot;
+    // A Yandex cabinet must never inherit the historic WB price sheet. Its
+    // own offer prices are populated on the first manual refresh.
+    : cabinetId === "yandex"
+      ? []
+      : targetPriceSnapshot;
   await d1.batch(snapshot.map((row) => statement.bind(
     cabinetId,
     productKey(row),

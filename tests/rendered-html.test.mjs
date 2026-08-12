@@ -66,6 +66,7 @@ test("в таргете цен конкуренты добавляются то�
 
   assert.match(route, /add-competitor/);
   assert.match(route, /remove-competitor/);
+  assert.match(route, /set-competitor-price/);
   assert.match(route, /выбран вручную/);
   assert.match(page, /Добавить вручную/);
   assert.match(page, /Артикул WB конкурента/);
@@ -77,6 +78,21 @@ test("в таргете цен конкуренты добавляются то�
   assert.doesNotMatch(route, /getTargetPriceCandidateSnapshot/);
   assert.doesNotMatch(page, /Обновить подбор WB/);
   assert.doesNotMatch(storage, /target_price_candidate_snapshots/);
+});
+
+test("в Ozon цену чужой карточки можно зафиксировать вручную для расчёта таргета", async () => {
+  const [page, route, ozon] = await Promise.all([
+    readFile(new URL("app/page.tsx", root), "utf8"),
+    readFile(new URL("app/api/target-prices/route.ts", root), "utf8"),
+    readFile(new URL("lib/ozon-target-prices.ts", root), "utf8"),
+  ]);
+
+  assert.match(page, /Цена, ₽/);
+  assert.match(page, /Сохранить/);
+  assert.match(page, /Она сразу пойдёт в расчёт таргета/);
+  assert.match(route, /введено вручную/);
+  assert.match(route, /Укажите корректную цену конкурента в рублях/);
+  assert.match(ozon, /Ozon Seller не выдаёт цены чужих карточек/);
 });
 
 test("цены обновляются вручную для владельца и гостя, без пятиминутного ограничения", async () => {
@@ -126,4 +142,35 @@ test("новые FBS остаются на ФФ, но не входят в св�
   assert.match(page, /return Math\.max\(0, \(row\.ffStock\[warehouseId\] \?\? 0\) - \(row\.fbsByLocation\[warehouseId\] \?\? 0\)\)/);
   assert.match(page, /return row\.ffStock\[warehouseId\] \?\? 0/);
   assert.match(page, /Фактически на ФФ \{formatNumber\.format\(ffPhysicalTotal\)\}/);
+});
+
+test("Яндекс Маркет имеет изолированный кабинет с FBS, FBY и остатками ФФ", async () => {
+  const [page, auth, inventory, analytics] = await Promise.all([
+    readFile(new URL("app/page.tsx", root), "utf8"),
+    readFile(new URL("lib/admin-auth.ts", root), "utf8"),
+    readFile(new URL("app/api/yandex/inventory/route.ts", root), "utf8"),
+    readFile(new URL("app/api/analytics/route.ts", root), "utf8"),
+  ]);
+
+  assert.match(auth, /cabinetIds = \["metanutrix", "ozon", "yandex"\]/);
+  assert.match(page, /\/api\/yandex\/inventory/);
+  assert.match(page, /ID кампании FBS ЯМ/);
+  assert.match(inventory, /placementType\?\.toUpperCase\(\) === "FBS"/);
+  assert.match(inventory, /placementType\?\.toUpperCase\(\) === "FBY"/);
+  assert.match(inventory, /syncMarketplaceFbsWarehouses/);
+  assert.match(analytics, /cabinetId === "ozon" \|\| cabinetId === "yandex"/);
+});
+
+test("таргет Яндекс Маркета не наследует таблицу WB и обновляет только свои цены", async () => {
+  const [storage, route, refresh] = await Promise.all([
+    readFile(new URL("db/target-prices.ts", root), "utf8"),
+    readFile(new URL("app/api/target-prices/route.ts", root), "utf8"),
+    readFile(new URL("lib/yandex-target-prices.ts", root), "utf8"),
+  ]);
+
+  assert.match(storage, /cabinetId === "yandex"\s*\? \[\]/);
+  assert.match(route, /session\.cabinetId === "yandex"/);
+  assert.match(route, /refreshYandexTargetPrices/);
+  assert.match(refresh, /\/v2\/campaigns\/\$\{campaignId\}\/offer-prices/);
+  assert.match(refresh, /explicitly manual until a legal, dedicated market-data source/);
 });

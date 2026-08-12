@@ -39,14 +39,16 @@ export async function refreshOzonTargetPrices(rows: TargetPriceRow[]) {
   const refreshedAt = new Date().toISOString();
   const refreshed = rows.map<TargetPriceRow>((row) => {
     const currentPrice = row.nmId ? prices.get(row.nmId) ?? row.currentPrice : row.currentPrice;
-    const competitors = row.competitors.map<TargetPriceCompetitor>((competitor) => ({
-      ...competitor,
-      // Ozon Seller API only exposes prices of this seller. Competitors from
-      // the shared sheet stay available as product links; their live prices
-      // cannot be truthfully inferred from this private API.
-      price: competitor.price && competitor.price > 0 ? competitor.price : null,
-      error: "Цена конкурента появится после подключения разрешённого источника рынка Ozon.",
-    }));
+    const competitors = row.competitors.map<TargetPriceCompetitor>((competitor) => {
+      // Ozon Seller API exposes only the prices of this seller. Keep a price
+      // entered by the owner, but never present it as an automatic market quote.
+      const price = competitor.price && competitor.price > 0 ? competitor.price : null;
+      return {
+        ...competitor,
+        price,
+        error: price ? null : "Нет сохранённой цены. Ozon Seller не выдаёт цены чужих карточек.",
+      };
+    });
     return {
       ...row,
       currentPrice,
@@ -56,7 +58,7 @@ export async function refreshOzonTargetPrices(rows: TargetPriceRow[]) {
       updatedAt: currentPrice !== null ? refreshedAt : row.updatedAt,
       refreshedAt,
       refreshError: warnings[0] ?? null,
-      reason: currentPrice === null ? "Ozon не вернул цену этой карточки. Проверьте, что товар активен и доступен в кабинете." : "Своя цена обновлена из Ozon Seller. Конкуренты добавлены из листа и открываются по ссылке.",
+      reason: currentPrice === null ? "Ozon не вернул цену этой карточки. Проверьте, что товар активен и доступен в кабинете." : "Своя цена обновлена из Ozon Seller. Цены конкурентов указываются вручную и участвуют в таргете.",
     };
   });
   return { rows: refreshed, updatedAt: refreshedAt, warnings: [...new Set(warnings)] };

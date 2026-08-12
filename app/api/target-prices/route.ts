@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { getTargetPriceRefreshCooldown, listTargetPrices, releaseTargetPriceRefresh, reserveTargetPriceRefresh, saveTargetPrices, type TargetPriceCompetitor, type TargetPriceRow } from "@/db/target-prices";
 import { cabinetToken, getAdminCabinet, getAdminSession } from "@/lib/admin-auth";
 import { refreshOzonTargetPrices } from "@/lib/ozon-target-prices";
+import { refreshYandexTargetPrices } from "@/lib/yandex-target-prices";
 
 export const dynamic = "force-dynamic";
 
@@ -123,17 +124,37 @@ export async function GET(request: Request) {
 export async function POST(request: Request) {
   const session = await getAdminSession(request);
   if (!session) return NextResponse.json({ error: "Требуется вход администратора" }, { status: 401, headers: { "Cache-Control": "no-store" } });
-  const body = await request.json().catch(() => null) as { action?: unknown; sku?: unknown; nmId?: unknown; competitorNmId?: unknown } | null;
-  if (body?.action === "add-competitor" || body?.action === "remove-competitor") {
+  const body = await request.json().catch(() => null) as { action?: unknown; sku?: unknown; nmId?: unknown; competitorNmId?: unknown; competitorPrice?: unknown } | null;
+  if (body?.action === "add-competitor" || body?.action === "remove-competitor" || body?.action === "set-competitor-price") {
     if (session.role !== "owner") return NextResponse.json({ error: "Менять список конкурентов может только владелец кабинета" }, { status: 403, headers: { "Cache-Control": "no-store" } });
     const rows = await listTargetPrices(session.cabinetId);
     const row = findTargetPriceRow(rows, body.sku, body.nmId);
     if (!row) return NextResponse.json({ error: "Товар для изменения конкурентов не найден" }, { status: 404, headers: { "Cache-Control": "no-store" } });
     const competitorNmId = Number(body.competitorNmId);
-    if (!Number.isInteger(competitorNmId) || competitorNmId <= 0 || competitorNmId === row.nmId) return NextResponse.json({ error: session.cabinetId === "ozon" ? "Укажите корректный ID товара Ozon конкурента" : "Укажите корректный артикул WB конкурента" }, { status: 400, headers: { "Cache-Control": "no-store" } });
+    if (!Number.isInteger(competitorNmId) || competitorNmId <= 0 || competitorNmId === row.nmId) return NextResponse.json({ error: session.cabinetId === "ozon" ? "Укажите корректный ID товара Ozon конкурента" : session.cabinetId === "yandex" ? "Укажите корректный ID карточки Яндекс Маркета" : "Укажите корректный артикул WB конкурента" }, { status: 400, headers: { "Cache-Control": "no-store" } });
     let competitors = row.competitors;
     if (body.action === "remove-competitor") {
       competitors = competitors.filter((competitor) => competitor.nmId !== competitorNmId);
+    } else if (body.action === "set-competitor-price") {
+      const competitorPrice = typeof body.competitorPrice === "string"
+        ? Number(body.competitorPrice.replace(",", "."))
+        : Number(body.competitorPrice);
+      if (!Number.isFinite(competitorPrice) || competitorPrice <= 0 || competitorPrice > 10_000_000) {
+        return NextResponse.json({ error: "Укажите корректную цену конкурента в рублях" }, { status: 400, headers: { "Cache-Control": "no-store" } });
+      }
+      if (!competitors.some((competitor) => competitor.nmId === competitorNmId)) {
+        return NextResponse.json({ error: "Сначала добавьте карточку конкурента в сравнение" }, { status: 404, headers: { "Cache-Control": "no-store" } });
+      }
+      const updatedAt = new Date().toISOString();
+      competitors = competitors.map((competitor) => competitor.nmId === competitorNmId
+        ? {
+          ...competitor,
+          price: Math.round(competitorPrice * 100) / 100,
+          source: "введено вручную",
+          updatedAt,
+          error: null,
+        }
+        : competitor);
     } else if (!competitors.some((competitor) => competitor.nmId === competitorNmId)) {
       competitors = [...competitors, {
         nmId: competitorNmId,
@@ -141,14 +162,14 @@ export async function POST(request: Request) {
         source: "выбран вручную",
         name: null,
         updatedAt: null,
-        error: "Цена появится после обновления цен.",
+        error: session.cabinetId === "ozon" ? "Укажите цену вручную: Ozon Seller не выдаёт цены чужих карточек." : "Цена появится после обновления цен.",
       }];
     }
     const updatedRows = rows.map((item) => item.sku === row.sku && item.nmId === row.nmId
       ? {
         ...item,
         competitors,
-        candidateNmId: body.action === "add-competitor" ? competitorNmId : item.candidateNmId === competitorNmId ? null : item.candidateNmId,
+        candidateNmId: body.action === "add-competitor" ? competitorNmId : body.action === "remove-competitor" && item.candidateNmId === competitorNmId ? null : item.candidateNmId,
         sourceStatus: body.action === "add-competitor" ? "подтверждён вручную" : item.sourceStatus,
       }
       : item);
@@ -160,6 +181,17 @@ export async function POST(request: Request) {
     if (!reservation.reserved) return NextResponse.json({ error: cooldownMessage(), cooldownUntil: reservation.cooldownUntil }, { status: 429, headers: { "Cache-Control": "no-store" } });
     try {
       const refreshed = await refreshOzonTargetPrices(await listTargetPrices(session.cabinetId));
+      await saveTargetPrices(session.cabinetId, refreshed.rows);
+      return NextResponse.json({ ...refreshed, cooldownUntil: null }, { headers: { "Cache-Control": "no-store" } });
+    } finally {
+      await releaseTargetPriceRefresh(session.cabinetId, "prices").catch(() => undefined);
+    }
+  }
+  if (session.cabinetId === "yandex") {
+    const reservation = await reserveTargetPriceRefresh(session.cabinetId, "prices", TARGET_PRICE_REFRESH_REQUEST_LOCK_MS);
+    if (!reservation.reserved) return NextResponse.json({ error: cooldownMessage(), cooldownUntil: reservation.cooldownUntil }, { status: 429, headers: { "Cache-Control": "no-store" } });
+    try {
+      const refreshed = await refreshYandexTargetPrices(await listTargetPrices(session.cabinetId));
       await saveTargetPrices(session.cabinetId, refreshed.rows);
       return NextResponse.json({ ...refreshed, cooldownUntil: null }, { headers: { "Cache-Control": "no-store" } });
     } finally {

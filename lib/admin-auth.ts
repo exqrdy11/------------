@@ -2,9 +2,9 @@ const SESSION_COOKIE = "skladno_admin";
 const SESSION_LIFETIME_SECONDS = 12 * 60 * 60;
 const encoder = new TextEncoder();
 
-export const cabinetIds = ["metanutrix", "ozon"] as const;
+export const cabinetIds = ["metanutrix", "ozon", "yandex"] as const;
 export type CabinetId = typeof cabinetIds[number];
-export type MarketplaceKind = "wb" | "ozon";
+export type MarketplaceKind = "wb" | "ozon" | "yandex";
 export type CabinetSummary = { id: CabinetId; name: string; configured: boolean; marketplace: MarketplaceKind };
 export type UserRole = "owner" | "viewer";
 export type AdminSession = { ownerId: CabinetId; cabinetId: CabinetId; role: UserRole };
@@ -99,6 +99,14 @@ export function cabinetSummary(id: CabinetId): CabinetSummary {
       marketplace: "ozon",
     };
   }
+  if (id === "yandex") {
+    return {
+      id,
+      name: "Яндекс Маркет",
+      configured: Boolean(process.env.YANDEX_MARKET_API_KEY?.trim() && process.env.YANDEX_MARKET_BUSINESS_ID?.trim()),
+      marketplace: "yandex",
+    };
+  }
   return { id, name: "Метанутрикс", configured: Boolean(process.env.WB_API_TOKEN?.trim()), marketplace: "wb" };
 }
 
@@ -111,13 +119,21 @@ export function cabinetToken(id: CabinetId) {
 }
 
 export function cabinetMarketplace(id: CabinetId): MarketplaceKind {
-  return id === "ozon" ? "ozon" : "wb";
+  if (id === "ozon") return "ozon";
+  if (id === "yandex") return "yandex";
+  return "wb";
 }
 
 export function ozonCredentials() {
   const clientId = process.env.OZON_CLIENT_ID?.trim();
   const apiKey = process.env.OZON_API_KEY?.trim();
   return clientId && apiKey ? { clientId, apiKey } : null;
+}
+
+export function yandexMarketCredentials() {
+  const apiKey = process.env.YANDEX_MARKET_API_KEY?.trim();
+  const businessId = Number(process.env.YANDEX_MARKET_BUSINESS_ID?.trim());
+  return apiKey && Number.isInteger(businessId) && businessId > 0 ? { apiKey, businessId } : null;
 }
 
 export async function createAdminSession(ownerId: CabinetId, cabinetId: CabinetId = ownerId, role: UserRole = "owner") {

@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { listFfWarehouses } from "@/db/ff-stocks";
 import { cabinetToken, getAdminCabinet } from "@/lib/admin-auth";
 import { ozonFetch, type OzonApiError } from "@/lib/ozon-api";
+import { yandexMarketFetch, type YandexMarketApiError } from "@/lib/yandex-market-api";
 
 export const dynamic = "force-dynamic";
 
@@ -30,6 +31,12 @@ type OzonPosting = {
   status?: string;
   warehouse_id?: number | string;
   products?: Array<{ offer_id?: string; product_id?: number; quantity?: number }>;
+};
+type YandexOrder = {
+  orderId?: number | string;
+  campaignId?: number;
+  status?: string;
+  items?: Array<{ id?: number; offerId?: string; offerName?: string; count?: number }>;
 };
 
 function chunks<T>(items: T[], size: number) {
@@ -98,6 +105,13 @@ function ozonUserMessage(error: unknown) {
   return "Не удалось получить актуальные FBS-заказы из Ozon. Повторите попытку чуть позже.";
 }
 
+function yandexUserMessage(error: unknown) {
+  const status = (error as YandexMarketApiError)?.status;
+  if (status === 401 || status === 403) return "У ключа Яндекс Маркета нет доступа к FBS-заказам. Проверьте права ключа на сервере.";
+  if (status === 429) return "Яндекс Маркет временно ограничил запросы. Подождите минуту и повторите выгрузку.";
+  return "Не удалось получить актуальные FBS-заказы из Яндекс Маркета. Повторите попытку чуть позже.";
+}
+
 async function ozonOrdersForWarehouse(marketplaceWarehouseId: number) {
   const since = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
   const data = await ozonFetch<{ result?: { postings?: OzonPosting[] }; postings?: OzonPosting[] }>("/v3/posting/fbs/list", {
@@ -114,6 +128,24 @@ async function ozonOrdersForWarehouse(marketplaceWarehouseId: number) {
   return (data.result?.postings ?? data.postings ?? []).filter((posting) => activeStatuses.has((posting.status ?? "").toLowerCase()));
 }
 
+async function yandexOrdersForCampaign(campaignId: number) {
+  const businessId = Number(process.env.YANDEX_MARKET_BUSINESS_ID?.trim());
+  if (!Number.isInteger(businessId) || businessId <= 0) throw new Error("Business ID Яндекс Маркета не настроен") as YandexMarketApiError;
+  const orders: YandexOrder[] = [];
+  let pageToken = "";
+  for (let page = 0; page < 30; page += 1) {
+    const params = new URLSearchParams({ limit: "200" });
+    if (pageToken) params.set("pageToken", pageToken);
+    const data = await yandexMarketFetch<{ orders?: YandexOrder[]; paging?: { nextPageToken?: string } }>(`/v1/businesses/${businessId}/orders?${params}`, { method: "POST", body: "{}" });
+    const batch = data.orders ?? [];
+    orders.push(...batch);
+    const next = data.paging?.nextPageToken ?? "";
+    if (!batch.length || !next || next === pageToken) break;
+    pageToken = next;
+  }
+  return orders.filter((order) => order.campaignId === campaignId && ["PLACING", "RESERVED", "UNPAID", "PROCESSING", "DELIVERY", "PICKUP"].includes((order.status ?? "").toUpperCase()));
+}
+
 export async function GET(request: Request) {
   const cabinetId = await getAdminCabinet(request);
   if (!cabinetId) return NextResponse.json({ error: "Требуется вход" }, { status: 401 });
@@ -122,7 +154,7 @@ export async function GET(request: Request) {
 
   const warehouse = (await listFfWarehouses(cabinetId)).find((item) => item.id === warehouseId);
   if (!warehouse) return NextResponse.json({ error: "Склад ФФ не найден" }, { status: 404 });
-  if (!warehouse.wbWarehouseId) return NextResponse.json({ error: cabinetId === "ozon" ? "У этого ФФ не указан ID склада Ozon. Добавьте привязку в настройках складов." : "У этого ФФ не указан ID склада WB. Добавьте привязку в настройках складов." }, { status: 409 });
+  if (!warehouse.wbWarehouseId) return NextResponse.json({ error: cabinetId === "ozon" ? "У этого ФФ не указан ID склада Ozon. Добавьте привязку в настройках складов." : cabinetId === "yandex" ? "У этого ФФ не указана кампания FBS Яндекс Маркета. Добавьте привязку в настройках складов." : "У этого ФФ не указан ID склада WB. Добавьте привязку в настройках складов." }, { status: 409 });
 
   if (cabinetId === "ozon") {
     try {
@@ -137,6 +169,22 @@ export async function GET(request: Request) {
       return NextResponse.json({ warehouse: { id: warehouse.id, city: warehouse.city, name: warehouse.name }, orders, missingStickers: orders.filter((order) => !order.stickerText).length, stickerKind: "Номер отправления Ozon" }, { headers: { "Cache-Control": "no-store" } });
     } catch (error) {
       return NextResponse.json({ error: ozonUserMessage(error) }, { status: 502 });
+    }
+  }
+
+  if (cabinetId === "yandex") {
+    try {
+      const orders = await yandexOrdersForCampaign(warehouse.wbWarehouseId);
+      const exportedOrders = orders.flatMap((order) => (order.items ?? []).map((item, index) => ({
+        orderId: `${order.orderId ?? "YM-заказ"}:${index + 1}`,
+        article: item.offerId?.trim() || item.offerName?.trim() || `Яндекс Маркет ${item.id ?? ""}`.trim(),
+        quantity: Math.max(1, Math.floor(Number(item.count) || 1)),
+        sticker: null,
+        stickerText: `Заказ ЯМ №${order.orderId ?? "—"}`,
+      }))).sort((left, right) => left.article.localeCompare(right.article, "ru") || String(left.orderId).localeCompare(String(right.orderId), "ru"));
+      return NextResponse.json({ warehouse: { id: warehouse.id, city: warehouse.city, name: warehouse.name }, orders: exportedOrders, missingStickers: 0, stickerKind: "Номер заказа Яндекс Маркета" }, { headers: { "Cache-Control": "no-store" } });
+    } catch (error) {
+      return NextResponse.json({ error: yandexUserMessage(error) }, { status: 502 });
     }
   }
 
