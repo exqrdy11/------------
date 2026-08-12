@@ -1,5 +1,6 @@
 import { getD1 } from "./index";
 import type { CabinetId } from "@/lib/admin-auth";
+import { ozonCompetitorSeed } from "@/lib/ozon-competitor-seed";
 import { targetPriceSnapshot, type TargetPriceSnapshotRow } from "@/lib/target-price-snapshot";
 
 export type TargetPriceCompetitor = {
@@ -150,7 +151,24 @@ async function seedSnapshot(cabinetId: CabinetId) {
       score, reason, source_status
     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `);
-  await d1.batch(targetPriceSnapshot.map((row) => statement.bind(
+  const snapshot = cabinetId === "ozon"
+    ? ozonCompetitorSeed.map<TargetPriceSnapshotRow>((item) => ({
+      sku: item.sku,
+      nmId: item.productId,
+      orders: 0,
+      priceBeforeSpp: null,
+      sppPercent: null,
+      currentPrice: null,
+      updatedAt: null,
+      searchQuery: item.sku,
+      competitors: item.competitorProductIds.map((nmId) => ({ nmId, price: 0, source: "импорт из КОНКУРЕНТЫ.02" })),
+      candidateNmId: null,
+      score: null,
+      reason: "Конкуренты импортированы из листа «КОНКУРЕНТЫ.02». Цены Ozon появятся после отдельного обновления.",
+      sourceStatus: "готово",
+    }))
+    : targetPriceSnapshot;
+  await d1.batch(snapshot.map((row) => statement.bind(
     cabinetId,
     productKey(row),
     row.sku,

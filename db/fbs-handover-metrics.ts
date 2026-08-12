@@ -2,7 +2,7 @@ import { getD1 } from "./index";
 import type { CabinetId } from "@/lib/admin-auth";
 
 type ObservedFbsOrder = {
-  id: number;
+  id: string | number;
   warehouseId: number | null;
   createdAt: string | null;
   state: "before" | "handover";
@@ -61,7 +61,7 @@ function isParsableDate(value: string | null) {
 }
 
 /**
- * WB does not expose the timestamp of the FBS handover. We therefore record a
+ * Marketplaces do not always expose the exact timestamp of the FBS handover. We therefore record a
  * payable handover only when the dashboard first sees the order before handover
  * and later sees it in `complete`. An order that was already in delivery on
  * the first observation is deliberately not backdated: this prevents charging

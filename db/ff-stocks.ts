@@ -168,7 +168,9 @@ async function getFfStockDb() {
         d1.prepare("DELETE FROM ff_stock_batches WHERE cabinet_id = 'trusthome'"),
         d1.prepare("DELETE FROM ff_stocks WHERE cabinet_id = 'trusthome'"),
         d1.prepare("DELETE FROM ff_warehouses WHERE cabinet_id = 'trusthome'"),
-        ...cabinetIds.flatMap((cabinetId) => defaultWarehouses.map((warehouse) => d1.prepare(`
+        // The presets belong to the WB cabinet only. Ozon fills this list
+        // from its own FBS warehouses on first synchronization.
+        ...cabinetIds.filter((cabinetId) => cabinetId === "metanutrix").flatMap((cabinetId) => defaultWarehouses.map((warehouse) => d1.prepare(`
         INSERT INTO ff_warehouses (cabinet_id, id, city, name, position, wb_warehouse_id, wb_warehouse_name, is_hidden)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(cabinet_id, id) DO UPDATE SET
@@ -243,6 +245,10 @@ export async function updateFfWarehouse(input: ManualWarehouse & { cabinetId: Ca
 }
 
 export async function syncWbFbsWarehouses(input: { cabinetId: CabinetId; warehouses: Array<{ id: number; name: string }> }) {
+  return syncMarketplaceFbsWarehouses({ ...input, idPrefix: "wb", defaultName: "Склад WB FBS" });
+}
+
+export async function syncMarketplaceFbsWarehouses(input: { cabinetId: CabinetId; warehouses: Array<{ id: number; name: string }>; idPrefix: string; defaultName: string }) {
   const d1 = await getFfStockDb();
   const current = await listFfWarehouses(input.cabinetId);
   const knownWbIds = new Set(current.flatMap((warehouse) => warehouse.wbWarehouseId ? [warehouse.wbWarehouseId] : []));
@@ -252,7 +258,7 @@ export async function syncWbFbsWarehouses(input: { cabinetId: CabinetId; warehou
   await d1.batch(missing.map((warehouse, index) => d1.prepare(`
     INSERT INTO ff_warehouses (cabinet_id, id, city, name, position, wb_warehouse_id, wb_warehouse_name, is_hidden)
     VALUES (?, ?, ?, ?, ?, ?, ?, 0)
-  `).bind(input.cabinetId, `wb_${warehouse.id}`, warehouse.name, "Склад WB FBS", maxPosition + (index + 1) * 10, warehouse.id, warehouse.name)));
+  `).bind(input.cabinetId, `${input.idPrefix}_${warehouse.id}`, warehouse.name, input.defaultName, maxPosition + (index + 1) * 10, warehouse.id, warehouse.name)));
   return listFfWarehouses(input.cabinetId);
 }
 

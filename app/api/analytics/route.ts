@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { listFfWarehouses, type ManualWarehouse } from "@/db/ff-stocks";
 import { cabinetToken, getAdminCabinet } from "@/lib/admin-auth";
+import { loadInventorySnapshot } from "@/db/inventory-snapshots";
 
 export const dynamic = "force-dynamic";
 
@@ -126,8 +127,6 @@ function warehouseResult(warehouses: ManualWarehouse[], values: Map<string, numb
 export async function GET(request: Request) {
   const cabinetId = await getAdminCabinet(request);
   if (!cabinetId) return NextResponse.json({ error: "Требуется вход администратора" }, { status: 401, headers: { "Cache-Control": "no-store" } });
-  const token = cabinetToken(cabinetId);
-  if (!token) return NextResponse.json({ error: "Токен Wildberries ещё не подключён" }, { status: 503, headers: { "Cache-Control": "no-store" } });
 
   let period: ReturnType<typeof parsePeriod>;
   try {
@@ -135,6 +134,32 @@ export async function GET(request: Request) {
   } catch (error) {
     return NextResponse.json({ error: error instanceof Error ? error.message : "Некорректный период" }, { status: 400, headers: { "Cache-Control": "no-store" } });
   }
+
+  if (cabinetId === "ozon") {
+    type OzonSnapshot = {
+      updatedAt?: string;
+      ozonAnalytics?: { daily?: Record<string, number>; byWarehouse?: Record<string, number> };
+    };
+    const snapshot = await loadInventorySnapshot<OzonSnapshot>("ozon").catch(() => null);
+    const daily = daysBetween(period.from, period.to).map((date) => ({ date, fbs: Math.max(0, Number(snapshot?.ozonAnalytics?.daily?.[date]) || 0), fbo: 0 }));
+    const fbs = daily.reduce((sum, point) => sum + point.fbs, 0);
+    const manualWarehouses = await listFfWarehouses("ozon");
+    const byMarketplaceWarehouse = snapshot?.ozonAnalytics?.byWarehouse ?? {};
+    const fbsWarehouses = warehouseResult(manualWarehouses, new Map(manualWarehouses.map((warehouse) => [warehouse.id, Math.max(0, Number(byMarketplaceWarehouse[String(warehouse.wbWarehouseId ?? "")]) || 0)])));
+    return NextResponse.json({
+      from: period.from,
+      to: period.to,
+      summary: { fbs, fbo: 0, total: fbs, fbsShare: fbs ? 100 : 0, fboShare: 0 },
+      daily,
+      fbsWarehouses,
+      source: { factAvailable: Boolean(snapshot), retryAt: null, retryExact: true },
+      warnings: snapshot ? ["Ozon: динамика показывает созданные FBS-заказы за выбранный период. Факт выкупа FBO подключается отдельным финансовым источником."] : ["Сначала обновите остатки Ozon, чтобы собрать аналитику."],
+      updatedAt: snapshot?.updatedAt ?? new Date().toISOString(),
+    } satisfies AnalyticsPayload, { headers: { "Cache-Control": "private, max-age=0" } });
+  }
+
+  const token = cabinetToken(cabinetId);
+  if (!token) return NextResponse.json({ error: "Токен Wildberries ещё не подключён" }, { status: 503, headers: { "Cache-Control": "no-store" } });
 
   const refresh = new URL(request.url).searchParams.get("refresh") === "1";
   const key = `${cabinetId}:${period.from}:${period.to}`;

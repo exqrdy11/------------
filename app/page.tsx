@@ -15,7 +15,7 @@ type FfStock = Record<string, number>;
 type FfExpiry = Record<string, string | null>;
 type FfBatch = { location: string; batchCode: string; expiresAt: string | null; quantity: number };
 type FfBatches = Record<string, FfBatch[]>;
-type CabinetSummary = { id: "metanutrix"; name: string; configured: boolean };
+type CabinetSummary = { id: "metanutrix" | "ozon"; name: string; configured: boolean; marketplace: "wb" | "ozon" };
 type UserRole = "owner" | "viewer";
 type MarketplaceConnection = {
   platform: "yandex" | "ozon";
@@ -109,7 +109,7 @@ type AnalyticsResponse = {
 
 type ImportItem = { sku: string; nmId: number | null; quantity: number; batchCode: string; expiresAt?: string | null };
 type ImportPreview = { fileName: string; sheetName: string; items: ImportItem[]; skipped: number; hasExpiryColumn: boolean; hasBatchColumn: boolean };
-type FfOrderExport = { orderId: number; article: string; quantity: number; sticker: string | null };
+type FfOrderExport = { orderId: string | number; article: string; quantity: number; sticker: string | null; stickerText?: string | null };
 type FfOrdersExportResponse = {
   warehouse?: { id: string; city: string; name: string };
   orders?: FfOrderExport[];
@@ -120,7 +120,7 @@ type FfSettlement = {
   warehouse: ManualWarehouse;
   from: string;
   to: string;
-  orders: Array<{ orderId: number; handedOverAt: string }>;
+  orders: Array<{ orderId: string; handedOverAt: string }>;
   quantity: number;
   rateKopecks: number;
   totalKopecks: number;
@@ -370,11 +370,17 @@ function base64ToBytes(value: string) {
   return bytes;
 }
 
-function downloadFfOrdersWorkbook(warehouse: { city: string; name: string }, orders: FfOrderExport[]) {
+function stickerImageBase64(sticker: string | null) {
+  if (!sticker) return null;
+  const value = sticker.startsWith("data:image/") ? sticker.slice(sticker.indexOf(",") + 1) : sticker;
+  return value.length > 100 && /^[A-Za-z0-9+/=]+$/.test(value) ? value : null;
+}
+
+function downloadFfOrdersWorkbook(warehouse: { city: string; name: string }, orders: FfOrderExport[], marketplaceName: string) {
   const workbook = XLSX.utils.book_new();
   const worksheet = XLSX.utils.aoa_to_sheet([
-    ["Артикул продавца", "Кол-во", "Стикер WB"],
-    ...orders.map((order) => [order.article, order.quantity, order.sticker ? "" : "Стикер не получен"]),
+    ["Артикул продавца", "Кол-во", `Стикер ${marketplaceName}`],
+    ...orders.map((order) => [order.article, order.quantity, order.stickerText ?? (order.sticker ? "" : "Стикер не получен")]),
   ]);
   worksheet["!cols"] = [{ wch: 31 }, { wch: 10 }, { wch: 48 }];
   worksheet["!rows"] = [{ hpt: 24 }, ...orders.map(() => ({ hpt: 180 }))];
@@ -394,7 +400,10 @@ function downloadFfOrdersWorkbook(warehouse: { city: string; name: string }, ord
     CFB.utils.cfb_add(archive, `${root}${path}`, typeof value === "string" ? encoder.encode(value) : value, { unsafe: true });
   };
 
-  const images = orders.flatMap((order, orderIndex) => order.sticker ? [{ orderIndex, data: base64ToBytes(order.sticker) }] : []);
+  const images = orders.flatMap((order, orderIndex) => {
+    const sticker = stickerImageBase64(order.sticker);
+    return sticker ? [{ orderIndex, data: base64ToBytes(sticker) }] : [];
+  });
   if (images.length) {
     const sheetXml = readText("xl/worksheets/sheet1.xml");
     put("xl/worksheets/sheet1.xml", sheetXml.replace("</worksheet>", "<drawing r:id=\"rId1\"/></worksheet>"));
@@ -488,6 +497,8 @@ function MarketplaceConnectionCard({
   onDisable,
   canManage,
   checking,
+  onOpen,
+  opening,
 }: {
   connection?: MarketplaceConnection;
   platform: "yandex" | "ozon";
@@ -497,6 +508,8 @@ function MarketplaceConnectionCard({
   onDisable: (platform: "yandex" | "ozon") => Promise<void>;
   canManage: boolean;
   checking: boolean;
+  onOpen?: () => void;
+  opening?: boolean;
 }) {
   const connected = connection?.connected ?? false;
   const configured = connection?.configured ?? false;
@@ -513,10 +526,11 @@ function MarketplaceConnectionCard({
   return <article className={`cabinet-platform-card ${connected ? "connected-platform" : "pending-platform"}`}>
     <div className="cabinet-platform-head"><span className={`platform-mark ${platform === "yandex" ? "ym-mark" : "oz-mark"}`}>{mark}</span><div><strong>{title}</strong><small>{disabled ? "Подключение отключено" : connected ? "Подключено по API" : configured ? "Нужна проверка подключения" : "Настраивается на сервере"}</small></div></div>
     {disabled ? <div className="platform-connect"><strong>Подключение отключено</strong><span>Ключи остаются в защищённой настройке сервера. Включение выполняется только на сервере.</span></div> : connected ? <div className="platform-connect connected"><strong>{connection?.accountName || title}</strong><span>{connection?.details.length ? connection.details.join(" · ") : "Доступ к кабинету подтверждён"}</span></div> : <div className="platform-connect"><strong>{configured ? "Ключ на сервере" : "Ключ не настроен"}</strong><span>{configured ? connection?.error || "Проверьте подключение." : "API-ключи вводятся только в защищённой настройке сервера и не доступны в браузере."}</span></div>}
+    {onOpen && configured && !disabled && <button className="marketplace-check-btn" type="button" onClick={onOpen} disabled={opening}>{opening ? "Открываем…" : "Открыть кабинет"}</button>}
     {canManage && configured && !disabled && <><button className="marketplace-check-btn" type="button" onClick={onCheck} disabled={checking || disabling}>{checking ? "Проверяем…" : connected ? "Проверить снова" : "Проверить подключение"}</button><button className="marketplace-link-btn marketplace-disable-btn" type="button" onClick={() => void disable()} disabled={checking || disabling}>{disabling ? "Отключаем…" : "Отключить"}</button></>}
     {!canManage && <p>Гостевой доступ: можно обновлять статусы, но API-ключи и настройки скрыты.</p>}
     {canManage && configured && !disabled && !connected && <p>После успешной проверки сюда попадут доступные кампании или склады.</p>}
-    {canManage && connected && <p>Следующий этап: подтянем товары, остатки и заказы в отдельный контур этого маркетплейса.</p>}
+    {canManage && connected && <p>{platform === "ozon" ? "Кабинет Ozon готов: откройте его для остатков, FBS и ФФ." : "Следующий этап: подтянем товары, остатки и заказы в отдельный контур этого маркетплейса."}</p>}
   </article>;
 }
 
@@ -602,6 +616,10 @@ export default function Home() {
   const [importMessage, setImportMessage] = useState<string | null>(null);
   const [importError, setImportError] = useState<string | null>(null);
   const canManage = role === "owner";
+  const isOzon = cabinet?.marketplace === "ozon";
+  const marketplaceName = isOzon ? "Ozon" : "Wildberries";
+  const marketplaceCode = isOzon ? "OZ" : "WB";
+  const wbCabinets = useMemo(() => availableCabinets.filter((item) => item.marketplace === "wb"), [availableCabinets]);
 
   const loadManualWarehouses = useCallback(async () => {
     try {
@@ -611,9 +629,10 @@ export default function Home() {
         setAuthState("unauthenticated");
         return;
       }
-      if (response.ok && data.warehouses?.length) {
-        setManualWarehouses(data.warehouses);
-        setSettlementWarehouseId((current) => data.warehouses!.some((warehouse) => warehouse.id === current) ? current : data.warehouses![0].id);
+      if (response.ok) {
+        const warehouses = data.warehouses ?? [];
+        setManualWarehouses(warehouses);
+        setSettlementWarehouseId((current) => warehouses.some((warehouse) => warehouse.id === current) ? current : warehouses[0]?.id ?? "");
       }
     } catch {
       // The dashboard remains usable with the built-in warehouses until D1 reconnects.
@@ -723,12 +742,13 @@ export default function Home() {
     await loadMarketplaceConnections();
   }, [loadMarketplaceConnections]);
 
-  const loadData = useCallback(async (force = false) => {
+  const loadData = useCallback(async (force = false, marketplaceOverride?: CabinetSummary["marketplace"]) => {
     setLoading(true);
     setInventoryLoadingStartedAt(Date.now());
     setError(null);
     try {
-      const response = await fetch(`/api/inventory${force ? "?refresh=1" : ""}`, { cache: "no-store" });
+      const targetMarketplace = marketplaceOverride ?? cabinet?.marketplace;
+      const response = await fetch(`${targetMarketplace === "ozon" ? "/api/ozon/inventory" : "/api/inventory"}${force ? "?refresh=1" : ""}`, { cache: "no-store" });
       const data = await response.json() as InventoryResponse;
       if (response.status === 401) {
         setAuthState("unauthenticated");
@@ -738,20 +758,20 @@ export default function Home() {
       setWarnings(data.warnings ?? []);
       setInventoryRetryAt(data.retryAt ?? null);
       if (data.cabinet) setCabinet(data.cabinet);
-      if (data.manualWarehouses?.length) setManualWarehouses(data.manualWarehouses);
-      if (!response.ok) throw new Error(data.error || "Не удалось получить данные Wildberries");
+      if (data.manualWarehouses) setManualWarehouses(data.manualWarehouses);
+      if (!response.ok) throw new Error(data.error || `Не удалось получить данные ${targetMarketplace === "ozon" ? "Ozon" : "Wildberries"}`);
       setRows(data.rows ?? []);
       setWarehouseNames(data.warehouseNames ?? []);
       setTotals(data.totals ? { ...emptyTotals, ...data.totals, ffStock: data.totals.ffStock ?? {}, fbsByLocation: { ...emptyFbsBreakdown, ...data.totals.fbsByLocation } } : emptyTotals);
       setHandoverTiming(data.handoverTiming ? { ...emptyHandoverMetrics, ...data.handoverTiming, overall: { ...emptyHandoverMetrics.overall, ...data.handoverTiming.overall }, byLocation: data.handoverTiming.byLocation ?? {} } : emptyHandoverMetrics);
       setUpdatedAt(data.updatedAt ?? new Date().toISOString());
     } catch (loadError) {
-      setError(loadError instanceof Error ? loadError.message : "Не удалось получить данные Wildberries");
+      setError(loadError instanceof Error ? loadError.message : "Не удалось получить данные маркетплейса");
     } finally {
       setLoading(false);
       setInventoryLoadingStartedAt(null);
     }
-  }, []);
+  }, [cabinet?.marketplace]);
 
   const loadAnalytics = useCallback(async (range = analyticsRange, force = false) => {
     setAnalyticsLoading(true);
@@ -765,14 +785,14 @@ export default function Home() {
         setAuthState("unauthenticated");
         return;
       }
-      if (!response.ok) throw new Error(data.error || "Не удалось получить аналитику Wildberries");
+      if (!response.ok) throw new Error(data.error || `Не удалось получить аналитику ${marketplaceName}`);
       setAnalytics(data);
     } catch (analyticsLoadError) {
-      setAnalyticsError(analyticsLoadError instanceof Error ? analyticsLoadError.message : "Не удалось получить аналитику Wildberries");
+      setAnalyticsError(analyticsLoadError instanceof Error ? analyticsLoadError.message : "Не удалось получить аналитику маркетплейса");
     } finally {
       setAnalyticsLoading(false);
     }
-  }, [analyticsRange]);
+  }, [analyticsRange, marketplaceName]);
 
   const loadSettlement = useCallback(async () => {
     if (!settlementWarehouseId || !settlementRange.from || !settlementRange.to || settlementRange.from > settlementRange.to) {
@@ -908,12 +928,12 @@ export default function Home() {
       id: warehouse.id,
       city: warehouse.city,
       label: warehouse.wbWarehouseId
-        ? warehouse.wbWarehouseName || `WB FBS №${warehouse.wbWarehouseId}`
-        : "WB FBS не назначен",
+        ? warehouse.wbWarehouseName || `${marketplaceCode} FBS №${warehouse.wbWarehouseId}`
+        : `${marketplaceCode} FBS не назначен`,
     }));
     if ((activeFbsByLocation.unassigned ?? 0) > 0) locations.push({ id: "unassigned", city: "Не назначено", label: "Выберите склад ФФ" });
     return locations;
-  }, [activeFbsByLocation.unassigned, visibleManualWarehouses]);
+  }, [activeFbsByLocation.unassigned, marketplaceCode, visibleManualWarehouses]);
 
   const ffReservedFromStockTotal = useMemo(() => visibleManualWarehouses.reduce((sum, warehouse) => (
     sum + (totals.fbsByLocation[warehouse.id] ?? 0)
@@ -960,11 +980,11 @@ export default function Home() {
   }, [selectedFulfillmentWarehouse, rows, query, fulfillmentList]);
 
   const fulfillmentListMeta: Record<FulfillmentList, { kicker: string; title: string; empty: string; primary: string; footer: string }> = {
-    physical: { kicker: "ФАКТИЧЕСКИ НА ФФ", title: "Фактический остаток по артикулам", empty: "На этом ФФ нет физического остатка", primary: "Фактически ФФ", footer: "Включает новые FBS: эти заказы ещё физически лежат на ФФ до передачи Wildberries." },
+    physical: { kicker: "ФАКТИЧЕСКИ НА ФФ", title: "Фактический остаток по артикулам", empty: "На этом ФФ нет физического остатка", primary: "Фактически ФФ", footer: `Включает новые FBS: эти заказы ещё физически лежат на ФФ до передачи ${marketplaceName}.` },
     available: { kicker: "ОСТАТКИ НА ФФ", title: "Доступный остаток по артикулам", empty: "На этом ФФ нет доступного остатка", primary: "Доступно ФФ", footer: "Из остатка вычтены только новые и собираемые заказы FBS" },
     reserved: { kicker: "НОВЫЕ FBS", title: "Новые заказы FBS", empty: "Нет новых заказов FBS", primary: "Новые FBS", footer: "Статусы new / confirm: заказ ещё на ФФ и вычтен из доступного остатка" },
-    receiving: { kicker: "В ДОСТАВКЕ WB", title: "Заказы, переданные Wildberries", empty: "Нет заказов, переданных WB", primary: "В доставке WB", footer: "Статус complete: ФФ передал заказ WB. Это одна оплачиваемая обработка, без повторного учёта после завершения." },
-    toSale: { kicker: "ПРОДАНО", title: "Фактически выкупленные товары", empty: "Нет выкупленных товаров", primary: "Продано", footer: "Только wbStatus sold: выкуп покупателем, без отмен" },
+    receiving: { kicker: `В ДОСТАВКЕ ${marketplaceCode}`, title: `Заказы, переданные ${marketplaceName}`, empty: `Нет заказов, переданных ${marketplaceName}`, primary: `Переданы ${marketplaceCode}`, footer: `ФФ передал заказ ${marketplaceName}. Это одна оплачиваемая обработка, без повторного учёта после завершения.` },
+    toSale: { kicker: "ПРОДАНО", title: "Фактически выкупленные товары", empty: "Нет выкупленных товаров", primary: "Продано", footer: "Заказы завершены без отмен" },
   };
   const activeFulfillmentListMeta = fulfillmentListMeta[fulfillmentList];
 
@@ -1030,7 +1050,15 @@ export default function Home() {
     transit: rows.filter(hasActiveFbsMovement).length,
   }), [rows]);
   const viewTotal = activeView === "fbs" ? rows.filter(hasFbsMovement).length : rows.length;
-  const stockTitle = activeView === "fbs" ? "Артикулы в FBS-движении" : "Все товары Wildberries";
+  const stockTitle = activeView === "fbs" ? "Артикулы в FBS-движении" : `Все товары ${marketplaceName}`;
+  const currentViewTitle = useMemo(() => {
+    const base = viewTitles[activeView];
+    if (!isOzon) return base;
+    return {
+      eyebrow: base.eyebrow.replace("WILDBERRIES", "OZON").replace("РЫНОК WB", "РЫНОК OZON"),
+      title: base.title.replace("FBS и FBO", "FBS и FBO Ozon"),
+    };
+  }, [activeView, isOzon]);
   const analyticsFactAvailable = Boolean(analytics?.source.factAvailable);
   const analyticsTrendChannel: AnalyticsChannel = analyticsChannel;
   const analyticsTrend = useMemo(() => {
@@ -1313,7 +1341,7 @@ export default function Home() {
       setQuery("");
       setFilter("Все");
       setActiveView("overview");
-      await Promise.all([loadData(), loadManualWarehouses()]);
+      await Promise.all([loadData(false, data.cabinet.marketplace), loadManualWarehouses()]);
     } catch (switchError) {
       setCabinetSwitchError(switchError instanceof Error ? switchError.message : "Не удалось открыть кампанию");
     } finally {
@@ -1322,7 +1350,7 @@ export default function Home() {
   };
 
   const downloadCsv = (sourceRows: StockRow[], suffix: string) => {
-    const header = ["Артикул продавца", "Артикул WB", ...warehouseNames, "Всего на WB", ...visibleManualWarehouses.flatMap((item) => [`ФФ ${formatManualWarehouse(item)}`, `Срок годности · ${formatManualWarehouse(item)}`]), "Новые FBS", ...fbsLocations.map((location) => `Новые FBS ${location.city}`), "Переданы WB", "Продано (выкуплено)", "Статус"];
+    const header = ["Артикул продавца", `ID товара ${marketplaceName}`, ...warehouseNames, `Всего на ${marketplaceName}`, ...visibleManualWarehouses.flatMap((item) => [`ФФ ${formatManualWarehouse(item)}`, `Срок годности · ${formatManualWarehouse(item)}`]), "Новые FBS", ...fbsLocations.map((location) => `Новые FBS ${location.city}`), `Переданы ${marketplaceCode}`, "Продано", "Статус"];
     const body = sourceRows.map((row) => [row.sku, row.nmId ?? "", ...warehouseNames.map((name) => row.warehouses[name] ?? 0), stockTotal(row), ...visibleManualWarehouses.flatMap((item) => [row.ffStock[item.id] ?? 0, row.ffExpiry?.[item.id] ?? ""]), row.fbs, ...fbsLocations.map((location) => row.fbsByLocation[location.id] ?? 0), row.receiving, row.toSale, row.status]);
     const content = [header, ...body].map((line) => line.map((cell) => String(cell).replaceAll(";", ",")).join(";")).join("\n");
     const blob = new Blob(["\uFEFF" + content], { type: "text/csv;charset=utf-8" });
@@ -1338,7 +1366,7 @@ export default function Home() {
     setFfOrdersExportMessage(null);
     setFfOrdersExportError(null);
     if (!warehouse.wbWarehouseId) {
-      setFfOrdersExportError("Сначала привяжите этот ФФ к складу WB — укажите ID склада в настройках.");
+      setFfOrdersExportError(`Сначала привяжите этот ФФ к складу ${marketplaceName} — укажите ID склада в настройках.`);
       return;
     }
     setFfOrdersExportLoading(true);
@@ -1349,14 +1377,14 @@ export default function Home() {
         setAuthState("unauthenticated");
         return;
       }
-      if (!response.ok) throw new Error(data.error || "Не удалось получить FBS-заказы из Wildberries");
+      if (!response.ok) throw new Error(data.error || `Не удалось получить FBS-заказы из ${marketplaceName}`);
       const orders = data.orders ?? [];
       if (!orders.length) {
         setFfOrdersExportMessage("Для этого ФФ нет актуальных FBS-заказов на сборке или в доставке.");
         return;
       }
-      downloadFfOrdersWorkbook(warehouse, orders);
-      setFfOrdersExportMessage(data.missingStickers ? `Скачано ${orders.length} заказов. Для ${data.missingStickers} WB пока не вернул стикер.` : `Скачано ${orders.length} актуальных FBS-заказов со стикерами WB.`);
+      downloadFfOrdersWorkbook(warehouse, orders, marketplaceName);
+      setFfOrdersExportMessage(data.missingStickers ? `Скачано ${orders.length} заказов. Для ${data.missingStickers} ${marketplaceName} пока не вернул стикер.` : `Скачано ${orders.length} актуальных FBS-заказов со стикерами ${marketplaceName}.`);
     } catch (downloadError) {
       setFfOrdersExportError(downloadError instanceof Error ? downloadError.message : "Не удалось подготовить Excel");
     } finally {
@@ -1387,21 +1415,21 @@ export default function Home() {
           <button type="button" className={`nav-item ${activeView === "payments" ? "active" : ""}`} onClick={() => navigateTo("payments")}><span className="nav-symbol">₽</span>Оплаты ФФ</button>
           <button type="button" className={`nav-item ${activeView === "reports" ? "active" : ""}`} onClick={() => navigateTo("reports")}><span className="nav-symbol">≡</span>Отчёты</button>
         </nav>
-        <div className="sidebar-bottom"><div className="connection"><span className={error ? "live-dot offline" : "live-dot"} />{error ? "Нужна проверка подключения" : "Подключено к WB API"}</div><button type="button" className="profile" onClick={() => navigateTo("cabinets")}><span className="avatar">WB</span><span><strong>{cabinet?.name ?? "Wildberries"}</strong><small>{role === "viewer" ? "Гость · просмотр и обновление" : configured ? "Владелец · кабинеты и ключи" : "Владелец · токен не добавлен"}</small></span><span className="chevron">›</span></button></div>
+        <div className="sidebar-bottom"><div className="connection"><span className={error ? "live-dot offline" : "live-dot"} />{error ? "Нужна проверка подключения" : `Подключено к API ${marketplaceName}`}</div><button type="button" className="profile" onClick={() => navigateTo("cabinets")}><span className="avatar">{marketplaceCode}</span><span><strong>{cabinet?.name ?? marketplaceName}</strong><small>{role === "viewer" ? "Гость · просмотр и обновление" : configured ? "Владелец · кабинеты и ключи" : "Владелец · ключ не добавлен"}</small></span><span className="chevron">›</span></button></div>
       </aside>
 
       <section className="workspace">
-        <header className="topbar"><div><p className="eyebrow">{viewTitles[activeView].eyebrow}</p><h1>{viewTitles[activeView].title}</h1></div><div className="header-actions"><span className="refresh-guidance">Можно обновить вручную · рекомендуем раз в 2 мин</span><div className="sync-state"><span className={error ? "live-dot offline" : "live-dot"} /><span>Последнее обновление<br/><strong>{formatSyncTime(updatedAt)} МСК</strong></span></div><button className="logout-btn" type="button" onClick={() => void logoutAdmin()}>Выйти</button><button className="secondary-btn" type="button" onClick={() => void loadData(true)} disabled={loading || Boolean(inventoryRetrySeconds)} title={inventoryRetrySeconds ? "Общий запрос к WB уже выполняется" : loading ? "Обновление займёт не больше 25 секунд" : "Можно обновить вручную в любой момент. Рекомендованный интервал — 2 минуты."}><span className={loading ? "spin" : ""}>↻</span>{loading ? `Обновляем ${inventoryRefreshSeconds ?? 0}/25 с` : inventoryRetrySeconds ? `Через ${formatCountdown(inventoryRetrySeconds)}` : "Обновить"}</button><button className="primary-btn" type="button" onClick={() => downloadCsv(filteredRows, "ostatki-wb")} disabled={!rows.length}>Экспорт<span>↓</span></button></div></header>
+        <header className="topbar"><div><p className="eyebrow">{currentViewTitle.eyebrow}</p><h1>{currentViewTitle.title}</h1></div><div className="header-actions"><span className="refresh-guidance">Можно обновить вручную · рекомендуем раз в 2 мин</span><div className="sync-state"><span className={error ? "live-dot offline" : "live-dot"} /><span>Последнее обновление<br/><strong>{formatSyncTime(updatedAt)} МСК</strong></span></div><button className="logout-btn" type="button" onClick={() => void logoutAdmin()}>Выйти</button><button className="secondary-btn" type="button" onClick={() => void loadData(true)} disabled={loading || Boolean(inventoryRetrySeconds)} title={inventoryRetrySeconds ? `Общий запрос к ${marketplaceName} уже выполняется` : loading ? "Обновление займёт не больше 25 секунд" : "Можно обновить вручную в любой момент. Рекомендованный интервал — 2 минуты."}><span className={loading ? "spin" : ""}>↻</span>{loading ? `Обновляем ${inventoryRefreshSeconds ?? 0}/25 с` : inventoryRetrySeconds ? `Через ${formatCountdown(inventoryRetrySeconds)}` : "Обновить"}</button><button className="primary-btn" type="button" onClick={() => downloadCsv(filteredRows, `ostatki-${isOzon ? "ozon" : "wb"}`)} disabled={!rows.length}>Экспорт<span>↓</span></button></div></header>
 
         <div className="content" id="overview">
           {cabinet && <section className={`cabinet-strip ${cabinet.configured ? "ready" : "waiting"}`}>
-            <div><span className="cabinet-strip-mark">WB</span><span><small>ТЕКУЩАЯ КАМПАНИЯ</small><strong>{cabinet.name}</strong></span></div>
-            <p>{cabinet.configured ? "Свои товары, ФФ-склады и сроки годности. Переключение кампаний не требует нового входа." : "Ожидает API-токен Wildberries. Вход и отдельные склады уже готовы."}</p>
+            <div><span className="cabinet-strip-mark">{marketplaceCode}</span><span><small>ТЕКУЩАЯ КАМПАНИЯ</small><strong>{cabinet.name}</strong></span></div>
+            <p>{cabinet.configured ? "Свои товары, ФФ-склады и сроки годности. Переключение кабинетов не требует нового входа." : `Ожидает ключ API ${marketplaceName}. Вход и отдельные склады уже готовы.`}</p>
             <button type="button" onClick={() => navigateTo("cabinets")}>Сменить кампанию</button>
           </section>}
-          {error && <section className="api-notice" role="alert"><span className="api-notice-icon">!</span><div><strong>{error}</strong><p>{configured ? "Для полной загрузки токену нужны категории: Контент, Маркетплейс и Аналитика." : "Безопасный токен хранится только на сервере и не передаётся в браузер."}</p></div><button type="button" onClick={() => void loadData(true)}>Проверить снова</button></section>}
+          {error && <section className="api-notice" role="alert"><span className="api-notice-icon">!</span><div><strong>{error}</strong><p>{configured ? isOzon ? "Проверьте права ключа Ozon на товары, остатки и FBS-заказы." : "Для полной загрузки токену нужны категории: Контент, Маркетплейс и Аналитика." : "Безопасный ключ хранится только на сервере и не передаётся в браузер."}</p></div><button type="button" onClick={() => void loadData(true)}>Проверить снова</button></section>}
           {!error && warnings.length > 0 && <section className="warning-strip"><span>!</span><p>{warnings.join(" · ")}</p></section>}
-          {inventoryRetrySeconds !== null && inventoryRetrySeconds > 0 && <section className="inventory-retry-timer" role="status"><span>↻</span><div><strong>Текущий запрос к WB ещё выполняется: {formatCountdown(inventoryRetrySeconds)}</strong><p>После завершения можно обновить снова. Рекомендованный интервал — раз в 2 минуты.</p></div></section>}
+          {inventoryRetrySeconds !== null && inventoryRetrySeconds > 0 && <section className="inventory-retry-timer" role="status"><span>↻</span><div><strong>Текущий запрос к {marketplaceName} ещё выполняется: {formatCountdown(inventoryRetrySeconds)}</strong><p>После завершения можно обновить снова. Рекомендованный интервал — раз в 2 минуты.</p></div></section>}
 
           {activeView === "cabinets" ? (
             <section className="cabinet-manager">
@@ -1411,9 +1439,9 @@ export default function Home() {
               </div>
               <div className="cabinet-platform-list">
                 <article className="cabinet-platform-card wb-platform">
-                  <div className="cabinet-platform-head"><span className="platform-mark wb-mark">WB</span><div><strong>Wildberries</strong><small>{availableCabinets.length} кампании этого доступа</small></div></div>
+                  <div className="cabinet-platform-head"><span className="platform-mark wb-mark">WB</span><div><strong>Wildberries</strong><small>{wbCabinets.length} кампании этого доступа</small></div></div>
                   <div className="cabinet-account-list">
-                    {availableCabinets.map((account) => {
+                    {wbCabinets.map((account) => {
                       const current = cabinet?.id === account.id;
                       return <div className={`cabinet-account ${current ? "current" : ""}`} key={account.id}><span><strong>{account.name}</strong><small>Свои ФФ и остатки</small></span>{current ? <b>Открыта</b> : <button type="button" onClick={() => void switchCabinet(account.id)} disabled={cabinetSwitchingId === account.id}>{cabinetSwitchingId === account.id ? "Открываем…" : "Открыть"}</button>}</div>;
                     })}
@@ -1422,7 +1450,7 @@ export default function Home() {
                   {!cabinetSwitchError && <p>Выберите кампанию — повторный логин не нужен.</p>}
                 </article>
                 <MarketplaceConnectionCard platform="yandex" mark="ЯМ" title="Яндекс Маркет" connection={marketplaceConnections.find((item) => item.platform === "yandex")} onCheck={() => void loadMarketplaceConnections()} onDisable={disableMarketplaceConnection} canManage={canManage} checking={marketplaceConnectionsLoading} />
-                <MarketplaceConnectionCard platform="ozon" mark="OZ" title="Ozon Seller" connection={marketplaceConnections.find((item) => item.platform === "ozon")} onCheck={() => void loadMarketplaceConnections()} onDisable={disableMarketplaceConnection} canManage={canManage} checking={marketplaceConnectionsLoading} />
+                <MarketplaceConnectionCard platform="ozon" mark="OZ" title="Ozon Seller" connection={marketplaceConnections.find((item) => item.platform === "ozon")} onCheck={() => void loadMarketplaceConnections()} onDisable={disableMarketplaceConnection} canManage={canManage} checking={marketplaceConnectionsLoading} onOpen={() => void switchCabinet("ozon")} opening={cabinetSwitchingId === "ozon"} />
               </div>
               <p className="cabinet-manager-note">Каждый маркетплейс получит отдельный контур: свои товары, склады, остатки, заказы и будущие таргет-цены. Данные между площадками не смешиваются.</p>
             </section>
@@ -1430,24 +1458,24 @@ export default function Home() {
             <section className="pricing-panel">
               <div className="section-heading pricing-heading">
                 <div>
-                  <span className="section-kicker">МОНИТОРИНГ ЦЕН · WILDBERRIES</span>
+                  <span className="section-kicker">МОНИТОРИНГ ЦЕН · {marketplaceName.toUpperCase()}</span>
                   <h2>Рынок, таргет и решение по цене</h2>
-                  <p className="section-note">Тянем цены ваших карточек и уже выбранных конкурентов напрямую из витрины WB. Эта витрина ничего не меняет на WB — решение по цене остаётся за тобой.</p>
+                  <p className="section-note">Свои цены берём из кабинета {marketplaceName}; конкуренты — из сохранённого списка. Эта витрина ничего не меняет на маркетплейсе — решение по цене остаётся за тобой.</p>
                 </div>
                 <button className="secondary-btn pricing-source-link" type="button" onClick={() => void refreshTargetPrices()} disabled={targetPricesRefreshing || Boolean(targetPricesCooldownSeconds)} title={targetPricesCooldownSeconds ? "Обновление цен уже запущено другим пользователем" : "Можно обновить вручную в любой момент. Рекомендованный интервал — 2 минуты."}>{targetPricesRefreshing ? "Обновляем цены…" : targetPricesCooldownSeconds ? `Цены через ${formatCountdown(targetPricesCooldownSeconds)}` : "Обновить цены"}</button>
               </div>
 
-              <div className={`pricing-source-strip ${targetPricesError || targetPricesWarnings.length ? "has-warning" : ""}`}><span>{targetPricesError || targetPricesWarnings.length ? "!" : "✓"}</span><div><strong>{targetPricesError || targetPricesWarnings.length ? "Часть цен пока не обновилась" : "Сохранённый снимок цен WB"}</strong><p>{targetPricesError || targetPricesWarnings[0] || (targetPricesUpdatedAt ? `Последнее обновление: ${formatDateTime(targetPricesUpdatedAt)}. Все видят этот снимок; новый запрос только вручную.` : "Пока показана стартовая база; нажмите «Обновить цены», чтобы сохранить актуальные значения для всех.")}{targetPricesCooldownSeconds && targetPricesCooldownSeconds > 0 ? ` Сейчас идёт общий запрос: ещё ${formatCountdown(targetPricesCooldownSeconds)}.` : " Рекомендованный интервал обновления — 2 минуты."}</p></div></div>
+              <div className={`pricing-source-strip ${targetPricesError || targetPricesWarnings.length ? "has-warning" : ""}`}><span>{targetPricesError || targetPricesWarnings.length ? "!" : "✓"}</span><div><strong>{targetPricesError || targetPricesWarnings.length ? "Часть цен пока не обновилась" : isOzon ? "Сохранённый снимок цен Ozon" : "Сохранённый снимок цен WB"}</strong><p>{targetPricesError || targetPricesWarnings[0] || (targetPricesUpdatedAt ? `Последнее обновление: ${formatDateTime(targetPricesUpdatedAt)}. Все видят этот снимок; новый запрос только вручную.` : "Пока показана стартовая база; нажмите «Обновить цены», чтобы сохранить актуальные значения для всех.")}{targetPricesCooldownSeconds && targetPricesCooldownSeconds > 0 ? ` Сейчас идёт общий запрос: ещё ${formatCountdown(targetPricesCooldownSeconds)}.` : " Рекомендованный интервал обновления — 2 минуты."}</p></div></div>
 
               <div className="pricing-kpi-grid">
-                <article className="pricing-kpi tracked"><span>Под контролем</span><strong>{pricingCounts.all}</strong><p>карточек WB в мониторинге</p></article>
+                <article className="pricing-kpi tracked"><span>Под контролем</span><strong>{pricingCounts.all}</strong><p>карточек {marketplaceName} в мониторинге</p></article>
                 <article className="pricing-kpi lower"><span>Снизить цену</span><strong>{pricingCounts.lower}</strong><p>выше целевого коридора</p></article>
                 <article className="pricing-kpi raise"><span>Можно поднять</span><strong>{pricingCounts.raise}</strong><p>ниже рынка без причины</p></article>
                 <article className="pricing-kpi review"><span>Проверить рынок</span><strong>{pricingCounts.review}</strong><p>нужен конкурент или валидация</p></article>
               </div>
 
               <div className="pricing-toolbar">
-                <label className="search-field"><span>⌕</span><input value={pricingQuery} onChange={(event) => setPricingQuery(event.target.value)} placeholder="Артикул, запрос или WB ID" aria-label="Поиск по таргету цен" /></label>
+                <label className="search-field"><span>⌕</span><input value={pricingQuery} onChange={(event) => setPricingQuery(event.target.value)} placeholder={`Артикул, запрос или ID ${marketplaceName}`} aria-label="Поиск по таргету цен" /></label>
                 <label className="pricing-sort"><span>Сортировка</span><select value={pricingSort} onChange={(event) => setPricingSort(event.target.value as PricingSort)} aria-label="Сортировка рекомендаций"><option value="priority">Сначала важные</option><option value="orders">По заказам</option><option value="delta">По изменению цены</option></select></label>
               </div>
               <div className="pricing-filter-row" role="tablist" aria-label="Фильтр рекомендаций">{([
@@ -1460,8 +1488,8 @@ export default function Home() {
 
               <section className="pricing-table-card">
                 <div className="pricing-table-heading"><div><span className="section-kicker">РЕКОМЕНДАЦИИ</span><h3>Что проверить в первую очередь</h3></div><span>{pricingRows.length} из {pricingCounts.all} карточек</span></div>
-                <div className="pricing-table-wrap">{targetPricesLoading ? <div className="empty-state"><strong>Загружаем мониторинг цен…</strong></div> : <table><thead><tr><th>Товар / артикул</th><th>Цена на<br/>витрине WB</th><th>Рынок</th><th>Таргет</th><th>Изменение</th><th>Решение</th></tr></thead><tbody>{pricingRows.map((item) => <tr key={item.row.sku} className="pricing-row-open" role="button" tabIndex={0} aria-label={`Открыть рынок и конкурентов: ${item.row.sku}`} onClick={() => openPricingRow(item.row)} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); openPricingRow(item.row); } }}>
-                  <td><button className="pricing-product pricing-product-open" type="button" onClick={() => openPricingRow(item.row)}><strong>{item.row.sku}</strong><small>{item.row.searchQuery || "Запрос не указан"}{item.row.nmId ? ` · WB ${item.row.nmId}` : ""}</small><span>Открыть рынок и конкурентов →</span></button></td>
+                <div className="pricing-table-wrap">{targetPricesLoading ? <div className="empty-state"><strong>Загружаем мониторинг цен…</strong></div> : <table><thead><tr><th>Товар / артикул</th><th>Цена на<br/>витрине {marketplaceName}</th><th>Рынок</th><th>Таргет</th><th>Изменение</th><th>Решение</th></tr></thead><tbody>{pricingRows.map((item) => <tr key={item.row.sku} className="pricing-row-open" role="button" tabIndex={0} aria-label={`Открыть рынок и конкурентов: ${item.row.sku}`} onClick={() => openPricingRow(item.row)} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); openPricingRow(item.row); } }}>
+                  <td><button className="pricing-product pricing-product-open" type="button" onClick={() => openPricingRow(item.row)}><strong>{item.row.sku}</strong><small>{item.row.searchQuery || "Запрос не указан"}{item.row.nmId ? ` · ${marketplaceCode} ${item.row.nmId}` : ""}</small><span>Открыть рынок и конкурентов →</span></button></td>
                   <td><b>{item.row.currentPrice ? formatMoney.format(item.row.currentPrice) : "—"}</b><small>{item.row.sppPercent !== null ? `СПП ${Math.round(item.row.sppPercent * 100)}%` : "СПП не указан"}</small></td>
                   <td>{item.low !== null && item.high !== null ? <><b>{formatMoney.format(item.low)}–{formatMoney.format(item.high)}</b><small>{item.row.competitors.length} конкурента · середина {item.median ? formatMoney.format(item.median) : "—"}</small></> : <span className="pricing-empty">Нет цен</span>}</td>
                   <td><b>{item.target ? formatMoney.format(item.target) : "—"}</b><small>{item.target ? "после СПП" : "нужен рынок"}</small></td>
@@ -1479,12 +1507,12 @@ export default function Home() {
                 const selectedRow = selectedPricingRow;
                 return <div className="pricing-modal-backdrop" role="presentation" onMouseDown={() => setSelectedPricingRow(null)}><section className="pricing-modal" role="dialog" aria-modal="true" aria-label={`Конкуренты ${selectedPricingRow.sku}`} onMouseDown={(event) => event.stopPropagation()}>
                   <button className="pricing-modal-close" type="button" onClick={() => setSelectedPricingRow(null)} aria-label="Закрыть">×</button>
-                  <span className="section-kicker">КАРТОЧКА РЫНКА</span><h3>{selectedPricingRow.sku}</h3><p>{selectedPricingRow.searchQuery || "Поисковый запрос не указан"}{selectedPricingRow.nmId ? ` · ваша карточка WB ${selectedPricingRow.nmId}` : ""}</p>
-                  {selectedPricingRow.nmId && <a className="pricing-own-link" href={`https://www.wildberries.ru/catalog/${selectedPricingRow.nmId}/detail.aspx`} target="_blank" rel="noreferrer">Открыть свою карточку на WB ↗</a>}
-                  <div className="pricing-modal-summary"><span>Цена на витрине WB <b>{selectedPricingRow.currentPrice ? formatMoney.format(selectedPricingRow.currentPrice) : "—"}</b></span><span>Таргет <b>{recommendation.target ? formatMoney.format(recommendation.target) : "—"}</b></span><span>Решение <b>{recommendation.label}</b></span></div>
-                  <div className="pricing-competitor-list"><h4>В сравнении</h4>{selectedPricingRow.competitors.map((competitor) => <article key={competitor.nmId}><div><strong>{competitor.name || `Карточка WB ${competitor.nmId}`}</strong><small>{competitor.source || "добавлен в мониторинг"}{competitor.updatedAt ? ` · ${formatDateTime(competitor.updatedAt)}` : ""}</small>{competitor.error && <em>{competitor.error}</em>}</div><div className="pricing-competitor-actions"><a href={`https://www.wildberries.ru/catalog/${competitor.nmId}/detail.aspx`} target="_blank" rel="noreferrer">{competitor.price ? formatMoney.format(competitor.price) : "Нет цены"} ↗</a>{canManage && <button type="button" className="pricing-competitor-remove" onClick={() => void updatePricingCompetitor(selectedRow, competitor.nmId, "remove-competitor")} disabled={pricingCandidateUpdatingId === competitor.nmId}>{pricingCandidateUpdatingId === competitor.nmId ? "…" : "Убрать"}</button>}</div></article>)}{!selectedPricingRow.competitors.length && <p>Для этой карточки пока не назначены конкуренты.</p>}</div>
-                  {canManage && <section className="pricing-candidate-picker"><div className="pricing-candidate-heading"><div><span className="section-kicker">КОНКУРЕНТЫ</span><h4>Добавить вручную</h4><p>Вставь артикул WB нужной карточки. Цена конкурента появится после отдельного обновления цен.</p></div></div>
-                    <form className="pricing-manual-candidate" onSubmit={(event) => { event.preventDefault(); const nmId = Number(manualCompetitorNmId); if (Number.isInteger(nmId) && nmId > 0) void updatePricingCompetitor(selectedRow, nmId, "add-competitor"); }}><label><span>Артикул WB конкурента</span><input value={manualCompetitorNmId} onChange={(event) => setManualCompetitorNmId(event.target.value.replace(/\D/g, ""))} inputMode="numeric" placeholder="Например, 123456789" /></label><button className="primary-btn" type="submit" disabled={!manualCompetitorNmId || pricingCandidateUpdatingId !== null}>{pricingCandidateUpdatingId ? "Добавляем…" : "Добавить"}</button></form>
+                  <span className="section-kicker">КАРТОЧКА РЫНКА</span><h3>{selectedPricingRow.sku}</h3><p>{selectedPricingRow.searchQuery || "Поисковый запрос не указан"}{selectedPricingRow.nmId ? ` · ваша карточка ${marketplaceCode} ${selectedPricingRow.nmId}` : ""}</p>
+                  {selectedPricingRow.nmId && <a className="pricing-own-link" href={isOzon ? `https://www.ozon.ru/product/${selectedPricingRow.nmId}` : `https://www.wildberries.ru/catalog/${selectedPricingRow.nmId}/detail.aspx`} target="_blank" rel="noreferrer">{isOzon ? "Открыть свою карточку на Ozon ↗" : "Открыть свою карточку на WB ↗"}</a>}
+                  <div className="pricing-modal-summary"><span>Цена на витрине {marketplaceName} <b>{selectedPricingRow.currentPrice ? formatMoney.format(selectedPricingRow.currentPrice) : "—"}</b></span><span>Таргет <b>{recommendation.target ? formatMoney.format(recommendation.target) : "—"}</b></span><span>Решение <b>{recommendation.label}</b></span></div>
+                  <div className="pricing-competitor-list"><h4>В сравнении</h4>{selectedPricingRow.competitors.map((competitor) => <article key={competitor.nmId}><div><strong>{competitor.name || `Карточка ${marketplaceCode} ${competitor.nmId}`}</strong><small>{competitor.source || "добавлен в мониторинг"}{competitor.updatedAt ? ` · ${formatDateTime(competitor.updatedAt)}` : ""}</small>{competitor.error && <em>{competitor.error}</em>}</div><div className="pricing-competitor-actions"><a href={isOzon ? `https://www.ozon.ru/product/${competitor.nmId}` : `https://www.wildberries.ru/catalog/${competitor.nmId}/detail.aspx`} target="_blank" rel="noreferrer">{competitor.price ? formatMoney.format(competitor.price) : "Нет цены"} ↗</a>{canManage && <button type="button" className="pricing-competitor-remove" onClick={() => void updatePricingCompetitor(selectedRow, competitor.nmId, "remove-competitor")} disabled={pricingCandidateUpdatingId === competitor.nmId}>{pricingCandidateUpdatingId === competitor.nmId ? "…" : "Убрать"}</button>}</div></article>)}{!selectedPricingRow.competitors.length && <p>Для этой карточки пока не назначены конкуренты.</p>}</div>
+                  {canManage && <section className="pricing-candidate-picker"><div className="pricing-candidate-heading"><div><span className="section-kicker">КОНКУРЕНТЫ</span><h4>Добавить вручную</h4><p>{isOzon ? "Вставь ID нужной карточки Ozon. Цена конкурента появится после подключения разрешённого источника рынка." : "Вставь артикул WB нужной карточки. Цена конкурента появится после отдельного обновления цен."}</p></div></div>
+                    <form className="pricing-manual-candidate" onSubmit={(event) => { event.preventDefault(); const nmId = Number(manualCompetitorNmId); if (Number.isInteger(nmId) && nmId > 0) void updatePricingCompetitor(selectedRow, nmId, "add-competitor"); }}><label><span>{isOzon ? "ID конкурента Ozon" : "Артикул WB конкурента"}</span><input value={manualCompetitorNmId} onChange={(event) => setManualCompetitorNmId(event.target.value.replace(/\D/g, ""))} inputMode="numeric" placeholder="Например, 123456789" /></label><button className="primary-btn" type="submit" disabled={!manualCompetitorNmId || pricingCandidateUpdatingId !== null}>{pricingCandidateUpdatingId ? "Добавляем…" : "Добавить"}</button></form>
                     {pricingCandidatesError && <p className="pricing-candidate-error">{pricingCandidatesError}</p>}</section>}
                   <footer>{recommendation.detail}{selectedPricingRow.refreshError ? ` ${selectedPricingRow.refreshError}` : ""}</footer>
                 </section></div>;
@@ -1493,7 +1521,7 @@ export default function Home() {
           ) : activeView === "payments" ? (
             <section className="settlement-panel">
               <div className="settlement-heading">
-                <div><span className="section-kicker">СВЕРКА С ФУЛФИЛМЕНТОМ</span><h2>Сколько оплатить ФФ</h2><p>Оплата возникает, когда заказ впервые перешёл во «В доставке»: ФФ передал его Wildberries. Поздний переход в «Завершённые», выкуп или отмена повторно не оплачиваются.</p></div>
+                  <div><span className="section-kicker">СВЕРКА С ФУЛФИЛМЕНТОМ</span><h2>Сколько оплатить ФФ</h2><p>Оплата возникает, когда заказ впервые перешёл во «В доставке»: ФФ передал его {marketplaceName}. Поздний переход в «Завершённые», выкуп или отмена повторно не оплачиваются.</p></div>
                 {canManage && <button type="button" className="secondary-btn" onClick={() => navigateTo("manual")}>Настроить ставки</button>}
               </div>
               <form className="settlement-controls" onSubmit={(event) => { event.preventDefault(); void loadSettlement(); }}>
@@ -1505,17 +1533,17 @@ export default function Home() {
               {settlementError && <div className="settlement-error" role="alert">{settlementError}</div>}
               {settlement && <>
                 <div className="settlement-summary">
-                  <article><span>В доставке WB · к оплате</span><strong>{formatNumber.format(settlement.quantity)} <small>ед.</small></strong><p>За {shortDate(settlement.from)} — {shortDate(settlement.to)}</p></article>
+                  <article><span>В доставке {marketplaceCode} · к оплате</span><strong>{formatNumber.format(settlement.quantity)} <small>ед.</small></strong><p>За {shortDate(settlement.from)} — {shortDate(settlement.to)}</p></article>
                   <article><span>Ставка ФФ</span><strong>{settlement.rateKopecks > 0 ? `${formatRate.format(kopecksToRubles(settlement.rateKopecks))} ₽` : "—"}<small>{settlement.rateKopecks > 0 ? " / ед." : ""}</small></strong><p>{settlement.rateKopecks > 0 ? "Настроена владельцем" : "Ставка пока не задана"}</p></article>
                   <article className="settlement-total"><span>К оплате</span><strong>{settlement.rateKopecks > 0 ? formatMoney.format(kopecksToRubles(settlement.totalKopecks)) : "—"}</strong><p>{settlement.rateKopecks > 0 ? `${formatNumber.format(settlement.quantity)} ед. × ${formatRate.format(kopecksToRubles(settlement.rateKopecks))} ₽` : "Владелец должен задать ставку ФФ"}</p></article>
-                  {settlement.untrackedHandoverQuantity > 0 && <article className="settlement-safety"><span>Не включены автоматически</span><strong>{formatNumber.format(settlement.untrackedHandoverQuantity)} <small>ед.</small></strong><p>Они уже были «В доставке» при старте учёта; точное время передачи WB неизвестно.</p></article>}
+                  {settlement.untrackedHandoverQuantity > 0 && <article className="settlement-safety"><span>Не включены автоматически</span><strong>{formatNumber.format(settlement.untrackedHandoverQuantity)} <small>ед.</small></strong><p>Они уже были «В доставке» при старте учёта; точное время передачи {marketplaceCode} неизвестно.</p></article>}
                 </div>
                 <section className="settlement-orders">
-                  <div className="settlement-orders-heading"><div><span className="section-kicker">ОСНОВАНИЕ ДЛЯ СЧЁТА</span><h3>Заказы, переданные WB</h3></div><span>{settlement.orders.length} ед.</span></div>
-                  <div className="settlement-table-wrap"><table><thead><tr><th>Заказ WB</th><th>Передан WB</th><th>Количество</th><th>Сумма</th></tr></thead><tbody>{settlement.orders.map((order) => <tr key={order.orderId}><td><b>№ {order.orderId}</b></td><td>{formatDateTime(order.handedOverAt)}</td><td>1 ед.</td><td>{settlement.rateKopecks > 0 ? formatMoney.format(kopecksToRubles(settlement.rateKopecks)) : "—"}</td></tr>)}</tbody></table>{!settlement.orders.length && <div className="empty-state"><strong>За этот период новых передач WB пока нет</strong><span>Сумма появится после перехода заказа из «Новые / На сборке» во «В доставке».</span></div>}</div>
-                  <footer>Уникальный ID заказа попадает в сверку один раз — в момент передачи WB. Дальнейшие статусы, стикер доставки, «Завершённые», выкуп и отмена сумму не дублируют.</footer>
+                  <div className="settlement-orders-heading"><div><span className="section-kicker">ОСНОВАНИЕ ДЛЯ СЧЁТА</span><h3>Заказы, переданные {marketplaceName}</h3></div><span>{settlement.orders.length} ед.</span></div>
+                  <div className="settlement-table-wrap"><table><thead><tr><th>Заказ {marketplaceCode}</th><th>Передан {marketplaceCode}</th><th>Количество</th><th>Сумма</th></tr></thead><tbody>{settlement.orders.map((order) => <tr key={order.orderId}><td><b>№ {order.orderId}</b></td><td>{formatDateTime(order.handedOverAt)}</td><td>1 ед.</td><td>{settlement.rateKopecks > 0 ? formatMoney.format(kopecksToRubles(settlement.rateKopecks)) : "—"}</td></tr>)}</tbody></table>{!settlement.orders.length && <div className="empty-state"><strong>За этот период новых передач {marketplaceCode} пока нет</strong><span>Сумма появится после перехода заказа из «Новые / На сборке» во «В доставке».</span></div>}</div>
+                  <footer>Уникальный ID заказа попадает в сверку один раз — в момент передачи {marketplaceCode}. Дальнейшие статусы, стикер доставки, «Завершённые», выкуп и отмена сумму не дублируют.</footer>
                 </section>
-                <p className="settlement-note">{settlement.trackingStartedAt ? `Учёт переходов ведётся с ${formatDateTime(settlement.trackingStartedAt)}. Для прошлых периодов до этой даты WB не передаёт точный момент передачи заказа.` : "После ближайшего обновления начнём фиксировать передачи WB для сверки."}</p>
+                <p className="settlement-note">{settlement.trackingStartedAt ? `Учёт переходов ведётся с ${formatDateTime(settlement.trackingStartedAt)}. Для прошлых периодов до этой даты ${marketplaceName} не передаёт точный момент передачи заказа.` : `После ближайшего обновления начнём фиксировать передачи ${marketplaceCode} для сверки.`}</p>
               </>}
             </section>
           ) : activeView === "fulfillment" ? (
@@ -1525,24 +1553,24 @@ export default function Home() {
                   <div><span className="section-kicker">ВЫБЕРИТЕ СКЛАД ФФ</span><h2>Куда смотреть остатки и движение</h2><p className="section-note">Откройте склад, чтобы увидеть его остаток и FBS-движение по каждому артикулу.</p></div>
                   {canManage && <button className="secondary-btn" type="button" onClick={() => navigateTo("manual")}>Настроить склады</button>}
                 </div>
-                <div className="fulfillment-warehouse-grid">{fulfillmentWarehouses.map((item) => <button className="fulfillment-warehouse-card" type="button" key={item.warehouse.id} onClick={() => openFulfillmentWarehouse(item.warehouse.id)}><span className="fulfillment-card-top"><i>□</i><small>{item.warehouse.wbWarehouseId ? `WB FBS · ${item.warehouse.wbWarehouseName || `№${item.warehouse.wbWarehouseId}`}` : "WB FBS не назначен"}</small><b>›</b></span><strong>{item.warehouse.city}</strong><span className="fulfillment-card-name">{item.warehouse.name}</span><span className="fulfillment-card-stock"><b>{formatNumber.format(item.physicalStock)}</b> шт. на ФФ</span><span className="fulfillment-card-stats">Свободно {formatNumber.format(item.stock)} · новые FBS {item.fbs}</span></button>)}</div>
+                <div className="fulfillment-warehouse-grid">{fulfillmentWarehouses.map((item) => <button className="fulfillment-warehouse-card" type="button" key={item.warehouse.id} onClick={() => openFulfillmentWarehouse(item.warehouse.id)}><span className="fulfillment-card-top"><i>□</i><small>{item.warehouse.wbWarehouseId ? `${marketplaceCode} FBS · ${item.warehouse.wbWarehouseName || `№${item.warehouse.wbWarehouseId}`}` : `${marketplaceCode} FBS не назначен`}</small><b>›</b></span><strong>{item.warehouse.city}</strong><span className="fulfillment-card-name">{item.warehouse.name}</span><span className="fulfillment-card-stock"><b>{formatNumber.format(item.physicalStock)}</b> шт. на ФФ</span><span className="fulfillment-card-stats">Свободно {formatNumber.format(item.stock)} · новые FBS {item.fbs}</span></button>)}</div>
                 {!fulfillmentWarehouses.length && <div className="empty-state"><strong>Добавьте первый склад ФФ</strong><span>После этого сюда будут попадать остатки из Excel и заказы WB.</span></div>}
                 <p className="fulfillment-note">«Продано» показывает только выкупленные заказы WB — отмены и отказы не попадают в этот показатель.</p>
               </> : <>
                 <div className="section-heading fulfillment-heading">
-                  <div><button className="back-link" type="button" onClick={() => { setSelectedFulfillmentWarehouseId(null); setQuery(""); }}>‹ Все склады ФФ</button><span className="section-kicker">ФФ · СКЛАД В РАБОТЕ</span><h2>{formatManualWarehouse(selectedFulfillmentWarehouse.warehouse)}</h2><p className="section-note">Остатки на этом ФФ и FBS-заказы, отгруженные с привязанного склада WB.</p></div>
+                  <div><button className="back-link" type="button" onClick={() => { setSelectedFulfillmentWarehouseId(null); setQuery(""); }}>‹ Все склады ФФ</button><span className="section-kicker">ФФ · СКЛАД В РАБОТЕ</span><h2>{formatManualWarehouse(selectedFulfillmentWarehouse.warehouse)}</h2><p className="section-note">Остатки на этом ФФ и FBS-заказы, отгруженные с привязанного склада {marketplaceName}.</p></div>
                   <div className="fulfillment-heading-actions"><button className="secondary-btn fulfillment-export-btn" type="button" onClick={() => void downloadFfOrders(selectedFulfillmentWarehouse.warehouse)} disabled={ffOrdersExportLoading || !selectedFulfillmentWarehouse.warehouse.wbWarehouseId}>{ffOrdersExportLoading ? "Собираем стикеры…" : "Excel: заказы + стикеры ↓"}</button>{canManage && <button className="secondary-btn" type="button" onClick={() => navigateTo("manual")}>Настроить склад</button>}</div>
                 </div>
-                <div className="fulfillment-export-note"><span>Только актуальные FBS-заказы этого ФФ. Одна строка — один заказ: артикул, количество и стикер WB; WB выдаёт стикеры только для заказов на сборке и в доставке.</span>{ffOrdersExportMessage && <strong className="success">{ffOrdersExportMessage}</strong>}{ffOrdersExportError && <strong className="error">{ffOrdersExportError}</strong>}</div>
-                <aside className="fulfillment-handover-timing" aria-label="Скорость передачи заказов Wildberries"><div><span>СКОРОСТЬ ЭТОГО ФФ</span><strong>{formatHandoverTime(selectedHandoverTiming?.averageHours ?? null)}</strong><p>Среднее от создания заказа до передачи WB</p></div><small>{selectedHandoverTiming?.sampleSize ? `Выборка: ${selectedHandoverTiming.sampleSize} заказов за 30 дней` : "Собираем историю переходов new → complete"}</small></aside>
+                <div className="fulfillment-export-note"><span>Только актуальные FBS-заказы этого ФФ. Одна строка — один заказ: артикул, количество и {isOzon ? "номер отправления Ozon" : "стикер WB"}.</span>{ffOrdersExportMessage && <strong className="success">{ffOrdersExportMessage}</strong>}{ffOrdersExportError && <strong className="error">{ffOrdersExportError}</strong>}</div>
+                <aside className="fulfillment-handover-timing" aria-label={`Скорость передачи заказов ${marketplaceName}`}><div><span>СКОРОСТЬ ЭТОГО ФФ</span><strong>{formatHandoverTime(selectedHandoverTiming?.averageHours ?? null)}</strong><p>Среднее от создания заказа до передачи {marketplaceCode}</p></div><small>{selectedHandoverTiming?.sampleSize ? `Выборка: ${selectedHandoverTiming.sampleSize} заказов за 30 дней` : "Собираем историю переходов на следующий этап"}</small></aside>
                 <div className="fulfillment-metric-grid fulfillment-metric-grid-five" role="group" aria-label="Списки по статусу товара">
                   <button type="button" className={`fulfillment-metric physical ${fulfillmentList === "physical" ? "active" : ""}`} aria-pressed={fulfillmentList === "physical"} onClick={() => { setFulfillmentList("physical"); setQuery(""); }}><span>Фактически на ФФ</span><strong>{formatNumber.format(selectedFulfillmentWarehouse.physicalStock)} <small>шт.</small></strong><p>Свободный остаток + новые FBS, которые ещё лежат на ФФ</p></button>
                   <button type="button" className={`fulfillment-metric ${fulfillmentList === "available" ? "active" : ""}`} aria-pressed={fulfillmentList === "available"} onClick={() => { setFulfillmentList("available"); setQuery(""); }}><span>Свободно к продаже</span><strong>{formatNumber.format(selectedFulfillmentWarehouse.stock)} <small>шт.</small></strong><p>{formatNumber.format(selectedFulfillmentWarehouse.physicalStock)} на ФФ − {formatNumber.format(selectedFulfillmentWarehouse.fbs)} новых FBS</p></button>
                   <button type="button" className={`fulfillment-metric ${fulfillmentList === "reserved" ? "active" : ""}`} aria-pressed={fulfillmentList === "reserved"} onClick={() => { setFulfillmentList("reserved"); setQuery(""); }}><span>Новые FBS</span><strong>{formatNumber.format(selectedFulfillmentWarehouse.fbs)} <small>шт.</small></strong><p>new / confirm · ещё на ФФ, уже в резерве</p></button>
-                  <button type="button" className={`fulfillment-metric ${fulfillmentList === "receiving" ? "active" : ""}`} aria-pressed={fulfillmentList === "receiving"} onClick={() => { setFulfillmentList("receiving"); setQuery(""); }}><span>Переданы WB</span><strong>{formatNumber.format(selectedFulfillmentWarehouse.receiving)} <small>шт.</small></strong><p>complete · без второго вычета</p></button>
-                  <button type="button" className={`fulfillment-metric ${fulfillmentList === "toSale" ? "active" : ""}`} aria-pressed={fulfillmentList === "toSale"} onClick={() => { setFulfillmentList("toSale"); setQuery(""); }}><span>Продано</span><strong>{formatNumber.format(selectedFulfillmentWarehouse.toSale)} <small>шт.</small></strong><p>sold · выкуплено, без отмен</p></button>
+                  <button type="button" className={`fulfillment-metric ${fulfillmentList === "receiving" ? "active" : ""}`} aria-pressed={fulfillmentList === "receiving"} onClick={() => { setFulfillmentList("receiving"); setQuery(""); }}><span>Переданы {marketplaceCode}</span><strong>{formatNumber.format(selectedFulfillmentWarehouse.receiving)} <small>шт.</small></strong><p>Передано · без второго вычета</p></button>
+                  <button type="button" className={`fulfillment-metric ${fulfillmentList === "toSale" ? "active" : ""}`} aria-pressed={fulfillmentList === "toSale"} onClick={() => { setFulfillmentList("toSale"); setQuery(""); }}><span>Продано</span><strong>{formatNumber.format(selectedFulfillmentWarehouse.toSale)} <small>шт.</small></strong><p>Завершённые заказы без отмен</p></button>
                 </div>
-                <section className="stock-card fulfillment-stock-card"><div className="stock-header"><div><span className="section-kicker">{activeFulfillmentListMeta.kicker}</span><h2 aria-live="polite">{activeFulfillmentListMeta.title}</h2><p className="fulfillment-list-note">Нажмите на карточку выше, чтобы переключить список.</p></div><label className="search-field"><span>⌕</span><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Артикул или название" aria-label="Поиск по выбранному списку склада ФФ" /></label></div><div className="fulfillment-table-wrap"><table><thead><tr><th>Товар / артикул</th><th>{activeFulfillmentListMeta.primary}</th><th>{fulfillmentList === "physical" || fulfillmentList === "available" ? "Новые FBS" : "Свободно ФФ"}</th><th>{fulfillmentList === "receiving" ? "Новые FBS" : "Переданы WB"}</th><th>Статус ФФ</th><th /></tr></thead><tbody>{fulfillmentRows.map((row) => { const warehouseId = selectedFulfillmentWarehouse.warehouse.id; const physicalStock = row.ffStock[warehouseId] ?? 0; const availableStock = availableFfStock(row, warehouseId); const fbsReserve = row.fbsByLocation[warehouseId] ?? 0; const waitingForWb = row.receivingByLocation[warehouseId] ?? 0; const sold = row.toSaleByLocation[warehouseId] ?? 0; const primaryValue = fulfillmentList === "physical" ? physicalStock : fulfillmentList === "reserved" ? fbsReserve : fulfillmentList === "receiving" ? waitingForWb : fulfillmentList === "toSale" ? sold : availableStock; const secondaryValue = fulfillmentList === "physical" || fulfillmentList === "available" ? fbsReserve : availableStock; const thirdValue = fulfillmentList === "receiving" ? fbsReserve : waitingForWb; const status = fulfillmentStockStatus(availableStock); const primaryClass = fulfillmentList === "physical" || fulfillmentList === "available" ? `manual-stock-value ${primaryValue === 0 ? "zero" : ""}` : fulfillmentList === "reserved" ? "number-pill blue-pill" : fulfillmentList === "receiving" ? "number-pill amber-pill" : "number-pill green-pill"; const secondaryClass = fulfillmentList === "physical" || fulfillmentList === "available" ? "number-pill blue-pill" : `manual-stock-value ${availableStock === 0 ? "zero" : ""}`; const thirdClass = fulfillmentList === "receiving" ? "number-pill blue-pill" : "number-pill amber-pill"; return <tr key={row.key} onClick={() => openProduct(row)} tabIndex={0} onKeyDown={(event) => { if (event.key === "Enter") openProduct(row); }}><td><div className="product-cell"><span className="product-swatch" style={{ background: row.color }}>{row.name.charAt(0).toUpperCase()}</span><span><strong>{row.name}</strong><small>{row.sku}{row.nmId ? ` · WB ${row.nmId}` : ""} · {row.category}</small></span></div></td><td><span className={primaryClass}>{formatNumber.format(primaryValue)}{(fulfillmentList === "physical" || fulfillmentList === "available") && <small> шт.</small>}</span></td><td><span className={secondaryClass}>{formatNumber.format(secondaryValue)}{fulfillmentList !== "physical" && fulfillmentList !== "available" && <small> шт.</small>}</span></td><td><span className={thirdClass}>{formatNumber.format(thirdValue)}</span></td><td><span className={`status ${status === "В норме" ? "ok" : status === "Мало" ? "low" : "critical"}`}><i />{status}</span></td><td><button type="button" className="row-action" aria-label={`Открыть ${row.name}`}>›</button></td></tr>; })}</tbody></table>{!loading && !fulfillmentRows.length && <div className="empty-state"><strong>{activeFulfillmentListMeta.empty}</strong><span>Выберите другую карточку или проверьте привязку ФФ к складу WB.</span></div>}</div><footer className="table-footer"><span><i className={error ? "live-dot offline" : "live-dot"} />{fulfillmentRows.length} артикулов в выбранном списке</span><span>{activeFulfillmentListMeta.footer}</span></footer></section>
+                <section className="stock-card fulfillment-stock-card"><div className="stock-header"><div><span className="section-kicker">{activeFulfillmentListMeta.kicker}</span><h2 aria-live="polite">{activeFulfillmentListMeta.title}</h2><p className="fulfillment-list-note">Нажмите на карточку выше, чтобы переключить список.</p></div><label className="search-field"><span>⌕</span><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Артикул или название" aria-label="Поиск по выбранному списку склада ФФ" /></label></div><div className="fulfillment-table-wrap"><table><thead><tr><th>Товар / артикул</th><th>{activeFulfillmentListMeta.primary}</th><th>{fulfillmentList === "physical" || fulfillmentList === "available" ? "Новые FBS" : "Свободно ФФ"}</th><th>{fulfillmentList === "receiving" ? "Новые FBS" : `Переданы ${marketplaceCode}`}</th><th>Статус ФФ</th><th /></tr></thead><tbody>{fulfillmentRows.map((row) => { const warehouseId = selectedFulfillmentWarehouse.warehouse.id; const physicalStock = row.ffStock[warehouseId] ?? 0; const availableStock = availableFfStock(row, warehouseId); const fbsReserve = row.fbsByLocation[warehouseId] ?? 0; const waitingForWb = row.receivingByLocation[warehouseId] ?? 0; const sold = row.toSaleByLocation[warehouseId] ?? 0; const primaryValue = fulfillmentList === "physical" ? physicalStock : fulfillmentList === "reserved" ? fbsReserve : fulfillmentList === "receiving" ? waitingForWb : fulfillmentList === "toSale" ? sold : availableStock; const secondaryValue = fulfillmentList === "physical" || fulfillmentList === "available" ? fbsReserve : availableStock; const thirdValue = fulfillmentList === "receiving" ? fbsReserve : waitingForWb; const status = fulfillmentStockStatus(availableStock); const primaryClass = fulfillmentList === "physical" || fulfillmentList === "available" ? `manual-stock-value ${primaryValue === 0 ? "zero" : ""}` : fulfillmentList === "reserved" ? "number-pill blue-pill" : fulfillmentList === "receiving" ? "number-pill amber-pill" : "number-pill green-pill"; const secondaryClass = fulfillmentList === "physical" || fulfillmentList === "available" ? "number-pill blue-pill" : `manual-stock-value ${availableStock === 0 ? "zero" : ""}`; const thirdClass = fulfillmentList === "receiving" ? "number-pill blue-pill" : "number-pill amber-pill"; return <tr key={row.key} onClick={() => openProduct(row)} tabIndex={0} onKeyDown={(event) => { if (event.key === "Enter") openProduct(row); }}><td><div className="product-cell"><span className="product-swatch" style={{ background: row.color }}>{row.name.charAt(0).toUpperCase()}</span><span><strong>{row.name}</strong><small>{row.sku}{row.nmId ? ` · ${marketplaceCode} ${row.nmId}` : ""} · {row.category}</small></span></div></td><td><span className={primaryClass}>{formatNumber.format(primaryValue)}{(fulfillmentList === "physical" || fulfillmentList === "available") && <small> шт.</small>}</span></td><td><span className={secondaryClass}>{formatNumber.format(secondaryValue)}{fulfillmentList !== "physical" && fulfillmentList !== "available" && <small> шт.</small>}</span></td><td><span className={thirdClass}>{formatNumber.format(thirdValue)}</span></td><td><span className={`status ${status === "В норме" ? "ok" : status === "Мало" ? "low" : "critical"}`}><i />{status}</span></td><td><button type="button" className="row-action" aria-label={`Открыть ${row.name}`}>›</button></td></tr>; })}</tbody></table>{!loading && !fulfillmentRows.length && <div className="empty-state"><strong>{activeFulfillmentListMeta.empty}</strong><span>Выберите другую карточку или проверьте привязку ФФ к складу {marketplaceName}.</span></div>}</div><footer className="table-footer"><span><i className={error ? "live-dot offline" : "live-dot"} />{fulfillmentRows.length} артикулов в выбранном списке</span><span>{activeFulfillmentListMeta.footer}</span></footer></section>
               </>}
             </section>
           ) : activeView === "manual" && canManage ? (
@@ -1551,7 +1579,7 @@ export default function Home() {
                 <div>
                   <span className="section-kicker">СКЛАДЫ ФУЛФИЛМЕНТА</span>
                   <h2>Куда отправляем товар</h2>
-                  <p className="section-note">Склады FBS подтягиваются из WB автоматически. Excel и партии остаются резервным ручным учётом, если склад не ведётся в WB.</p>
+                  <p className="section-note">Склады FBS подтягиваются из {marketplaceName} автоматически. Excel и партии остаются резервным ручным учётом, если склад не ведётся в {marketplaceName}.</p>
                 </div>
               </div>
               <div className="manual-layout">
@@ -1565,10 +1593,10 @@ export default function Home() {
                     };
                     return <div className="manual-warehouse-item" key={item.id}>
                       <span className="warehouse-pin">□</span>
-                      <div className="manual-warehouse-details"><strong>{item.city}</strong><small>{item.name}</small><em>{item.isHidden ? "Скрыт из витрины" : item.wbWarehouseId ? `Привязан к WB FBS · ${item.wbWarehouseName || `№${item.wbWarehouseId}`}` : "WB FBS не назначен"}</em></div>
+                      <div className="manual-warehouse-details"><strong>{item.city}</strong><small>{item.name}</small><em>{item.isHidden ? "Скрыт из витрины" : item.wbWarehouseId ? `Привязан к ${marketplaceCode} FBS · ${item.wbWarehouseName || `№${item.wbWarehouseId}`}` : `${marketplaceCode} FBS не назначен`}</em></div>
                       <form className="warehouse-link-form" onSubmit={(event) => void saveWarehouseLink(item, event)}>
-                        <label><span>ID склада WB</span><input value={linkDraft.wbWarehouseId} onChange={(event) => setWarehouseLinkDrafts((current) => ({ ...current, [item.id]: { ...linkDraft, wbWarehouseId: event.target.value } }))} inputMode="numeric" placeholder="Например, 1987385" /></label>
-                        <label><span>Название в WB</span><input value={linkDraft.wbWarehouseName} onChange={(event) => setWarehouseLinkDrafts((current) => ({ ...current, [item.id]: { ...linkDraft, wbWarehouseName: event.target.value } }))} maxLength={120} placeholder="Например, Волгоград Upakovka" /></label>
+                        <label><span>ID склада {marketplaceCode}</span><input value={linkDraft.wbWarehouseId} onChange={(event) => setWarehouseLinkDrafts((current) => ({ ...current, [item.id]: { ...linkDraft, wbWarehouseId: event.target.value } }))} inputMode="numeric" placeholder="Например, 1987385" /></label>
+                        <label><span>Название в {marketplaceName}</span><input value={linkDraft.wbWarehouseName} onChange={(event) => setWarehouseLinkDrafts((current) => ({ ...current, [item.id]: { ...linkDraft, wbWarehouseName: event.target.value } }))} maxLength={120} placeholder="Например, Волгоград Upakovka" /></label>
                         <label><span>Ставка, ₽ / ед.</span><input value={linkDraft.serviceRate} onChange={(event) => setWarehouseLinkDrafts((current) => ({ ...current, [item.id]: { ...linkDraft, serviceRate: event.target.value } }))} inputMode="decimal" placeholder="Например, 10" /></label>
                         <button type="submit" disabled={warehouseLinkSavingId === item.id}>{warehouseLinkSavingId === item.id ? "Сохраняем…" : "Сохранить"}</button>
                       </form>
@@ -1588,7 +1616,7 @@ export default function Home() {
                   <div>
                     <span className="section-kicker">EXCEL-ИМПОРТ</span>
                     <h3>Загрузить остатки и сроки</h3>
-                    <p>Укажите «Артикул WB» (nmID) или «Артикул продавца» и «Количество». Для отдельных партий добавьте «Партия» и «Срок годности».</p>
+                    <p>Укажите «Артикул продавца» или ID товара {marketplaceName} и «Количество». Для отдельных партий добавьте «Партия» и «Срок годности».</p>
                   </div>
                   <div className="import-file-actions">
                     <a className="import-template-link" href="/ff-stock-import-template.xlsx" download="Шаблон_остатков_ФФ.xlsx">Скачать шаблон Excel ↓</a>
@@ -1610,16 +1638,16 @@ export default function Home() {
           ) : activeView === "analytics" ? (
             <section className="analytics-panel">
               <div className="analytics-heading">
-                <div><span className="section-kicker">УПРАВЛЕНЧЕСКИЙ ОБЗОР · WILDBERRIES</span><h2>Продажи по каналам</h2><p>Сравнение FBS и FBO, а также эффективность каждого вашего ФФ за выбранный период.</p></div>
-                <button className="secondary-btn analytics-refresh" type="button" onClick={() => void loadAnalytics(analyticsRange, true)} disabled={analyticsLoading || Boolean(analyticsRetrySeconds)} title={analyticsRetrySeconds ? "WB временно ограничил запросы" : "Можно обновить вручную в любой момент. Рекомендованный интервал — 2 минуты."}><span className={analyticsLoading ? "spin" : ""}>↻</span>{analyticsLoading ? "Считаем" : analyticsRetrySeconds ? `Через ${formatCountdown(analyticsRetrySeconds)}` : "Обновить"}</button>
+                <div><span className="section-kicker">УПРАВЛЕНЧЕСКИЙ ОБЗОР · {marketplaceName.toUpperCase()}</span><h2>Продажи по каналам</h2><p>Сравнение FBS и FBO, а также эффективность каждого вашего ФФ за выбранный период.</p></div>
+                <button className="secondary-btn analytics-refresh" type="button" onClick={() => void loadAnalytics(analyticsRange, true)} disabled={analyticsLoading || Boolean(analyticsRetrySeconds)} title={analyticsRetrySeconds ? `${marketplaceName} временно ограничил запросы` : "Можно обновить вручную в любой момент. Рекомендованный интервал — 2 минуты."}><span className={analyticsLoading ? "spin" : ""}>↻</span>{analyticsLoading ? "Считаем" : analyticsRetrySeconds ? `Через ${formatCountdown(analyticsRetrySeconds)}` : "Обновить"}</button>
               </div>
 
               <div className="analytics-controls"><div className="analytics-periods" role="group" aria-label="Период аналитики">{[{ id: "7d", label: "Неделя" }, { id: "14d", label: "2 недели" }, { id: "30d", label: "Месяц" }, { id: "custom", label: "Свои даты" }].map((item) => <button type="button" key={item.id} className={analyticsPeriod === item.id ? "active" : ""} onClick={() => chooseAnalyticsPeriod(item.id as "7d" | "14d" | "30d" | "custom")}>{item.label}</button>)}</div><span className="analytics-period-label">{shortDate(analyticsRange.from)} — {shortDate(analyticsRange.to)}</span></div>
               {analyticsPeriod === "custom" && <div className="analytics-custom-dates"><label><span>С</span><input type="date" value={analyticsDraft.from} min={isoDate(89)} max={isoDate(0)} onChange={(event) => setAnalyticsDraft((value) => ({ ...value, from: event.target.value }))} /></label><label><span>По</span><input type="date" value={analyticsDraft.to} min={isoDate(89)} max={isoDate(0)} onChange={(event) => setAnalyticsDraft((value) => ({ ...value, to: event.target.value }))} /></label><button type="button" onClick={applyAnalyticsCustomPeriod}>Применить</button><small>Максимум 90 дней</small></div>}
               {analytics?.warnings.length ? <div className="analytics-warning">{analytics.warnings.map((warning) => <span key={warning}>! {warning}</span>)}</div> : null}
-              {analyticsRetrySeconds !== null && analyticsRetrySeconds > 0 && <div className="analytics-retry-timer" role="status"><span>↻</span><div><strong>WB разрешит повторный запрос через {formatCountdown(analyticsRetrySeconds)}</strong><p>{analytics?.source.retryExact ? "После таймера нажмите «Обновить» вручную." : "WB не прислал точное время — дождитесь окончания интервала и обновите вручную."}</p></div></div>}
+              {analyticsRetrySeconds !== null && analyticsRetrySeconds > 0 && <div className="analytics-retry-timer" role="status"><span>↻</span><div><strong>{marketplaceName} разрешит повторный запрос через {formatCountdown(analyticsRetrySeconds)}</strong><p>{analytics?.source.retryExact ? "После таймера нажмите «Обновить» вручную." : `${marketplaceName} не прислал точное время — дождитесь окончания интервала и обновите вручную.`}</p></div></div>}
 
-              {analyticsLoading && !analytics ? <div className="analytics-loading"><span className="loader"/><strong>Собираем аналитику Wildberries</strong><small>Сверяем продажи и каналы за выбранный период</small></div> : analyticsError && !analytics ? <div className="empty-state"><strong>Аналитика пока недоступна</strong><span>{analyticsError}</span></div> : analytics ? <>
+              {analyticsLoading && !analytics ? <div className="analytics-loading"><span className="loader"/><strong>Собираем аналитику {marketplaceName}</strong><small>Сверяем продажи и каналы за выбранный период</small></div> : analyticsError && !analytics ? <div className="empty-state"><strong>Аналитика пока недоступна</strong><span>{analyticsError}</span></div> : analytics ? <>
                 <div className="analytics-kpi-grid">{analyticsFactAvailable ? <><article className="analytics-kpi total"><span>Продажи за период</span><strong>{formatNumber.format(analytics.summary.total)} <small>шт.</small></strong><p>FBS и FBO вместе</p></article><article className="analytics-kpi fbo"><span>Продажи FBO</span><strong>{formatNumber.format(analytics.summary.fbo)} <small>шт.</small></strong><p>{analytics.summary.fboShare}% от продаж</p></article><article className="analytics-kpi fbs"><span>Продажи FBS</span><strong>{formatNumber.format(analytics.summary.fbs)} <small>шт.</small></strong><p>{analytics.summary.fbsShare}% от продаж</p></article><article className="analytics-kpi share"><span>Доля FBS</span><strong>{analytics.summary.fbsShare}<small>%</small></strong><p>По факту продаж</p></article></> : <><article className="analytics-kpi total unavailable"><span>Факт продаж</span><strong>—</strong><p>WB временно не отдал статистику</p></article><article className="analytics-kpi fbo unavailable"><span>Продажи FBO</span><strong>—</strong><p>Не подменяем нулём</p></article><article className="analytics-kpi fbs unavailable"><span>Продажи FBS</span><strong>—</strong><p>Не подменяем заказами</p></article><article className="analytics-kpi share unavailable"><span>Сравнение каналов</span><strong>—</strong><p>Нет факта продаж для сравнения</p></article></>}</div>
 
                 <div className="analytics-grid">
@@ -1654,33 +1682,33 @@ export default function Home() {
                 <article><span>Нужно довезти на {salesTargetDays} дней</span><strong>{formatNumber.format(salesTotals.need)} <small>шт.</small></strong><p>Продажи × {salesTargetDays} дней минус остаток</p></article>
               </div>
 
-              {selectedSalesWarehouse && !selectedSalesWarehouse.wbWarehouseId && <p className="sales-link-notice">Для этого ФФ ещё не указан склад WB FBS. Свяжите их в разделе «Склады ФФ и импорт Excel», чтобы продажи попадали в расчёт.</p>}
+              {selectedSalesWarehouse && !selectedSalesWarehouse.wbWarehouseId && <p className="sales-link-notice">Для этого ФФ ещё не указан склад {marketplaceCode} FBS. Свяжите их в разделе «Склады ФФ и импорт Excel», чтобы продажи попадали в расчёт.</p>}
 
               <section className="sales-table-card">
                 <div className="sales-table-heading"><div><span className="section-kicker">ПО АРТИКУЛАМ</span><h3>Что продавалось и что довезти</h3></div><span>{salesRows.length} из {rows.length} артикулов</span></div>
-                <div className="sales-table-wrap"><table><thead><tr><th>Товар / артикул</th><th>Доступно {selectedSalesWarehouse ? selectedSalesWarehouse.city : "ФФ"}</th><th>Заказы 7 дней</th><th>Среднее в день</th><th>Потребность {salesTargetDays} дней</th><th>Хватит на</th><th /></tr></thead><tbody>{salesRows.map((item) => <tr key={item.row.key} onClick={() => openProduct(item.row)} tabIndex={0} onKeyDown={(event) => { if (event.key === "Enter") openProduct(item.row); }}><td><div className="product-cell"><span className="product-swatch" style={{ background: item.row.color }}>{item.row.name.charAt(0).toUpperCase()}</span><span><strong>{item.row.name}</strong><small>{item.row.sku}{item.row.nmId ? ` · WB ${item.row.nmId}` : ""} · {item.row.category}</small></span></div></td><td><span className={`manual-stock-value ${item.stock === 0 ? "zero" : ""}`}>{formatNumber.format(item.stock)}<small> шт.</small></span></td><td><span className="number-pill blue-pill">{formatNumber.format(item.sales)}</span></td><td><b className="sales-average">{item.sales ? (item.sales / 7).toLocaleString("ru-RU", { maximumFractionDigits: 1 }) : "0"}</b></td><td><span className={`sales-need ${item.need ? "needed" : "covered"}`}>{item.need ? `+${formatNumber.format(item.need)}` : "Запаса достаточно"}</span></td><td><span className={`sales-coverage ${item.coverageDays !== null && item.coverageDays < salesTargetDays ? "low" : ""}`}>{item.coverageDays === null ? "Нет продаж" : `${item.coverageDays} дн.`}</span></td><td><button type="button" className="row-action" aria-label={`Открыть ${item.row.name}`}>›</button></td></tr>)}</tbody></table>{loading && <div className="loading-state"><span className="loader"/><strong>Загружаем продажи из Wildberries</strong><small>Считаем FBS-заказы за последние 7 дней</small></div>}{!loading && !salesRows.length && <div className="empty-state"><strong>Ничего не найдено</strong><span>Попробуйте изменить поиск или выберите другой склад ФФ.</span></div>}</div>
-                <footer className="table-footer"><span><i className={error ? "live-dot offline" : "live-dot"} />Данные WB API · FBS-заказы за 7 дней</span><span>Потребность = продажи × {salesTargetDays} дней − остаток ФФ</span></footer>
+                <div className="sales-table-wrap"><table><thead><tr><th>Товар / артикул</th><th>Доступно {selectedSalesWarehouse ? selectedSalesWarehouse.city : "ФФ"}</th><th>Заказы 7 дней</th><th>Среднее в день</th><th>Потребность {salesTargetDays} дней</th><th>Хватит на</th><th /></tr></thead><tbody>{salesRows.map((item) => <tr key={item.row.key} onClick={() => openProduct(item.row)} tabIndex={0} onKeyDown={(event) => { if (event.key === "Enter") openProduct(item.row); }}><td><div className="product-cell"><span className="product-swatch" style={{ background: item.row.color }}>{item.row.name.charAt(0).toUpperCase()}</span><span><strong>{item.row.name}</strong><small>{item.row.sku}{item.row.nmId ? ` · ${marketplaceCode} ${item.row.nmId}` : ""} · {item.row.category}</small></span></div></td><td><span className={`manual-stock-value ${item.stock === 0 ? "zero" : ""}`}>{formatNumber.format(item.stock)}<small> шт.</small></span></td><td><span className="number-pill blue-pill">{formatNumber.format(item.sales)}</span></td><td><b className="sales-average">{item.sales ? (item.sales / 7).toLocaleString("ru-RU", { maximumFractionDigits: 1 }) : "0"}</b></td><td><span className={`sales-need ${item.need ? "needed" : "covered"}`}>{item.need ? `+${formatNumber.format(item.need)}` : "Запаса достаточно"}</span></td><td><span className={`sales-coverage ${item.coverageDays !== null && item.coverageDays < salesTargetDays ? "low" : ""}`}>{item.coverageDays === null ? "Нет продаж" : `${item.coverageDays} дн.`}</span></td><td><button type="button" className="row-action" aria-label={`Открыть ${item.row.name}`}>›</button></td></tr>)}</tbody></table>{loading && <div className="loading-state"><span className="loader"/><strong>Загружаем продажи из {marketplaceName}</strong><small>Считаем FBS-заказы за последние 7 дней</small></div>}{!loading && !salesRows.length && <div className="empty-state"><strong>Ничего не найдено</strong><span>Попробуйте изменить поиск или выберите другой склад ФФ.</span></div>}</div>
+                <footer className="table-footer"><span><i className={error ? "live-dot offline" : "live-dot"} />Данные {marketplaceCode} API · FBS-заказы за 7 дней</span><span>Потребность = продажи × {salesTargetDays} дней − остаток ФФ</span></footer>
               </section>
             </section>
           ) : <>
             <section className={`metric-grid ${activeView !== "overview" ? "view-hidden" : ""}`} aria-label="Ключевые показатели">
-              <article className="metric-card featured"><div className="metric-top"><span>Остаток на складах WB</span><span className="trend up">● WB API</span></div><strong className="metric-value">{loading ? "—" : formatNumber.format(totals.available)} <small>шт.</small></strong><div className="spark-bars" aria-hidden="true">{[24,31,28,42,38,52,47,62,58,74,69,83].map((height, index) => <i key={index} style={{ height }} />)}</div><p>Фактический остаток · для FBS недоступен</p></article>
+              <article className="metric-card featured"><div className="metric-top"><span>Остаток на складах {marketplaceName}</span><span className="trend up">● {marketplaceCode} API</span></div><strong className="metric-value">{loading ? "—" : formatNumber.format(totals.available)} <small>шт.</small></strong><div className="spark-bars" aria-hidden="true">{[24,31,28,42,38,52,47,62,58,74,69,83].map((height, index) => <i key={index} style={{ height }} />)}</div><p>Фактический остаток FBO · отдельно от FBS</p></article>
               <article className="metric-card"><div className="metric-icon green">□</div><div className="metric-label">Свободно к продаже на ФФ</div><strong className="metric-value">{loading ? "—" : formatNumber.format(ffAvailableTotal)} <small>шт.</small></strong><p>Фактически на ФФ {formatNumber.format(ffPhysicalTotal)} · новые FBS в резерве {formatNumber.format(ffReservedFromStockTotal)}</p></article>
               <article className="metric-card"><div className="metric-icon blue">→</div><div className="metric-label">Активные FBS</div><strong className="metric-value">{loading ? "—" : formatNumber.format(activeFbsTotal)} <small>шт.</small></strong><p>{fbsLocations.map((location) => <span key={location.id}>{location.city} <b>{activeFbsByLocation[location.id] ?? 0}</b>{" · "}</span>)}</p></article>
               <article className="metric-card"><div className="metric-icon amber">◷</div><div className="metric-label">Продано</div><strong className="metric-value">{loading ? "—" : formatNumber.format(totals.toSale)} <small>шт.</small></strong><p>Факт выкупа · без отмен</p></article>
             </section>
 
             <section className={`delivery-overview ${activeView !== "overview" ? "view-hidden" : ""}`} aria-label="Качество доставки FBS">
-              <div className="delivery-overview-heading"><span className="section-kicker">FBS · СКОРОСТЬ ПЕРЕДАЧИ</span><h2>От заказа до WB</h2><p>Считаем по изменениям статусов FBS. Это время передачи WB, а не обещанный срок для покупателя.</p></div>
+              <div className="delivery-overview-heading"><span className="section-kicker">FBS · СКОРОСТЬ ПЕРЕДАЧИ</span><h2>От заказа до {marketplaceName}</h2><p>Считаем по изменениям статусов FBS. Это время передачи {marketplaceName}, а не обещанный срок для покупателя.</p></div>
               <article className="delivery-kpi"><strong>{formatNumber.format(handoverTiming.overall.sampleSize)}</strong><span>заказов в выборке</span><p>{handoverTiming.trackingStartedAt ? "Наблюдаем переходы new → complete" : "Начнём собирать историю после обновления"}</p></article>
-              <article className="delivery-kpi delivery-time"><strong>{formatHandoverTime(handoverTiming.overall.averageHours)}</strong><div><i /></div><p>Среднее до передачи WB · все ФФ</p></article>
+              <article className="delivery-kpi delivery-time"><strong>{formatHandoverTime(handoverTiming.overall.averageHours)}</strong><div><i /></div><p>Среднее до передачи {marketplaceCode} · все ФФ</p></article>
             </section>
 
-            <section className={`movement-card ${activeView !== "overview" && activeView !== "fbs" ? "view-hidden" : ""}`} id="movement"><div className="section-heading"><div><span className="section-kicker">ОСТАТКИ WB, ФФ И ДВИЖЕНИЕ FBS</span><h2>Фактические и свободные остатки отдельно</h2></div><span className="period-pill">Актуальные заказы за 30 дней</span></div><div className="movement-grid"><article className="wb-stock-fact"><span className="wb-stock-mark">WB</span><div><small>ФАКТИЧЕСКИЙ ОСТАТОК НА WB</small><strong>{formatNumber.format(totals.available)} <em>шт.</em></strong><p>Уже находится на складах Wildberries и не является доступным запасом для FBS.</p></div></article><div className="fbs-overview"><div className="movement-subhead"><span>ОСТАТКИ ФФ · WB API</span>{canManage && <button className="text-action" type="button" onClick={() => navigateTo("manual")}>Настроить склады</button>}</div><div className="fbs-location-grid manual-location-grid dynamic-locations">{visibleManualWarehouses.map((item) => { const physical = totals.ffStock[item.id] ?? 0; const reserved = totals.fbsByLocation[item.id] ?? 0; const free = Math.max(0, physical - reserved); return <article className="fbs-location-card manual" key={item.id}><span>{item.city}</span><strong>{formatNumber.format(physical)}</strong><small>{item.name} · свободно {free} · новые FBS {reserved}</small></article>; })}</div><div className="movement-subhead orders"><span>FBS-ЗАКАЗЫ ПО ЭТАПАМ</span><small>По данным WB API</small></div><div className="fbs-location-grid order-location-grid">{fbsLocations.map((location) => <article className="fbs-location-card" key={location.id}><span>{location.city}</span><strong>{formatNumber.format(activeFbsByLocation[location.id] ?? 0)}</strong><small>{location.label}</small></article>)}</div><div className="fbs-stage-strip"><span><b>{totals.fbs}</b> новые · ещё на ФФ</span><i>→</i><span><b>{totals.receiving}</b> переданы WB</span><i>→</i><span className="sale-stage"><b>{totals.toSale}</b> продано</span></div></div></div></section>
+            <section className={`movement-card ${activeView !== "overview" && activeView !== "fbs" ? "view-hidden" : ""}`} id="movement"><div className="section-heading"><div><span className="section-kicker">ОСТАТКИ {marketplaceCode}, ФФ И ДВИЖЕНИЕ FBS</span><h2>Фактические и свободные остатки отдельно</h2></div><span className="period-pill">Актуальные заказы за 30 дней</span></div><div className="movement-grid"><article className="wb-stock-fact"><span className="wb-stock-mark">{marketplaceCode}</span><div><small>ФАКТИЧЕСКИЙ ОСТАТОК НА {marketplaceCode}</small><strong>{formatNumber.format(totals.available)} <em>шт.</em></strong><p>Уже находится на складах {marketplaceName} и не является доступным запасом для FBS.</p></div></article><div className="fbs-overview"><div className="movement-subhead"><span>ОСТАТКИ ФФ · {marketplaceCode} API</span>{canManage && <button className="text-action" type="button" onClick={() => navigateTo("manual")}>Настроить склады</button>}</div><div className="fbs-location-grid manual-location-grid dynamic-locations">{visibleManualWarehouses.map((item) => { const physical = totals.ffStock[item.id] ?? 0; const reserved = totals.fbsByLocation[item.id] ?? 0; const free = Math.max(0, physical - reserved); return <article className="fbs-location-card manual" key={item.id}><span>{item.city}</span><strong>{formatNumber.format(physical)}</strong><small>{item.name} · свободно {free} · новые FBS {reserved}</small></article>; })}</div><div className="movement-subhead orders"><span>FBS-ЗАКАЗЫ ПО ЭТАПАМ</span><small>По данным {marketplaceCode} API</small></div><div className="fbs-location-grid order-location-grid">{fbsLocations.map((location) => <article className="fbs-location-card" key={location.id}><span>{location.city}</span><strong>{formatNumber.format(activeFbsByLocation[location.id] ?? 0)}</strong><small>{location.label}</small></article>)}</div><div className="fbs-stage-strip"><span><b>{totals.fbs}</b> новые · ещё на ФФ</span><i>→</i><span><b>{totals.receiving}</b> переданы {marketplaceCode}</span><i>→</i><span className="sale-stage"><b>{totals.toSale}</b> продано</span></div></div></div></section>
 
-            <section className={`stock-card ${activeView === "reports" ? "view-hidden" : ""}`} id="stock"><div className="stock-header"><div><span className="section-kicker">ОСТАТКИ ПО АРТИКУЛАМ</span><h2>{stockTitle}</h2></div><div className="stock-tools"><label className="search-field"><span>⌕</span><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Артикул или название" aria-label="Поиск по товарам"/></label><label className="select-wrap"><span>Склад:</span><select value={warehouse} onChange={(event) => setWarehouse(event.target.value)} aria-label="Выбрать склад"><option>Все склады</option>{warehouseNames.map((item) => <option key={item}>{item}</option>)}</select></label></div></div><div className="filter-row"><div className="filter-tabs" role="tablist" aria-label="Фильтр остатков">{[{ name: "Все", count: counts.all }, { name: "Дефицит", count: counts.risk }, { name: "Активные FBS", count: counts.transit }].map((item) => <button type="button" key={item.name} className={filter === item.name ? "active" : ""} onClick={() => setFilter(item.name)}>{item.name}<span>{item.count}</span></button>)}</div><span className="result-count">Показано {filteredRows.length} из {viewTotal} артикулов</span></div><div className="table-wrap"><table><thead><tr><th>Товар / артикул</th><th>{warehouse === "Все склады" ? "Остаток WB" : "Выбранный склад WB"}</th>{visibleManualWarehouses.map((item) => <th className="ff-column-head" key={item.id}><span>{item.city}</span><small>{item.name}</small></th>)}<th>Активные FBS</th><th>Продано</th><th>Статус</th><th /></tr></thead><tbody>{filteredRows.map((row) => <tr key={row.key} onClick={() => openProduct(row)} tabIndex={0} onKeyDown={(event) => { if (event.key === "Enter") openProduct(row); }}><td><div className="product-cell"><span className="product-swatch" style={{ background: row.color }}>{row.name.charAt(0).toUpperCase()}</span><span><strong>{row.name}</strong><small>{row.sku}{row.nmId ? ` · WB ${row.nmId}` : ""} · {row.category}</small></span></div></td><td><b>{formatNumber.format(warehouse === "Все склады" ? stockTotal(row) : row.warehouses[warehouse] ?? 0)}</b><small> шт.</small></td>{visibleManualWarehouses.map((item) => { const free = availableFfStock(row, item.id); return <td key={item.id}><span className={`manual-stock-value ${free === 0 ? "zero" : ""}`} title={`Свободно к продаже на ФФ: ${formatManualWarehouse(item)}`}>{formatNumber.format(free)}<small> шт.</small></span></td>; })}<td><span className="number-pill blue-pill">{row.fbs + row.receiving}</span></td><td><span className="number-pill green-pill">{row.toSale}</span></td><td><span className={`status ${row.status === "В норме" ? "ok" : row.status === "Мало" ? "low" : "critical"}`}><i />{row.status}</span></td><td><button type="button" className="row-action" aria-label={`Открыть ${row.name}`}>›</button></td></tr>)}</tbody></table>{loading && <div className="loading-state"><span className="loader"/><strong>Загружаем данные из Wildberries</strong><small>Остатки и статусы FBS собираются в единый отчёт</small></div>}{!loading && !filteredRows.length && <div className="empty-state"><strong>{error ? "Данные пока не загружены" : "Ничего не найдено"}</strong><span>{error ? "Проверьте подключение WB API." : "Попробуйте изменить поиск или фильтры."}</span></div>}</div><footer className="table-footer"><span><i className={error ? "live-dot offline" : "live-dot"} />{updatedAt ? `Остатки обновлены в ${formatSyncTime(updatedAt)} МСК` : "Ожидаем синхронизацию"}</span><button type="button" onClick={() => { setQuery(""); setFilter("Все"); setWarehouse("Все склады"); }}>Сбросить фильтры</button></footer></section>
+            <section className={`stock-card ${activeView === "reports" ? "view-hidden" : ""}`} id="stock"><div className="stock-header"><div><span className="section-kicker">ОСТАТКИ ПО АРТИКУЛАМ</span><h2>{stockTitle}</h2></div><div className="stock-tools"><label className="search-field"><span>⌕</span><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Артикул или название" aria-label="Поиск по товарам"/></label><label className="select-wrap"><span>Склад:</span><select value={warehouse} onChange={(event) => setWarehouse(event.target.value)} aria-label="Выбрать склад"><option>Все склады</option>{warehouseNames.map((item) => <option key={item}>{item}</option>)}</select></label></div></div><div className="filter-row"><div className="filter-tabs" role="tablist" aria-label="Фильтр остатков">{[{ name: "Все", count: counts.all }, { name: "Дефицит", count: counts.risk }, { name: "Активные FBS", count: counts.transit }].map((item) => <button type="button" key={item.name} className={filter === item.name ? "active" : ""} onClick={() => setFilter(item.name)}>{item.name}<span>{item.count}</span></button>)}</div><span className="result-count">Показано {filteredRows.length} из {viewTotal} артикулов</span></div><div className="table-wrap"><table><thead><tr><th>Товар / артикул</th><th>{warehouse === "Все склады" ? `Остаток ${marketplaceCode}` : `Выбранный склад ${marketplaceCode}`}</th>{visibleManualWarehouses.map((item) => <th className="ff-column-head" key={item.id}><span>{item.city}</span><small>{item.name}</small></th>)}<th>Активные FBS</th><th>Продано</th><th>Статус</th><th /></tr></thead><tbody>{filteredRows.map((row) => <tr key={row.key} onClick={() => openProduct(row)} tabIndex={0} onKeyDown={(event) => { if (event.key === "Enter") openProduct(row); }}><td><div className="product-cell"><span className="product-swatch" style={{ background: row.color }}>{row.name.charAt(0).toUpperCase()}</span><span><strong>{row.name}</strong><small>{row.sku}{row.nmId ? ` · ${marketplaceCode} ${row.nmId}` : ""} · {row.category}</small></span></div></td><td><b>{formatNumber.format(warehouse === "Все склады" ? stockTotal(row) : row.warehouses[warehouse] ?? 0)}</b><small> шт.</small></td>{visibleManualWarehouses.map((item) => { const free = availableFfStock(row, item.id); return <td key={item.id}><span className={`manual-stock-value ${free === 0 ? "zero" : ""}`} title={`Свободно к продаже на ФФ: ${formatManualWarehouse(item)}`}>{formatNumber.format(free)}<small> шт.</small></span></td>; })}<td><span className="number-pill blue-pill">{row.fbs + row.receiving}</span></td><td><span className="number-pill green-pill">{row.toSale}</span></td><td><span className={`status ${row.status === "В норме" ? "ok" : row.status === "Мало" ? "low" : "critical"}`}><i />{row.status}</span></td><td><button type="button" className="row-action" aria-label={`Открыть ${row.name}`}>›</button></td></tr>)}</tbody></table>{loading && <div className="loading-state"><span className="loader"/><strong>Загружаем данные из {marketplaceName}</strong><small>Остатки и статусы FBS собираются в единый отчёт</small></div>}{!loading && !filteredRows.length && <div className="empty-state"><strong>{error ? "Данные пока не загружены" : "Ничего не найдено"}</strong><span>{error ? `Проверьте подключение ${marketplaceCode} API.` : "Попробуйте изменить поиск или фильтры."}</span></div>}</div><footer className="table-footer"><span><i className={error ? "live-dot offline" : "live-dot"} />{updatedAt ? `Остатки обновлены в ${formatSyncTime(updatedAt)} МСК` : "Ожидаем синхронизацию"}</span><button type="button" onClick={() => { setQuery(""); setFilter("Все"); setWarehouse("Все склады"); }}>Сбросить фильтры</button></footer></section>
 
-            {activeView === "reports" && <section className="reports-panel" id="reports"><div className="section-heading"><div><span className="section-kicker">ГОТОВЫЕ ВЫГРУЗКИ</span><h2>Скачать данные из кабинета</h2></div><span className="period-pill">CSV · Excel</span></div><div className="reports-grid"><article className="report-card"><span className="report-symbol blue">□</span><div><strong>Все остатки</strong><p>Артикулы и количество по каждому складу</p><small>{rows.length} артикулов · {warehouseNames.length} складов WB</small></div><button type="button" onClick={() => downloadCsv(rows, "vse-ostatki-wb")} disabled={!rows.length}>Скачать ↓</button></article><article className="report-card"><span className="report-symbol amber">→</span><div><strong>FBS-движение</strong><p>Новые, переданные WB и фактически выкупленные товары</p><small>{counts.transit} артикулов · {activeFbsTotal} активных единиц</small></div><button type="button" onClick={() => downloadCsv(rows.filter(hasFbsMovement), "fbs-wb")} disabled={!counts.transit}>Скачать ↓</button></article><article className="report-card"><span className="report-symbol green">▤</span><div><strong>Остатки ФФ из WB API</strong><p>Видимые FBS-склады и остатки по артикулам</p><small>{visibleManualWarehouses.length} складов ФФ</small></div><button type="button" onClick={() => downloadCsv(rows, "ostatki-ff")} disabled={!rows.length}>Скачать ↓</button></article></div></section>}
+            {activeView === "reports" && <section className="reports-panel" id="reports"><div className="section-heading"><div><span className="section-kicker">ГОТОВЫЕ ВЫГРУЗКИ</span><h2>Скачать данные из кабинета</h2></div><span className="period-pill">CSV · Excel</span></div><div className="reports-grid"><article className="report-card"><span className="report-symbol blue">□</span><div><strong>Все остатки</strong><p>Артикулы и количество по каждому складу</p><small>{rows.length} артикулов · {warehouseNames.length} складов {marketplaceCode}</small></div><button type="button" onClick={() => downloadCsv(rows, `vse-ostatki-${isOzon ? "ozon" : "wb"}`)} disabled={!rows.length}>Скачать ↓</button></article><article className="report-card"><span className="report-symbol amber">→</span><div><strong>FBS-движение</strong><p>Новые, переданные {marketplaceCode} и завершённые товары</p><small>{counts.transit} артикулов · {activeFbsTotal} активных единиц</small></div><button type="button" onClick={() => downloadCsv(rows.filter(hasFbsMovement), `fbs-${isOzon ? "ozon" : "wb"}`)} disabled={!counts.transit}>Скачать ↓</button></article><article className="report-card"><span className="report-symbol green">▤</span><div><strong>Остатки ФФ из {marketplaceCode} API</strong><p>Видимые FBS-склады и остатки по артикулам</p><small>{visibleManualWarehouses.length} складов ФФ</small></div><button type="button" onClick={() => downloadCsv(rows, "ostatki-ff")} disabled={!rows.length}>Скачать ↓</button></article></div></section>}
           </>}
         </div>
       </section>
@@ -1689,19 +1717,19 @@ export default function Home() {
         <div className="drawer-backdrop" onMouseDown={() => setSelected(null)} role="presentation">
           <aside className="drawer" onMouseDown={(event) => event.stopPropagation()} aria-label={`Карточка товара ${selected.name}`}>
             <button className="close-btn" type="button" onClick={() => setSelected(null)} aria-label="Закрыть">×</button>
-            <span className="drawer-kicker">КАРТОЧКА ТОВАРА · WB API</span>
-            <div className="drawer-product"><span className="product-swatch large" style={{ background: selected.color }}>{selected.name.charAt(0).toUpperCase()}</span><div><h2>{selected.name}</h2><p>{selected.sku}{selected.nmId ? ` · WB ${selected.nmId}` : ""}</p></div></div>
-            <div className="drawer-total"><span>Фактический остаток на WB</span><strong>{formatNumber.format(stockTotal(selected))} <small>шт.</small></strong></div>
+            <span className="drawer-kicker">КАРТОЧКА ТОВАРА · {marketplaceCode} API</span>
+            <div className="drawer-product"><span className="product-swatch large" style={{ background: selected.color }}>{selected.name.charAt(0).toUpperCase()}</span><div><h2>{selected.name}</h2><p>{selected.sku}{selected.nmId ? ` · ${marketplaceCode} ${selected.nmId}` : ""}</p></div></div>
+            <div className="drawer-total"><span>Фактический остаток на {marketplaceCode}</span><strong>{formatNumber.format(stockTotal(selected))} <small>шт.</small></strong></div>
             <div className="warehouse-list">{Object.entries(selected.warehouses).sort((a, b) => b[1] - a[1]).map(([name, value]) => <div key={name}><span><i />{name}</span><strong>{formatNumber.format(value)} шт.</strong></div>)}{!Object.keys(selected.warehouses).length && <div><span>Нет остатков</span><strong>0 шт.</strong></div>}</div>
-            <p className="drawer-stock-note">Этот остаток уже находится на складах Wildberries и недоступен для FBS.</p>
+            <p className="drawer-stock-note">Этот остаток уже находится на складах {marketplaceName} и недоступен для FBS.</p>
             <h3>Остатки на складах ФФ</h3>
             <div className="warehouse-list ff-stock-readonly">{visibleManualWarehouses.map((item) => <div key={item.id}><span><i />{formatManualWarehouse(item)}</span><strong>{formatNumber.format(selected.ffStock[item.id] ?? 0)} шт.</strong></div>)}</div>
-            <p className="drawer-stock-note">Остатки FBS получены из WB API. Ручной Excel сохраняется только как резерв для непубличных остатков и партий.</p>
+            <p className="drawer-stock-note">Остатки FBS получены из {marketplaceCode} API. Ручной Excel сохраняется только как резерв для непубличных остатков и партий.</p>
             <h3>Активные FBS по складам</h3>
             <div className="drawer-fbs-locations">{fbsLocations.map((location) => <div key={location.id}><span><strong>{location.city}</strong><small>{location.label}</small></span><b>{(selected.fbsByLocation?.[location.id] ?? 0) + (selected.receivingByLocation?.[location.id] ?? 0)} шт.</b></div>)}</div>
             <h3>Текущее движение FBS</h3>
-            <div className="timeline"><div className="timeline-item done"><i>1</i><div><strong>Новые FBS</strong><span>{selected.fbs} шт. в статусах new / confirm</span></div></div><div className="timeline-item active"><i>2</i><div><strong>Переданы WB</strong><span>{selected.receiving} шт. в доставке или на сортировке WB</span></div></div><div className="timeline-item"><i>3</i><div><strong>Продано</strong><span>{selected.toSale} шт. выкуплено покупателем без отмен</span></div></div></div>
-            <p className="drawer-note">Данные Wildberries обновлены в {selected.updated} МСК</p>
+            <div className="timeline"><div className="timeline-item done"><i>1</i><div><strong>Новые FBS</strong><span>{selected.fbs} шт. в статусах новых заказов</span></div></div><div className="timeline-item active"><i>2</i><div><strong>Переданы {marketplaceCode}</strong><span>{selected.receiving} шт. в доставке или на сортировке {marketplaceName}</span></div></div><div className="timeline-item"><i>3</i><div><strong>Продано</strong><span>{selected.toSale} шт. завершено без отмен</span></div></div></div>
+            <p className="drawer-note">Данные {marketplaceName} обновлены в {selected.updated} МСК</p>
           </aside>
         </div>
       )}

@@ -3,7 +3,7 @@ import { getD1 } from "./index";
 import type { CabinetId } from "@/lib/admin-auth";
 
 export type FfSettlementOrder = {
-  orderId: number;
+  orderId: string;
   handedOverAt: string;
 };
 
@@ -55,7 +55,7 @@ export async function getFfSettlement(input: { cabinetId: CabinetId; warehouseId
     d1.prepare("SELECT MIN(first_seen_at) AS trackingStartedAt FROM fbs_order_handover_metrics WHERE cabinet_id = ?").bind(input.cabinetId).first<{ trackingStartedAt: string | null }>(),
   ]);
   const orders = (ordersResult.results ?? []).map((order) => ({
-    orderId: Number(order.orderId),
+    orderId: String(order.orderId),
     handedOverAt: order.handedOverAt,
   }));
   const rateKopecks = Math.max(0, Number(warehouse.serviceRateKopecks) || 0);

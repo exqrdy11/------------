@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { getTargetPriceRefreshCooldown, listTargetPrices, releaseTargetPriceRefresh, reserveTargetPriceRefresh, saveTargetPrices, type TargetPriceCompetitor, type TargetPriceRow } from "@/db/target-prices";
 import { cabinetToken, getAdminCabinet, getAdminSession } from "@/lib/admin-auth";
+import { refreshOzonTargetPrices } from "@/lib/ozon-target-prices";
 
 export const dynamic = "force-dynamic";
 
@@ -129,7 +130,7 @@ export async function POST(request: Request) {
     const row = findTargetPriceRow(rows, body.sku, body.nmId);
     if (!row) return NextResponse.json({ error: "Товар для изменения конкурентов не найден" }, { status: 404, headers: { "Cache-Control": "no-store" } });
     const competitorNmId = Number(body.competitorNmId);
-    if (!Number.isInteger(competitorNmId) || competitorNmId <= 0 || competitorNmId === row.nmId) return NextResponse.json({ error: "Укажите корректный артикул WB конкурента" }, { status: 400, headers: { "Cache-Control": "no-store" } });
+    if (!Number.isInteger(competitorNmId) || competitorNmId <= 0 || competitorNmId === row.nmId) return NextResponse.json({ error: session.cabinetId === "ozon" ? "Укажите корректный ID товара Ozon конкурента" : "Укажите корректный артикул WB конкурента" }, { status: 400, headers: { "Cache-Control": "no-store" } });
     let competitors = row.competitors;
     if (body.action === "remove-competitor") {
       competitors = competitors.filter((competitor) => competitor.nmId !== competitorNmId);
@@ -153,6 +154,17 @@ export async function POST(request: Request) {
       : item);
     await saveTargetPrices(session.cabinetId, updatedRows);
     return NextResponse.json({ rows: updatedRows }, { headers: { "Cache-Control": "no-store" } });
+  }
+  if (session.cabinetId === "ozon") {
+    const reservation = await reserveTargetPriceRefresh(session.cabinetId, "prices", TARGET_PRICE_REFRESH_REQUEST_LOCK_MS);
+    if (!reservation.reserved) return NextResponse.json({ error: cooldownMessage(), cooldownUntil: reservation.cooldownUntil }, { status: 429, headers: { "Cache-Control": "no-store" } });
+    try {
+      const refreshed = await refreshOzonTargetPrices(await listTargetPrices(session.cabinetId));
+      await saveTargetPrices(session.cabinetId, refreshed.rows);
+      return NextResponse.json({ ...refreshed, cooldownUntil: null }, { headers: { "Cache-Control": "no-store" } });
+    } finally {
+      await releaseTargetPriceRefresh(session.cabinetId, "prices").catch(() => undefined);
+    }
   }
   const token = cabinetToken(session.cabinetId);
   if (!token) return NextResponse.json({ error: "Токен Wildberries ещё не подключён" }, { status: 503, headers: { "Cache-Control": "no-store" } });

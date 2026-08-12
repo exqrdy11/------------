@@ -2,9 +2,10 @@ const SESSION_COOKIE = "skladno_admin";
 const SESSION_LIFETIME_SECONDS = 12 * 60 * 60;
 const encoder = new TextEncoder();
 
-export const cabinetIds = ["metanutrix"] as const;
+export const cabinetIds = ["metanutrix", "ozon"] as const;
 export type CabinetId = typeof cabinetIds[number];
-export type CabinetSummary = { id: CabinetId; name: string; configured: boolean };
+export type MarketplaceKind = "wb" | "ozon";
+export type CabinetSummary = { id: CabinetId; name: string; configured: boolean; marketplace: MarketplaceKind };
 export type UserRole = "owner" | "viewer";
 export type AdminSession = { ownerId: CabinetId; cabinetId: CabinetId; role: UserRole };
 
@@ -84,11 +85,21 @@ export function sessionForCredentials(login: string, password: string): AdminSes
 }
 
 function cabinetsForOwner(ownerId: CabinetId) {
-  return cabinetIds.filter((cabinetId) => cabinetId === ownerId);
+  // One login manages all of the seller's marketplace cabinets. Each cabinet
+  // still has a separate D1 namespace and can never see another cabinet's data.
+  return ownerId === "metanutrix" ? cabinetIds : [];
 }
 
 export function cabinetSummary(id: CabinetId): CabinetSummary {
-  return { id, name: "Метанутрикс", configured: Boolean(process.env.WB_API_TOKEN?.trim()) };
+  if (id === "ozon") {
+    return {
+      id,
+      name: "Ozon Seller",
+      configured: Boolean(process.env.OZON_CLIENT_ID?.trim() && process.env.OZON_API_KEY?.trim()),
+      marketplace: "ozon",
+    };
+  }
+  return { id, name: "Метанутрикс", configured: Boolean(process.env.WB_API_TOKEN?.trim()), marketplace: "wb" };
 }
 
 export function availableCabinets(ownerId: CabinetId) {
@@ -97,6 +108,16 @@ export function availableCabinets(ownerId: CabinetId) {
 
 export function cabinetToken(id: CabinetId) {
   return id === "metanutrix" ? process.env.WB_API_TOKEN?.trim() : undefined;
+}
+
+export function cabinetMarketplace(id: CabinetId): MarketplaceKind {
+  return id === "ozon" ? "ozon" : "wb";
+}
+
+export function ozonCredentials() {
+  const clientId = process.env.OZON_CLIENT_ID?.trim();
+  const apiKey = process.env.OZON_API_KEY?.trim();
+  return clientId && apiKey ? { clientId, apiKey } : null;
 }
 
 export async function createAdminSession(ownerId: CabinetId, cabinetId: CabinetId = ownerId, role: UserRole = "owner") {
