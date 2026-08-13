@@ -174,6 +174,10 @@ async function seedSnapshot(cabinetId: CabinetId) {
     : cabinetId === "yandex"
       ? []
       : targetPriceSnapshot;
+  // Yandex intentionally starts with no seeded rows: its real catalogue is
+  // fetched only after a manual refresh. D1 rejects batch([]), so there is
+  // nothing to write until that first real catalogue response arrives.
+  if (!snapshot.length) return;
   await d1.batch(snapshot.map((row) => statement.bind(
     cabinetId,
     productKey(row),

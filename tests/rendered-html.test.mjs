@@ -175,6 +175,7 @@ test("таргет Яндекс Маркета не наследует табл�
   ]);
 
   assert.match(storage, /cabinetId === "yandex"\s*\? \[\]/);
+  assert.match(storage, /if \(!snapshot\.length\) return/);
   assert.match(route, /session\.cabinetId === "yandex"/);
   assert.match(route, /refreshYandexTargetPrices/);
   assert.match(refresh, /\/v2\/campaigns\/\$\{campaignId\}\/offer-prices/);
