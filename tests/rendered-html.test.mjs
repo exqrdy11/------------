@@ -80,7 +80,7 @@ test("в таргете цен конкуренты добавляются то�
   assert.doesNotMatch(storage, /target_price_candidate_snapshots/);
 });
 
-test("в Ozon цену чужой карточки можно зафиксировать вручную для расчёта таргета", async () => {
+test("в Ozon конкурент добавляется ссылкой и обычное обновление сохраняет последнюю цену", async () => {
   const [page, route, ozon] = await Promise.all([
     readFile(new URL("app/page.tsx", root), "utf8"),
     readFile(new URL("app/api/target-prices/route.ts", root), "utf8"),
@@ -89,10 +89,14 @@ test("в Ozon цену чужой карточки можно зафиксиро
 
   assert.match(page, /Цена, ₽/);
   assert.match(page, /Сохранить/);
-  assert.match(page, /Она сразу пойдёт в расчёт таргета/);
+  assert.match(page, /Ссылка конкурента Ozon/);
+  assert.match(page, /сохранит последнюю удачную/);
   assert.match(route, /введено вручную/);
   assert.match(route, /Укажите корректную цену конкурента в рублях/);
-  assert.match(ozon, /Ozon Seller не выдаёт цены чужих карточек/);
+  assert.match(route, /normalizeOzonProductUrl/);
+  assert.match(ozon, /composer-api\.bx\/page\/json\/v2/);
+  assert.match(ozon, /Сохранили последнюю цену/);
+  assert.match(ozon, /fetchPublicOzonCard/);
 });
 
 test("цены обновляются вручную для владельца и гостя, без пятиминутного ограничения", async () => {

@@ -5,6 +5,7 @@ import { targetPriceSnapshot, type TargetPriceSnapshotRow } from "@/lib/target-p
 
 export type TargetPriceCompetitor = {
   nmId: number;
+  url: string | null;
   price: number | null;
   source: string | null;
   name: string | null;
@@ -93,6 +94,7 @@ function parseCompetitors(value: string): TargetPriceCompetitor[] {
       if (!nmId) return [];
       return [{
         nmId,
+        url: typeof record.url === "string" ? record.url : null,
         price: asNumber(record.price),
         source: typeof record.source === "string" ? record.source : null,
         name: typeof record.name === "string" ? record.name : null,
@@ -161,7 +163,7 @@ async function seedSnapshot(cabinetId: CabinetId) {
       currentPrice: null,
       updatedAt: null,
       searchQuery: item.sku,
-      competitors: item.competitorProductIds.map((nmId) => ({ nmId, price: 0, source: "импорт из КОНКУРЕНТЫ.02" })),
+      competitors: item.competitorProductIds.map((nmId) => ({ nmId, url: `https://www.ozon.ru/product/${nmId}/`, price: 0, source: "импорт из КОНКУРЕНТЫ.02" })),
       candidateNmId: null,
       score: null,
       reason: "Конкуренты импортированы из листа «КОНКУРЕНТЫ.02». Цены Ozon появятся после отдельного обновления.",
@@ -183,7 +185,7 @@ async function seedSnapshot(cabinetId: CabinetId) {
     row.currentPrice,
     row.updatedAt,
     row.searchQuery,
-    JSON.stringify(row.competitors.map((competitor) => ({ ...competitor, name: null, updatedAt: null, error: null }))),
+    JSON.stringify(row.competitors.map((competitor) => ({ ...competitor, url: competitor.url ?? null, name: null, updatedAt: null, error: null }))),
     row.candidateNmId,
     row.score,
     row.reason,
@@ -202,7 +204,10 @@ export async function listTargetPrices(cabinetId: CabinetId) {
     WHERE cabinet_id = ?
     ORDER BY orders DESC, sku COLLATE NOCASE ASC
   `).bind(cabinetId).all<TargetPriceDbRow>();
-  return (result.results ?? []).map(toTargetPriceRow);
+  return (result.results ?? []).map(toTargetPriceRow).map((row) => cabinetId === "ozon" ? {
+    ...row,
+    competitors: row.competitors.map((competitor) => ({ ...competitor, url: competitor.url ?? `https://www.ozon.ru/product/${competitor.nmId}/` })),
+  } : row);
 }
 
 export async function saveTargetPrices(cabinetId: CabinetId, rows: TargetPriceRow[]) {

@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { getTargetPriceRefreshCooldown, listTargetPrices, releaseTargetPriceRefresh, reserveTargetPriceRefresh, saveTargetPrices, type TargetPriceCompetitor, type TargetPriceRow } from "@/db/target-prices";
 import { cabinetToken, getAdminCabinet, getAdminSession } from "@/lib/admin-auth";
-import { refreshOzonTargetPrices } from "@/lib/ozon-target-prices";
+import { normalizeOzonProductUrl, refreshOzonCompetitorQuote, refreshOzonTargetPrices } from "@/lib/ozon-target-prices";
 import { refreshYandexTargetPrices } from "@/lib/yandex-target-prices";
 
 export const dynamic = "force-dynamic";
@@ -124,16 +124,24 @@ export async function GET(request: Request) {
 export async function POST(request: Request) {
   const session = await getAdminSession(request);
   if (!session) return NextResponse.json({ error: "Требуется вход администратора" }, { status: 401, headers: { "Cache-Control": "no-store" } });
-  const body = await request.json().catch(() => null) as { action?: unknown; sku?: unknown; nmId?: unknown; competitorNmId?: unknown; competitorPrice?: unknown } | null;
-  if (body?.action === "add-competitor" || body?.action === "remove-competitor" || body?.action === "set-competitor-price") {
+  const body = await request.json().catch(() => null) as { action?: unknown; sku?: unknown; nmId?: unknown; competitorNmId?: unknown; competitorUrl?: unknown; competitorPrice?: unknown } | null;
+  if (body?.action === "add-competitor" || body?.action === "remove-competitor" || body?.action === "set-competitor-price" || body?.action === "refresh-competitor") {
     if (session.role !== "owner") return NextResponse.json({ error: "Менять список конкурентов может только владелец кабинета" }, { status: 403, headers: { "Cache-Control": "no-store" } });
     const rows = await listTargetPrices(session.cabinetId);
     const row = findTargetPriceRow(rows, body.sku, body.nmId);
     if (!row) return NextResponse.json({ error: "Товар для изменения конкурентов не найден" }, { status: 404, headers: { "Cache-Control": "no-store" } });
-    const competitorNmId = Number(body.competitorNmId);
+    const ozonCompetitor = session.cabinetId === "ozon" ? normalizeOzonProductUrl(body.competitorUrl) : null;
+    const competitorNmId = ozonCompetitor?.id ?? Number(body.competitorNmId);
     if (!Number.isInteger(competitorNmId) || competitorNmId <= 0 || competitorNmId === row.nmId) return NextResponse.json({ error: session.cabinetId === "ozon" ? "Укажите корректный ID товара Ozon конкурента" : session.cabinetId === "yandex" ? "Укажите корректный ID карточки Яндекс Маркета" : "Укажите корректный артикул WB конкурента" }, { status: 400, headers: { "Cache-Control": "no-store" } });
     let competitors = row.competitors;
-    if (body.action === "remove-competitor") {
+    if (body.action === "refresh-competitor") {
+      if (session.cabinetId !== "ozon") return NextResponse.json({ error: "Точечное обновление по ссылке доступно для Ozon" }, { status: 400, headers: { "Cache-Control": "no-store" } });
+      const existing = competitors.find((competitor) => competitor.nmId === competitorNmId);
+      if (!existing) return NextResponse.json({ error: "Сначала добавьте карточку конкурента в сравнение" }, { status: 404, headers: { "Cache-Control": "no-store" } });
+      const refreshedAt = new Date().toISOString();
+      const updated = await refreshOzonCompetitorQuote(existing, refreshedAt);
+      competitors = competitors.map((competitor) => competitor.nmId === competitorNmId ? updated : competitor);
+    } else if (body.action === "remove-competitor") {
       competitors = competitors.filter((competitor) => competitor.nmId !== competitorNmId);
     } else if (body.action === "set-competitor-price") {
       const competitorPrice = typeof body.competitorPrice === "string"
@@ -158,11 +166,12 @@ export async function POST(request: Request) {
     } else if (!competitors.some((competitor) => competitor.nmId === competitorNmId)) {
       competitors = [...competitors, {
         nmId: competitorNmId,
+        url: ozonCompetitor?.url ?? null,
         price: null,
         source: "выбран вручную",
         name: null,
         updatedAt: null,
-        error: session.cabinetId === "ozon" ? "Укажите цену вручную: Ozon Seller не выдаёт цены чужих карточек." : "Цена появится после обновления цен.",
+        error: session.cabinetId === "ozon" ? "Цена появится после обычного обновления цен." : "Цена появится после обновления цен.",
       }];
     }
     const updatedRows = rows.map((item) => item.sku === row.sku && item.nmId === row.nmId

@@ -3,6 +3,7 @@
 
 export type TargetPriceCompetitor = {
   nmId: number;
+  url?: string | null;
   price: number;
   source: string | null;
 };
