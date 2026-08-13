@@ -89,10 +89,20 @@ test("в Ozon цену чужой карточки можно зафиксиро
 
   assert.match(page, /Цена, ₽/);
   assert.match(page, /Сохранить/);
-  assert.match(page, /Она сразу пойдёт в расчёт таргета/);
+  assert.match(page, /она сразу пойдёт в расчёт таргета/);
   assert.match(route, /введено вручную/);
   assert.match(route, /Укажите корректную цену конкурента в рублях/);
-  assert.match(ozon, /Ozon Seller не выдаёт цены чужих карточек/);
+  assert.match(ozon, /цену вручную/);
+});
+
+test("Ozon подтягивает минимальную цену аналогов из ценового индекса без стратегии", async () => {
+  const ozon = await readFile(new URL("lib/ozon-target-prices.ts", root), "utf8");
+
+  assert.match(ozon, /\/v5\/product\/info\/prices/);
+  assert.match(ozon, /ozon_index_data/);
+  assert.match(ozon, /minimal_price/);
+  assert.match(ozon, /Ozon · ценовой индекс/);
+  assert.doesNotMatch(ozon, /pricing-strategy/);
 });
 
 test("цены обновляются вручную для владельца и гостя, без пятиминутного ограничения", async () => {
