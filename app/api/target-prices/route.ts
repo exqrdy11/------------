@@ -167,16 +167,26 @@ export async function POST(request: Request) {
           error: null,
         }
         : competitor);
-    } else if (!competitors.some((competitor) => competitor.nmId === competitorNmId)) {
-      competitors = [...competitors, {
-        nmId: competitorNmId,
-        url: ozonCompetitor?.url ?? yandexCompetitor?.url ?? null,
-        price: null,
-        source: "выбран вручную",
-        name: null,
-        updatedAt: null,
-        error: session.cabinetId === "ozon" || session.cabinetId === "yandex" ? "Цена появится после обычного обновления цен." : "Цена появится после обновления цен.",
-      }];
+    } else if (body.action === "add-competitor") {
+      const suppliedUrl = ozonCompetitor?.url ?? yandexCompetitor?.url ?? null;
+      const existing = competitors.find((competitor) => competitor.nmId === competitorNmId);
+      if (existing) {
+        // A link can be corrected without removing the competitor and losing
+        // its last known price. This also upgrades old ID-only entries.
+        competitors = competitors.map((competitor) => competitor.nmId === competitorNmId
+          ? { ...competitor, url: suppliedUrl ?? competitor.url, error: suppliedUrl ? "Ссылка обновлена. Нажмите «Обновить цену»." : competitor.error }
+          : competitor);
+      } else {
+        competitors = [...competitors, {
+          nmId: competitorNmId,
+          url: suppliedUrl,
+          price: null,
+          source: "выбран вручную",
+          name: null,
+          updatedAt: null,
+          error: session.cabinetId === "ozon" || session.cabinetId === "yandex" ? "Цена появится после обычного обновления цен." : "Цена появится после обновления цен.",
+        }];
+      }
     }
     const updatedRows = rows.map((item) => item.sku === row.sku && item.nmId === row.nmId
       ? {

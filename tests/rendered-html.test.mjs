@@ -199,8 +199,11 @@ test("цены конкурентов Яндекс Маркета обновля
   assert.match(page, /сохранит последнюю удачную/);
   assert.match(route, /normalizeYandexMarketProductUrl/);
   assert.match(route, /refreshYandexMarketCompetitorQuote/);
+  assert.match(route, /Ссылка обновлена/);
   assert.match(storage, /market\.yandex\.ru\/product\/\$\{competitor\.nmId\}/);
   assert.match(publicPrices, /market\\\.yandex\\\.ru/);
+  assert.match(publicPrices, /card\\\/\[\^\/\]\+/);
+  assert.match(publicPrices, /"actualPrice"/);
   assert.match(publicPrices, /application\\\/ld\\\+json/);
   assert.match(publicPrices, /Сохранили последнюю цену/);
 });

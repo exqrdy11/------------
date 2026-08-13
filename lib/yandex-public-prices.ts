@@ -3,6 +3,7 @@ import type { TargetPriceCompetitor } from "@/db/target-prices";
 const YANDEX_MARKET_PUBLIC_CARD_TIMEOUT_MS = 12_000;
 const YANDEX_MARKET_PUBLIC_CARD_REQUEST_PAUSE_MS = 700;
 const MAX_YANDEX_MARKET_PUBLIC_COMPETITOR_REQUESTS_PER_REFRESH = 12;
+const YANDEX_MARKET_BROWSER_USER_AGENT = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36";
 
 type PublicCardQuote = { price: number | null; name: string | null; error: string | null };
 
@@ -55,13 +56,15 @@ export function normalizeYandexMarketProductUrl(value: unknown) {
   try {
     const parsed = new URL(value.trim());
     if (!/(^|\.)market\.yandex\.ru$/i.test(parsed.hostname)) return null;
-    const match = parsed.pathname.match(/\/(?:product--[^/]+|product)\/(\d+)(?:\/|$)/i);
+    const match = parsed.pathname.match(/\/(?:product--[^/]+|product|card\/[^/]+)\/(\d+)(?:\/|$)/i);
     if (!match) return null;
     const id = Number(match[1]);
     if (!Number.isInteger(id) || id <= 0) return null;
     return {
       id,
-      url: `${parsed.origin}${parsed.pathname}${parsed.search}`,
+      // Tracking arguments are unnecessary for the product itself and often
+      // expire. Only the card path identifies the competitor.
+      url: `${parsed.origin}${parsed.pathname}`,
     };
   } catch {
     return null;
@@ -86,6 +89,11 @@ export function parseYandexMarketPublicCard(html: string): PublicCardQuote {
     html.match(/<meta[^>]+(?:property|itemprop)=["'](?:product:price:amount|price)["'][^>]+content=["']([^"']+)["']/i)?.[1],
     html.match(/<meta[^>]+content=["']([^"']+)["'][^>]+(?:property|itemprop)=["'](?:product:price:amount|price)["']/i)?.[1],
   );
+  // Current product pages render their price into the page-state payload
+  // instead of JSON-LD. `actualPrice` is the visible storefront price (with
+  // the active Yandex promotion, if one applies).
+  const pageStatePrice = parsePrice(html.match(/"actualPrice"\s*:\s*\{\s*"amount"\s*:\s*\{\s*"intPart"\s*:\s*"([^"}]+)"/i)?.[1]);
+  if (pageStatePrice !== null) return { price: pageStatePrice, name: title, error: null };
   const directPrice = parsePrice(metaPrice);
   if (directPrice !== null) return { price: directPrice, name: title, error: null };
   return { price: null, name: title, error: "Яндекс Маркет не отдал цену этой карточки. Сохранили последнюю цену." };
@@ -96,7 +104,7 @@ export async function fetchPublicYandexMarketCard(url: string): Promise<PublicCa
   if (!normalized) return { price: null, name: null, error: "Ссылка конкурента Яндекс Маркета некорректна." };
   try {
     const response = await fetch(normalized.url, {
-      headers: { Accept: "text/html,application/xhtml+xml", "Accept-Language": "ru-RU,ru;q=0.9", "User-Agent": "SkladnoPriceMonitor/1.0" },
+      headers: { Accept: "text/html,application/xhtml+xml", "Accept-Language": "ru-RU,ru;q=0.9", "User-Agent": YANDEX_MARKET_BROWSER_USER_AGENT },
       cache: "no-store",
       redirect: "follow",
       signal: AbortSignal.timeout(YANDEX_MARKET_PUBLIC_CARD_TIMEOUT_MS),
@@ -109,7 +117,11 @@ export async function fetchPublicYandexMarketCard(url: string): Promise<PublicCa
       };
     }
     const html = await response.text();
-    if (/smartcaptcha|showcaptcha|captcha/i.test(html)) return { price: null, name: null, error: "Яндекс Маркет запросил проверку карточки. Сохранили последнюю цену." };
+    // Product pages include a dormant CaptchaService component, so checking
+    // for the word "captcha" alone wrongly rejects perfectly normal cards.
+    // Treat it as a block only when the expected product payload is absent.
+    const hasProductPayload = /"marketSku"\s*:\s*"\d+"|"actualPrice"\s*:/i.test(html);
+    if (!hasProductPayload && /smartcaptcha|showcaptcha|captcha/i.test(html)) return { price: null, name: null, error: "Яндекс Маркет запросил проверку карточки. Сохранили последнюю цену." };
     return parseYandexMarketPublicCard(html);
   } catch {
     return { price: null, name: null, error: "Не удалось связаться с публичной витриной Яндекс Маркета. Сохранили последнюю цену." };
