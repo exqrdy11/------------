@@ -166,15 +166,22 @@ test("Яндекс Маркет имеет изолированный кабин
 });
 
 test("таргет Яндекс Маркета не наследует таблицу WB и обновляет только свои цены", async () => {
-  const [storage, route, refresh] = await Promise.all([
+  const [storage, route, refresh, inventory, catalog] = await Promise.all([
     readFile(new URL("db/target-prices.ts", root), "utf8"),
     readFile(new URL("app/api/target-prices/route.ts", root), "utf8"),
     readFile(new URL("lib/yandex-target-prices.ts", root), "utf8"),
+    readFile(new URL("app/api/yandex/inventory/route.ts", root), "utf8"),
+    readFile(new URL("lib/yandex-catalog.ts", root), "utf8"),
   ]);
 
   assert.match(storage, /cabinetId === "yandex"\s*\? \[\]/);
   assert.match(route, /session\.cabinetId === "yandex"/);
   assert.match(route, /refreshYandexTargetPrices/);
   assert.match(refresh, /\/v2\/campaigns\/\$\{campaignId\}\/offer-prices/);
+  assert.match(refresh, /loadYandexSupplementOffers/);
+  assert.match(inventory, /loadYandexSupplementOffers/);
+  assert.match(catalog, /\/v2\/businesses\/\$\{businessId\}\/offer-mappings/);
+  assert.match(catalog, /бад/);
+  assert.match(catalog, /Product titles are not a/);
   assert.match(refresh, /explicitly manual until a legal, dedicated market-data source/);
 });

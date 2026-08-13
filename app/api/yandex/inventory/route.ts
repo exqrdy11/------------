@@ -3,6 +3,7 @@ import { emptyFfBatches, emptyFfExpiry, emptyFfStock, listFfStocks, listFfWareho
 import { fbsHandoverMetrics, recordFbsHandoverObservations, type HandoverMetrics } from "@/db/fbs-handover-metrics";
 import { getInventoryRefreshCooldown, loadInventorySnapshot, releaseInventoryRefresh, reserveInventoryRefresh, saveInventorySnapshot } from "@/db/inventory-snapshots";
 import { cabinetSummary, getAdminCabinet, type CabinetSummary } from "@/lib/admin-auth";
+import { loadYandexSupplementOffers } from "@/lib/yandex-catalog";
 import { isYandexMarketConfigured, yandexMarketErrorMessage, yandexMarketFetch, type YandexMarketApiError } from "@/lib/yandex-market-api";
 
 export const dynamic = "force-dynamic";
@@ -131,7 +132,7 @@ async function getOrders(businessId: number, signal: AbortSignal) {
   return orders;
 }
 
-function createRow(rowMap: Map<string, DashboardRow>, input: { sku: string; name?: string }) {
+function createRow(rowMap: Map<string, DashboardRow>, input: { sku: string; name?: string; category?: string }) {
   const sku = input.sku.trim() || "Яндекс Маркет";
   const key = `yandex:${sku.toLocaleUpperCase("ru-RU")}`;
   const current = rowMap.get(key);
@@ -142,7 +143,7 @@ function createRow(rowMap: Map<string, DashboardRow>, input: { sku: string; name
     sku,
     nmId: null,
     name: input.name?.trim() || sku,
-    category: "Яндекс Маркет",
+    category: input.category?.trim() || "Яндекс Маркет",
     color: palette[Math.abs(seed) % palette.length],
     warehouses: {}, ffStock: emptyFfStock(), ffExpiry: emptyFfExpiry(), ffBatches: emptyFfBatches(), fbsStockByWbWarehouse: emptyBreakdown(),
     fbs: 0, fbsByLocation: emptyBreakdown(), fbsByWbWarehouse: emptyBreakdown(), sales7d: 0, sales7dByLocation: emptyBreakdown(), sales7dByWbWarehouse: emptyBreakdown(),
@@ -213,20 +214,30 @@ async function refreshYandexInventory(signal: AbortSignal): Promise<YandexPayloa
     defaultName: "Склад Яндекс Маркета FBS",
   });
   const businessId = Number(process.env.YANDEX_MARKET_BUSINESS_ID?.trim());
+  if (!Number.isInteger(businessId) || businessId <= 0) {
+    const error = new Error("Business ID Яндекс Маркета не настроен") as YandexMarketApiError;
+    error.status = 503;
+    throw error;
+  }
   const stockCampaigns = [...fbsCampaigns, ...fbyCampaigns];
-  const [stockResults, ordersResult] = await Promise.all([
+  const [supplementOffers, stockResults, ordersResult] = await Promise.all([
+    loadYandexSupplementOffers(businessId, signal),
     Promise.all(stockCampaigns.map(async (campaign) => ({ campaign, warehouses: await getCampaignStocks(campaign.id, signal) }))),
-    Number.isInteger(businessId) && businessId > 0 ? getOrders(businessId, signal) : Promise.resolve([]),
+    getOrders(businessId, signal),
   ]);
+  const supplementsBySku = new Map(supplementOffers.map((offer) => [offer.sku, offer]));
   const rowMap = new Map<string, DashboardRow>();
+  for (const offer of supplementOffers) createRow(rowMap, { sku: offer.sku, name: offer.name, category: offer.category });
   for (const { campaign, warehouses } of stockResults) {
     const fbs = campaign.placementType?.toUpperCase() === "FBS";
     for (const warehouse of warehouses) {
       for (const offer of warehouse.offers ?? []) {
         const sku = offer.offerId?.trim();
         if (!sku) continue;
+        const catalogOffer = supplementsBySku.get(sku);
+        if (!catalogOffer) continue;
         const quantity = physicalStock(offer.stocks ?? []);
-        const row = createRow(rowMap, { sku });
+        const row = createRow(rowMap, { sku, name: catalogOffer.name, category: catalogOffer.category });
         if (fbs) {
           // For FBS the campaign represents the seller's fulfilment location.
           // Market can also return a technical return warehouse in this response,
@@ -258,8 +269,10 @@ async function refreshYandexInventory(signal: AbortSignal): Promise<YandexPayloa
     for (const item of order.items ?? []) {
       const sku = item.offerId?.trim() || (item.id ? `YM ${item.id}` : "");
       if (!sku) continue;
+      const catalogOffer = supplementsBySku.get(sku);
+      if (!catalogOffer) continue;
       const quantity = Math.max(1, Math.floor(Number(item.count) || 1));
-      const row = createRow(rowMap, { sku, name: item.offerName });
+      const row = createRow(rowMap, { sku, name: catalogOffer.name, category: catalogOffer.category });
       if (item.offerName?.trim()) row.name = item.offerName.trim();
       if (before) { row.fbs += quantity; increment(row.fbsByWbWarehouse, String(campaignId), quantity); }
       if (handedOver && !delivered.has(status)) { row.receiving += quantity; increment(row.receivingByWbWarehouse, String(campaignId), quantity); }
@@ -304,7 +317,7 @@ async function refreshYandexInventory(signal: AbortSignal): Promise<YandexPayloa
       risk: rows.filter((row) => row.status !== "В норме").length,
       activeSupplies: new Set(ordersResult.filter((order) => fbsCampaignIds.has(Number(order.campaignId)) && (beforeHandover.has((order.status ?? "").toUpperCase()) || handedOver.has((order.status ?? "").toUpperCase()))).map((order) => order.orderId)).size,
     },
-    warnings: ["Яндекс Маркет: аналитика FBS показывает созданные заказы. Факт выкупа FBY подключается отдельным финансовым отчётом."],
+    warnings: ["Яндекс Маркет: показаны только товары с категорией или тегом БАД / БАДы из каталога этого кабинета.", "Яндекс Маркет: аналитика FBS показывает созданные заказы. Факт выкупа FBY подключается отдельным финансовым отчётом."],
     retryAt: null,
     updatedAt: new Date().toISOString(),
     handoverTiming,

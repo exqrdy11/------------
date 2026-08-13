@@ -1,4 +1,5 @@
 import type { TargetPriceRow } from "@/db/target-prices";
+import { loadYandexSupplementOffers } from "@/lib/yandex-catalog";
 import { yandexMarketFetch, type YandexMarketApiError } from "@/lib/yandex-market-api";
 
 type YandexCampaign = {
@@ -75,6 +76,15 @@ function warningFor(error: unknown) {
 export async function refreshYandexTargetPrices(previousRows: TargetPriceRow[]) {
   const warnings: string[] = [];
   const prices = new Map<string, { currentPrice: number | null; priceBeforeSpp: number | null; updatedAt: string | null }>();
+  const businessId = Number(process.env.YANDEX_MARKET_BUSINESS_ID?.trim());
+  if (!Number.isInteger(businessId) || businessId <= 0) return { rows: previousRows, updatedAt: null, warnings: ["Business ID Яндекс Маркета не настроен на сервере."] };
+  let supplements: Awaited<ReturnType<typeof loadYandexSupplementOffers>> = [];
+  try {
+    supplements = await loadYandexSupplementOffers(businessId);
+  } catch (error) {
+    return { rows: previousRows, updatedAt: null, warnings: [warningFor(error)] };
+  }
+  const supplementsBySku = new Map(supplements.map((offer) => [offer.sku, offer]));
   let activeCampaigns: YandexCampaign[] = [];
   try {
     activeCampaigns = (await campaigns()).filter((campaign) => {
@@ -93,7 +103,7 @@ export async function refreshYandexTargetPrices(previousRows: TargetPriceRow[]) 
     }
     for (const offer of batch.value) {
       const sku = offer.offerId?.trim();
-      if (!sku) continue;
+      if (!sku || !supplementsBySku.has(sku)) continue;
       const next = {
         currentPrice: asPrice(offer.price?.value),
         priceBeforeSpp: asPrice(offer.price?.discountBase) ?? asPrice(offer.price?.value),
@@ -106,28 +116,33 @@ export async function refreshYandexTargetPrices(previousRows: TargetPriceRow[]) 
 
   const refreshedAt = new Date().toISOString();
   const previousBySku = new Map(previousRows.map((row) => [row.sku, row]));
-  const rows = [...prices.entries()].map<TargetPriceRow>(([sku, price]) => {
+  // The catalogue is authoritative: a БАД stays visible even when its price
+  // is temporarily absent from one of the campaigns.
+  const rows = supplements.map<TargetPriceRow>((catalogOffer) => {
+    const sku = catalogOffer.sku;
+    const price = prices.get(sku);
     const old = previousBySku.get(sku);
     return {
       sku,
-      nmId: null,
+      nmId: catalogOffer.marketSku,
       orders: old?.orders ?? 0,
-      priceBeforeSpp: price.priceBeforeSpp ?? old?.priceBeforeSpp ?? null,
+      priceBeforeSpp: price?.priceBeforeSpp ?? old?.priceBeforeSpp ?? null,
       sppPercent: null,
-      currentPrice: price.currentPrice ?? old?.currentPrice ?? null,
-      updatedAt: price.updatedAt ?? old?.updatedAt ?? refreshedAt,
-      searchQuery: old?.searchQuery ?? sku,
+      currentPrice: price?.currentPrice ?? old?.currentPrice ?? null,
+      updatedAt: price?.updatedAt ?? old?.updatedAt ?? refreshedAt,
+      searchQuery: old?.searchQuery ?? catalogOffer.name,
       competitors: old?.competitors ?? [],
       candidateNmId: old?.candidateNmId ?? null,
       score: old?.score ?? null,
-      reason: "Своя цена обновлена из Яндекс Маркета. Конкурентов можно добавить вручную; их цены не подменяются данными другого маркетплейса.",
-      sourceStatus: price.currentPrice === null ? "цена не получена" : "цена Яндекс Маркета",
+      reason: `Своя цена обновлена из Яндекс Маркета. ${catalogOffer.category}. Конкурентов можно добавить вручную; их цены не подменяются данными другого маркетплейса.`,
+      sourceStatus: price?.currentPrice === null || !price ? "цена не получена" : "цена Яндекс Маркета",
       refreshedAt,
-      refreshError: price.currentPrice === null ? "Яндекс Маркет не отдал цену этой карточки." : null,
+      refreshError: price?.currentPrice === null || !price ? "Яндекс Маркет не отдал цену этой карточки." : null,
     };
   }).sort((left, right) => left.sku.localeCompare(right.sku, "ru"));
 
-  // Do not delete manually curated rows when the API temporarily omits an offer.
-  for (const old of previousRows) if (!prices.has(old.sku)) rows.push({ ...old, refreshedAt, refreshError: warnings[0] ?? "Карточка временно не пришла в ответе Яндекс Маркета." });
+  // Preserve a last known price only for a real current БАД offer. This keeps
+  // transient price omissions safe without reintroducing rows from another cabinet.
+  for (const old of previousRows) if (!prices.has(old.sku) && supplementsBySku.has(old.sku)) rows.push({ ...old, nmId: supplementsBySku.get(old.sku)?.marketSku ?? old.nmId, refreshedAt, refreshError: warnings[0] ?? "Цена временно не пришла в ответе Яндекс Маркета." });
   return { rows, updatedAt: refreshedAt, warnings: [...new Set(warnings)] };
 }
