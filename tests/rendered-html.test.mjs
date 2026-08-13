@@ -184,5 +184,23 @@ test("таргет Яндекс Маркета не наследует табл�
   assert.match(catalog, /\/v2\/businesses\/\$\{businessId\}\/offer-mappings/);
   assert.match(catalog, /бад/);
   assert.match(catalog, /Product titles are not a/);
-  assert.match(refresh, /explicitly manual until a legal, dedicated market-data source/);
+  assert.match(refresh, /refreshYandexMarketCompetitorQuotes/);
+});
+
+test("цены конкурентов Яндекс Маркета обновляются по сохранённым публичным ссылкам", async () => {
+  const [page, route, storage, publicPrices] = await Promise.all([
+    readFile(new URL("app/page.tsx", root), "utf8"),
+    readFile(new URL("app/api/target-prices/route.ts", root), "utf8"),
+    readFile(new URL("db/target-prices.ts", root), "utf8"),
+    readFile(new URL("lib/yandex-public-prices.ts", root), "utf8"),
+  ]);
+
+  assert.match(page, /Ссылка конкурента Яндекс Маркета/);
+  assert.match(page, /сохранит последнюю удачную/);
+  assert.match(route, /normalizeYandexMarketProductUrl/);
+  assert.match(route, /refreshYandexMarketCompetitorQuote/);
+  assert.match(storage, /market\.yandex\.ru\/product\/\$\{competitor\.nmId\}/);
+  assert.match(publicPrices, /market\\\.yandex\\\.ru/);
+  assert.match(publicPrices, /application\\\/ld\\\+json/);
+  assert.match(publicPrices, /Сохранили последнюю цену/);
 });

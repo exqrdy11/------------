@@ -3,6 +3,7 @@ import { getTargetPriceRefreshCooldown, listTargetPrices, releaseTargetPriceRefr
 import { cabinetToken, getAdminCabinet, getAdminSession } from "@/lib/admin-auth";
 import { normalizeOzonProductUrl, refreshOzonCompetitorQuote, refreshOzonTargetPrices } from "@/lib/ozon-target-prices";
 import { refreshYandexTargetPrices } from "@/lib/yandex-target-prices";
+import { normalizeYandexMarketProductUrl, refreshYandexMarketCompetitorQuote } from "@/lib/yandex-public-prices";
 
 export const dynamic = "force-dynamic";
 
@@ -131,15 +132,18 @@ export async function POST(request: Request) {
     const row = findTargetPriceRow(rows, body.sku, body.nmId);
     if (!row) return NextResponse.json({ error: "Товар для изменения конкурентов не найден" }, { status: 404, headers: { "Cache-Control": "no-store" } });
     const ozonCompetitor = session.cabinetId === "ozon" ? normalizeOzonProductUrl(body.competitorUrl) : null;
-    const competitorNmId = ozonCompetitor?.id ?? Number(body.competitorNmId);
+    const yandexCompetitor = session.cabinetId === "yandex" ? normalizeYandexMarketProductUrl(body.competitorUrl) : null;
+    const competitorNmId = ozonCompetitor?.id ?? yandexCompetitor?.id ?? Number(body.competitorNmId);
     if (!Number.isInteger(competitorNmId) || competitorNmId <= 0 || competitorNmId === row.nmId) return NextResponse.json({ error: session.cabinetId === "ozon" ? "Укажите корректный ID товара Ozon конкурента" : session.cabinetId === "yandex" ? "Укажите корректный ID карточки Яндекс Маркета" : "Укажите корректный артикул WB конкурента" }, { status: 400, headers: { "Cache-Control": "no-store" } });
     let competitors = row.competitors;
     if (body.action === "refresh-competitor") {
-      if (session.cabinetId !== "ozon") return NextResponse.json({ error: "Точечное обновление по ссылке доступно для Ozon" }, { status: 400, headers: { "Cache-Control": "no-store" } });
+      if (session.cabinetId !== "ozon" && session.cabinetId !== "yandex") return NextResponse.json({ error: "Точечное обновление по ссылке доступно для Ozon и Яндекс Маркета" }, { status: 400, headers: { "Cache-Control": "no-store" } });
       const existing = competitors.find((competitor) => competitor.nmId === competitorNmId);
       if (!existing) return NextResponse.json({ error: "Сначала добавьте карточку конкурента в сравнение" }, { status: 404, headers: { "Cache-Control": "no-store" } });
       const refreshedAt = new Date().toISOString();
-      const updated = await refreshOzonCompetitorQuote(existing, refreshedAt);
+      const updated = session.cabinetId === "ozon"
+        ? await refreshOzonCompetitorQuote(existing, refreshedAt)
+        : await refreshYandexMarketCompetitorQuote(existing, refreshedAt);
       competitors = competitors.map((competitor) => competitor.nmId === competitorNmId ? updated : competitor);
     } else if (body.action === "remove-competitor") {
       competitors = competitors.filter((competitor) => competitor.nmId !== competitorNmId);
@@ -166,12 +170,12 @@ export async function POST(request: Request) {
     } else if (!competitors.some((competitor) => competitor.nmId === competitorNmId)) {
       competitors = [...competitors, {
         nmId: competitorNmId,
-        url: ozonCompetitor?.url ?? null,
+        url: ozonCompetitor?.url ?? yandexCompetitor?.url ?? null,
         price: null,
         source: "выбран вручную",
         name: null,
         updatedAt: null,
-        error: session.cabinetId === "ozon" ? "Цена появится после обычного обновления цен." : "Цена появится после обновления цен.",
+        error: session.cabinetId === "ozon" || session.cabinetId === "yandex" ? "Цена появится после обычного обновления цен." : "Цена появится после обновления цен.",
       }];
     }
     const updatedRows = rows.map((item) => item.sku === row.sku && item.nmId === row.nmId

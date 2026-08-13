@@ -1,6 +1,7 @@
 import type { TargetPriceRow } from "@/db/target-prices";
 import { loadYandexSupplementOffers } from "@/lib/yandex-catalog";
 import { yandexMarketFetch, type YandexMarketApiError } from "@/lib/yandex-market-api";
+import { createYandexMarketPublicRefreshQuota, refreshYandexMarketCompetitorQuotes, yandexMarketPublicRefreshLimitWarning } from "@/lib/yandex-public-prices";
 
 type YandexCampaign = {
   id?: number;
@@ -70,8 +71,9 @@ function warningFor(error: unknown) {
 }
 
 /**
- * Seller API provides only the seller's offer prices. Competitor prices remain
- * explicitly manual until a legal, dedicated market-data source is connected.
+ * Seller API supplies the seller's own offer prices. Competitor prices are
+ * separately read from each saved public product-card link and are never
+ * substituted with prices of another marketplace.
  */
 export async function refreshYandexTargetPrices(previousRows: TargetPriceRow[]) {
   const warnings: string[] = [];
@@ -116,13 +118,16 @@ export async function refreshYandexTargetPrices(previousRows: TargetPriceRow[]) 
 
   const refreshedAt = new Date().toISOString();
   const previousBySku = new Map(previousRows.map((row) => [row.sku, row]));
+  const competitorQuota = createYandexMarketPublicRefreshQuota();
   // The catalogue is authoritative: a БАД stays visible even when its price
   // is temporarily absent from one of the campaigns.
-  const rows = supplements.map<TargetPriceRow>((catalogOffer) => {
+  const rows: TargetPriceRow[] = [];
+  for (const catalogOffer of supplements) {
     const sku = catalogOffer.sku;
     const price = prices.get(sku);
     const old = previousBySku.get(sku);
-    return {
+    const competitors = await refreshYandexMarketCompetitorQuotes(old?.competitors ?? [], refreshedAt, competitorQuota);
+    rows.push({
       sku,
       nmId: catalogOffer.marketSku,
       orders: old?.orders ?? 0,
@@ -131,18 +136,20 @@ export async function refreshYandexTargetPrices(previousRows: TargetPriceRow[]) 
       currentPrice: price?.currentPrice ?? old?.currentPrice ?? null,
       updatedAt: price?.updatedAt ?? old?.updatedAt ?? refreshedAt,
       searchQuery: old?.searchQuery ?? catalogOffer.name,
-      competitors: old?.competitors ?? [],
+      competitors,
       candidateNmId: old?.candidateNmId ?? null,
       score: old?.score ?? null,
-      reason: `Своя цена обновлена из Яндекс Маркета. ${catalogOffer.category}. Конкурентов можно добавить вручную; их цены не подменяются данными другого маркетплейса.`,
+      reason: `Своя цена обновлена из Яндекс Маркета. ${catalogOffer.category}. Цены конкурентов обновляются по сохранённым ссылкам публичной витрины Яндекс Маркета.`,
       sourceStatus: price?.currentPrice === null || !price ? "цена не получена" : "цена Яндекс Маркета",
       refreshedAt,
       refreshError: price?.currentPrice === null || !price ? "Яндекс Маркет не отдал цену этой карточки." : null,
-    };
-  }).sort((left, right) => left.sku.localeCompare(right.sku, "ru"));
+    });
+  }
+  rows.sort((left, right) => left.sku.localeCompare(right.sku, "ru"));
 
   // Preserve a last known price only for a real current БАД offer. This keeps
   // transient price omissions safe without reintroducing rows from another cabinet.
   for (const old of previousRows) if (!prices.has(old.sku) && supplementsBySku.has(old.sku)) rows.push({ ...old, nmId: supplementsBySku.get(old.sku)?.marketSku ?? old.nmId, refreshedAt, refreshError: warnings[0] ?? "Цена временно не пришла в ответе Яндекс Маркета." });
-  return { rows, updatedAt: refreshedAt, warnings: [...new Set(warnings)] };
+  const quotaWarning = yandexMarketPublicRefreshLimitWarning(competitorQuota.skipped);
+  return { rows, updatedAt: refreshedAt, warnings: [...new Set([...warnings, ...(quotaWarning ? [quotaWarning] : [])])] };
 }

@@ -208,10 +208,24 @@ export async function listTargetPrices(cabinetId: CabinetId) {
     WHERE cabinet_id = ?
     ORDER BY orders DESC, sku COLLATE NOCASE ASC
   `).bind(cabinetId).all<TargetPriceDbRow>();
-  return (result.results ?? []).map(toTargetPriceRow).map((row) => cabinetId === "ozon" ? {
-    ...row,
-    competitors: row.competitors.map((competitor) => ({ ...competitor, url: competitor.url ?? `https://www.ozon.ru/product/${competitor.nmId}/` })),
-  } : row);
+  return (result.results ?? []).map(toTargetPriceRow).map((row) => {
+    if (cabinetId === "ozon") {
+      return {
+        ...row,
+        competitors: row.competitors.map((competitor) => ({ ...competitor, url: competitor.url ?? `https://www.ozon.ru/product/${competitor.nmId}/` })),
+      };
+    }
+    if (cabinetId === "yandex") {
+      // Older manually selected competitors were stored as an ID only. Give
+      // them a canonical public-card URL so the next manual refresh can try
+      // to read the public price without making the user add the card again.
+      return {
+        ...row,
+        competitors: row.competitors.map((competitor) => ({ ...competitor, url: competitor.url ?? `https://market.yandex.ru/product/${competitor.nmId}` })),
+      };
+    }
+    return row;
+  });
 }
 
 export async function saveTargetPrices(cabinetId: CabinetId, rows: TargetPriceRow[]) {
