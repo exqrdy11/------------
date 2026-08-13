@@ -162,7 +162,7 @@ export async function POST(request: Request) {
         source: "выбран вручную",
         name: null,
         updatedAt: null,
-        error: session.cabinetId === "ozon" ? "Цена этой конкретной карточки не получена. Ориентир рынка Ozon обновляется автоматически; эту цену можно указать вручную." : "Цена появится после обновления цен.",
+        error: session.cabinetId === "ozon" ? "Укажите цену вручную: Ozon Seller не выдаёт цены чужих карточек." : "Цена появится после обновления цен.",
       }];
     }
     const updatedRows = rows.map((item) => item.sku === row.sku && item.nmId === row.nmId
