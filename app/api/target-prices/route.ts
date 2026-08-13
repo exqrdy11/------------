@@ -162,7 +162,9 @@ export async function POST(request: Request) {
         ? {
           ...competitor,
           price: Math.round(competitorPrice * 100) / 100,
-          source: "введено вручную",
+          source: session.cabinetId === "yandex"
+            ? "подтверждённый снимок публичной витрины Яндекс Маркета"
+            : "введено вручную",
           updatedAt,
           error: null,
         }
