@@ -9,6 +9,26 @@ export function ffPlanningRoleCan(role: UserRole | null, operation: FfPlanningOp
   return operation === "write-settings" ? role === "owner" : role === "owner" || role === "viewer";
 }
 
+/**
+ * An inventory snapshot belongs to a planner refresh only when that exact
+ * refresh asked for it and every inventory source completed successfully.
+ * Independent and partial inventory refreshes deliberately clear the marker.
+ */
+export function resolveInventoryPlannerGeneration(input: {
+  requestedGeneration: string | null;
+  snapshotIsComplete: boolean;
+  fallbackGeneration?: string | null;
+  usedFallback?: boolean;
+}) {
+  if (input.usedFallback) {
+    return input.fallbackGeneration && Number.isFinite(Date.parse(input.fallbackGeneration))
+      ? input.fallbackGeneration
+      : null;
+  }
+  if (!input.snapshotIsComplete || !input.requestedGeneration || !Number.isFinite(Date.parse(input.requestedGeneration))) return null;
+  return input.requestedGeneration;
+}
+
 export type PlanningPeriodInput = {
   from: string;
   to: string;

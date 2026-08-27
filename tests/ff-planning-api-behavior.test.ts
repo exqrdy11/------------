@@ -29,6 +29,7 @@ class FakeStatement {
   bind(...values: unknown[]) { return new FakeStatement(this.database, this.sql, values); }
   run() { return this.database.run(this); }
   first<T>() { return this.database.first(this) as Promise<T | null>; }
+  all<T>() { return this.database.all(this) as Promise<{ results: T[] }> ; }
 }
 
 class FakePlanningD1 {
@@ -37,6 +38,8 @@ class FakePlanningD1 {
   failSku: string | null = null;
   failRefreshUpdate = false;
   batches: string[][] = [];
+  afterPlanningSnapshotCapture: (() => void) | null = null;
+  planningSnapshotReads = 0;
 
   constructor(metrics: MetricRow[] = []) {
     this.metrics = structuredClone(metrics);
@@ -105,6 +108,35 @@ class FakePlanningD1 {
     }
     throw new Error(`Unsupported SELECT: ${sql}`);
   }
+
+  async all(statement: FakeStatement) {
+    const sql = statement.sql.replace(/\s+/g, " ").trim();
+    if (!sql.includes("LEFT JOIN ff_planning_refreshes") || !sql.includes("LEFT JOIN ff_daily_metrics")) {
+      throw new Error(`Unsupported ALL: ${sql}`);
+    }
+    this.planningSnapshotReads += 1;
+    const [cabinetId, ...range] = statement.values.map(String);
+    const capturedState = structuredClone(this.refreshes.get(cabinetId) ?? { cooldownUntil: null, updatedAt: null });
+    const capturedMetrics = structuredClone(this.metrics);
+    this.afterPlanningSnapshotCapture?.();
+    const from = sql.includes("m.metric_date >= ?") ? range.shift() ?? null : null;
+    const to = sql.includes("m.metric_date <= ?") ? range.shift() ?? null : null;
+    const rows = capturedMetrics.filter((row) => row.cabinetId === cabinetId
+      && row.updatedAt === capturedState.updatedAt
+      && (!from || row.date >= from)
+      && (!to || row.date <= to));
+    const stateColumns = { cooldown_until: capturedState.cooldownUntil, refresh_updated_at: capturedState.updatedAt };
+    return { results: rows.length ? rows.map((row) => ({
+      ...stateColumns,
+      warehouse_id: row.warehouseId,
+      product_key: row.productKey,
+      nm_id: row.nmId,
+      sku: row.sku,
+      metric_date: row.date,
+      demand: row.demand,
+      sold: row.sold,
+    })) : [{ ...stateColumns, warehouse_id: null, product_key: null, nm_id: null, sku: null, metric_date: null, demand: null, sold: null }] };
+  }
 }
 
 function metric(date: string, sku: string, demand: number): MetricRow {
@@ -145,6 +177,30 @@ test("range replacement commits metrics and refresh timestamp in one batch and r
     ["2026-07-31", "BEFORE", 1], ["2026-08-03", "AFTER", 3], ["2026-08-02", "NEW", 4],
   ]);
   assert.equal(database.refreshes.get("metanutrix")?.updatedAt, "2026-08-27T10:00:00.000Z");
+});
+
+test("planning snapshot reads metrics and generation from one database generation during an overlapping refresh", async () => {
+  assert.equal(typeof planningDb.loadFfPlanningMetricSnapshotInDb, "function");
+  if (typeof planningDb.loadFfPlanningMetricSnapshotInDb !== "function") return;
+  const firstGeneration = "2026-08-27T10:00:00.000Z";
+  const secondGeneration = "2026-08-27T10:01:00.000Z";
+  const database = new FakePlanningD1([{
+    ...metric("2026-08-27", "G1", 1), updatedAt: firstGeneration,
+  }]);
+  database.refreshes.set("metanutrix", { cooldownUntil: "2026-08-27T10:02:00.000Z", updatedAt: firstGeneration });
+  database.afterPlanningSnapshotCapture = () => {
+    database.metrics = [{ ...metric("2026-08-27", "G2", 2), updatedAt: secondGeneration }];
+    database.refreshes.set("metanutrix", { cooldownUntil: "2026-08-27T10:03:00.000Z", updatedAt: secondGeneration });
+  };
+
+  const snapshot = await planningDb.loadFfPlanningMetricSnapshotInDb(database as never, "metanutrix", {
+    from: "2026-08-27", to: "2026-08-27",
+  });
+  assert.equal(database.planningSnapshotReads, 1, "generation and rows must come from one SQL snapshot");
+  assert.equal(snapshot.updatedAt, firstGeneration);
+  assert.equal(snapshot.cooldownUntil, "2026-08-27T10:02:00.000Z");
+  assert.deepEqual(snapshot.daily.map((row) => [row.sku, row.demand]), [["G1", 1]]);
+  assert.equal(database.refreshes.get("metanutrix")?.updatedAt, secondGeneration, "the concurrent refresh completed after the read snapshot was captured");
 });
 
 test("warehouse planning patch preserves omitted metadata and applies explicit values", () => {

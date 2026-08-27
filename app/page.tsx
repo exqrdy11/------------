@@ -95,6 +95,7 @@ type InventoryResponse = {
   retryAt?: string | null;
   handoverTiming?: HandoverMetrics;
   updatedAt?: string;
+  plannerGeneration?: string | null;
   error?: string;
 };
 
@@ -181,32 +182,80 @@ type FfPlannerSnapshot = {
   source: FfPlanningSource;
   warnings: string[];
   updatedAt: string;
+  generation: string;
+  retryAt: string | null;
   inventory: InventoryResponse;
 };
 
-export async function runAtomicFfPlannerRefresh(
+function validSnapshotTimestamp(value: unknown): value is string {
+  return typeof value === "string" && Number.isFinite(Date.parse(value));
+}
+
+function laterPlannerRetryAt(first: string | null | undefined, second: string | null | undefined) {
+  const candidates = [first, second].flatMap((value) => validSnapshotTimestamp(value) ? [{ value, time: Date.parse(value) }] : []);
+  return candidates.sort((left, right) => right.time - left.time)[0]?.value ?? null;
+}
+
+function plannerRefreshError(message: string, retryAt: string | null | undefined, cause?: unknown) {
+  const error = cause instanceof Error ? cause : new Error(message);
+  if (!(cause instanceof Error)) error.message = message;
+  const causeRetryAt = cause && typeof cause === "object" && "retryAt" in cause
+    ? (cause as { retryAt?: string | null }).retryAt
+    : null;
+  return Object.assign(error, { retryAt: laterPlannerRetryAt(retryAt, causeRetryAt) });
+}
+
+export async function runCoherentFfPlannerRefresh(
   fetchPlanning: () => Promise<FfPlanningResponse>,
-  fetchInventory: () => Promise<InventoryResponse>,
+  fetchInventory: (generation: string) => Promise<InventoryResponse>,
   commit: (snapshot: FfPlannerSnapshot) => void,
 ) {
-  const [planning, inventory] = await Promise.all([fetchPlanning(), fetchInventory()]);
+  // Planning is deliberately first. If it fails, inventory is not refreshed
+  // independently and the previous coherent UI snapshot stays untouched.
+  const planning = await fetchPlanning();
   if (!Array.isArray(planning.warehouses) || !Array.isArray(planning.daily) || !planning.source) {
-    throw new Error("Источник спроса вернул неполный снимок");
+    throw plannerRefreshError("Источник спроса вернул неполный снимок", planning.retryAt);
   }
-  if (!Array.isArray(inventory.rows)) throw new Error("Источник остатков вернул неполный снимок");
-  const sourceUpdatedAt = [planning.updatedAt, inventory.updatedAt]
-    .flatMap((value) => typeof value === "string" && Number.isFinite(Date.parse(value)) ? [Date.parse(value)] : []);
+  if (!validSnapshotTimestamp(planning.updatedAt)) {
+    throw plannerRefreshError("Снимок спроса ещё не создан", planning.retryAt);
+  }
+
+  let inventory: InventoryResponse;
+  try {
+    inventory = await fetchInventory(planning.updatedAt);
+    if (!Array.isArray(inventory.rows)) throw new Error("Источник остатков вернул неполный снимок");
+    if (!validSnapshotTimestamp(inventory.updatedAt)) throw new Error("Источник остатков не сообщил время снимка");
+    if (inventory.plannerGeneration !== planning.updatedAt) {
+      throw new Error("Поколение остатков не совпадает со снимком спроса");
+    }
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Источник остатков не обновился";
+    throw plannerRefreshError(message, planning.retryAt, error);
+  }
   const snapshot: FfPlannerSnapshot = {
     warehouses: planning.warehouses,
     daily: planning.daily,
     rows: inventory.rows,
     source: planning.source,
     warnings: [...new Set([...(planning.warnings ?? []), ...(inventory.warnings ?? [])])],
-    updatedAt: sourceUpdatedAt.length ? new Date(Math.min(...sourceUpdatedAt)).toISOString() : new Date().toISOString(),
+    updatedAt: new Date(Math.min(Date.parse(planning.updatedAt), Date.parse(inventory.updatedAt))).toISOString(),
+    generation: planning.updatedAt,
+    retryAt: planning.retryAt ?? null,
     inventory,
   };
   commit(snapshot);
   return snapshot;
+}
+
+export function ffPlanningSupported(marketplace: CabinetSummary["marketplace"] | null | undefined) {
+  return marketplace === "wb";
+}
+
+export function FfPlannerMarketplaceUnavailable({ marketplaceName }: { marketplaceName: string }) {
+  return <section className="planner-panel" aria-label="План поставок недоступен">
+    <div className="section-heading planner-heading"><div><span className="section-kicker">ПЛАН ПОСТАВОК · WB</span><h2>План поставок доступен только для Wildberries</h2><p className="section-note">Для {marketplaceName} ещё не подключены согласованные источники спроса и остатков. Данные Wildberries сюда не подставляются.</p></div></div>
+    <div className="empty-state planner-snapshot-state" role="status"><strong>{marketplaceName}: расчёт пока недоступен</strong><span>После подключения источников этого маркетплейса появится отдельный план без смешивания данных.</span></div>
+  </section>;
 }
 
 const defaultManualWarehouses: ManualWarehouse[] = [
@@ -1042,13 +1091,20 @@ export default function Home() {
 
   const requestFfPlanning = useCallback(async (refresh: boolean) => {
     const requestVersion = ++plannerRequestVersionRef.current;
+    if (!ffPlanningSupported(cabinet?.marketplace)) {
+      setPlannerSnapshot(null);
+      setPlannerError(null);
+      setPlannerLoading(false);
+      setPlannerRefreshing(false);
+      return;
+    }
     setPlannerRefreshing(refresh);
     setPlannerLoading(!refresh);
     setPlannerError(null);
     const range = { from: isoDate(89), to: isoDate(0) };
     const withRetryAt = (message: string, retryAt?: string | null) => Object.assign(new Error(message), { retryAt: retryAt ?? null });
     try {
-      await runAtomicFfPlannerRefresh(async () => {
+      const snapshot = await runCoherentFfPlannerRefresh(async () => {
         const response = await fetch(refresh ? "/api/ff-planning" : `/api/ff-planning?${new URLSearchParams(range)}`, refresh ? {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -1062,17 +1118,20 @@ export default function Home() {
         }
         if (!response.ok || data.error) throw withRetryAt(data.error || data.warnings?.join(" · ") || "Не удалось загрузить спрос и продажи", data.retryAt);
         return data;
-      }, async () => {
-        const targetMarketplace = cabinet?.marketplace;
-        const inventoryEndpoint = targetMarketplace === "ozon" ? "/api/ozon/inventory" : targetMarketplace === "yandex" ? "/api/yandex/inventory" : "/api/inventory";
-        const response = await fetch(`${inventoryEndpoint}${refresh ? "?refresh=1" : ""}`, { cache: "no-store" });
+      }, async (generation) => {
+        const inventoryParams = new URLSearchParams();
+        if (refresh) {
+          inventoryParams.set("refresh", "1");
+          inventoryParams.set("plannerGeneration", generation);
+        }
+        const inventoryUrl = inventoryParams.size ? `/api/inventory?${inventoryParams}` : "/api/inventory";
+        const response = await fetch(inventoryUrl, { cache: "no-store" });
         const data = await response.json() as InventoryResponse;
         if (response.status === 401) {
           setAuthState("unauthenticated");
           throw withRetryAt("Сессия истекла", data.retryAt);
         }
-        const targetName = targetMarketplace === "ozon" ? "Ozon" : targetMarketplace === "yandex" ? "Яндекс Маркет" : "Wildberries";
-        if (!response.ok || data.error) throw withRetryAt(data.error || `Не удалось загрузить остатки ${targetName}`, data.retryAt);
+        if (!response.ok || data.error) throw withRetryAt(data.error || "Не удалось загрузить остатки Wildberries", data.retryAt);
         return data;
       }, (snapshot) => {
         if (requestVersion !== plannerRequestVersionRef.current) return;
@@ -1089,7 +1148,10 @@ export default function Home() {
         setHandoverTiming(data.handoverTiming ? { ...emptyHandoverMetrics, ...data.handoverTiming, overall: { ...emptyHandoverMetrics.overall, ...data.handoverTiming.overall }, byLocation: data.handoverTiming.byLocation ?? {} } : emptyHandoverMetrics);
         setUpdatedAt(data.updatedAt ?? snapshot.updatedAt);
       });
-      if (requestVersion === plannerRequestVersionRef.current) setPlannerRetryAt(null);
+      if (requestVersion === plannerRequestVersionRef.current) {
+        setPlannerClock(Date.now());
+        setPlannerRetryAt(snapshot.retryAt);
+      }
     } catch (planningError) {
       if (requestVersion !== plannerRequestVersionRef.current) return;
       const retryAt = planningError && typeof planningError === "object" && "retryAt" in planningError
@@ -1366,10 +1428,10 @@ export default function Home() {
   }, [activeView, authState, analyticsRange, loadAnalytics]);
 
   useEffect(() => {
-    if (authState !== "authenticated" || activeView !== "sales") return;
+    if (authState !== "authenticated" || activeView !== "sales" || !ffPlanningSupported(cabinet?.marketplace)) return;
     const timer = window.setTimeout(() => void loadFfPlanning(), 0);
     return () => window.clearTimeout(timer);
-  }, [activeView, authState, loadFfPlanning]);
+  }, [activeView, authState, cabinet?.marketplace, loadFfPlanning]);
 
   useEffect(() => {
     if (!analyticsRetryAt) return;
@@ -1391,7 +1453,13 @@ export default function Home() {
 
   useEffect(() => {
     if (!plannerRetryAt) return;
-    const timer = window.setInterval(() => setPlannerClock(Date.now()), 1_000);
+    const timer = window.setInterval(() => {
+      const now = Date.now();
+      setPlannerClock(now);
+      if (Date.parse(plannerRetryAt) <= now) {
+        setPlannerRetryAt((current) => current === plannerRetryAt ? null : current);
+      }
+    }, 1_000);
     return () => window.clearInterval(timer);
   }, [plannerRetryAt]);
 
@@ -1892,6 +1960,8 @@ export default function Home() {
     }
   };
 
+  const plannerViewActive = activeView === "sales" && ffPlanningSupported(cabinet?.marketplace);
+
   if (authState === "checking") {
     return <main className="admin-login-shell"><section className="admin-login-card checking"><span className="login-brand-mark">С</span><div className="loader"/><strong>Проверяем доступ</strong></section></main>;
   }
@@ -1919,7 +1989,7 @@ export default function Home() {
       </aside>
 
       <section className="workspace">
-        <header className="topbar"><div><p className="eyebrow">{currentViewTitle.eyebrow}</p><h1>{currentViewTitle.title}</h1></div><div className="header-actions"><span className="refresh-guidance">Можно обновить вручную · рекомендуем раз в 2 мин</span><div className="sync-state"><span className={error ? "live-dot offline" : "live-dot"} /><span>Последнее обновление<br/><strong>{formatSyncTime(updatedAt)} МСК</strong></span></div><button className="logout-btn" type="button" onClick={() => void logoutAdmin()}>Выйти</button><button className="secondary-btn" type="button" onClick={() => void (activeView === "sales" ? refreshFfPlanning() : loadData(true))} disabled={loading || Boolean(inventoryRetrySeconds) || (activeView === "sales" && (plannerLoading || plannerRefreshing || Boolean(plannerRetrySeconds)))} title={inventoryRetrySeconds ? `Общий запрос к ${marketplaceName} уже выполняется` : activeView === "sales" && plannerRetrySeconds ? "Обновление плана временно ограничено" : loading || plannerLoading || plannerRefreshing ? "Обновление займёт не больше 25 секунд" : "Можно обновить вручную в любой момент. Рекомендованный интервал — 2 минуты."}><span className={loading || (activeView === "sales" && (plannerLoading || plannerRefreshing)) ? "spin" : ""}>↻</span>{loading || (activeView === "sales" && (plannerLoading || plannerRefreshing)) ? "Обновляем…" : inventoryRetrySeconds ? `Через ${formatCountdown(inventoryRetrySeconds)}` : activeView === "sales" && plannerRetrySeconds ? `Через ${formatCountdown(plannerRetrySeconds)}` : "Обновить"}</button><button className="primary-btn" type="button" onClick={() => downloadCsv(filteredRows, `ostatki-${isOzon ? "ozon" : isYandex ? "yandex" : "wb"}`)} disabled={!rows.length}>Экспорт<span>↓</span></button></div></header>
+        <header className="topbar"><div><p className="eyebrow">{currentViewTitle.eyebrow}</p><h1>{currentViewTitle.title}</h1></div><div className="header-actions"><span className="refresh-guidance">Можно обновить вручную · рекомендуем раз в 2 мин</span><div className="sync-state"><span className={error ? "live-dot offline" : "live-dot"} /><span>Последнее обновление<br/><strong>{formatSyncTime(updatedAt)} МСК</strong></span></div><button className="logout-btn" type="button" onClick={() => void logoutAdmin()}>Выйти</button><button className="secondary-btn" type="button" onClick={() => void (plannerViewActive ? refreshFfPlanning() : loadData(true))} disabled={loading || Boolean(inventoryRetrySeconds) || (plannerViewActive && (plannerLoading || plannerRefreshing || Boolean(plannerRetrySeconds)))} title={inventoryRetrySeconds ? `Общий запрос к ${marketplaceName} уже выполняется` : plannerViewActive && plannerRetrySeconds ? "Обновление плана временно ограничено" : loading || (plannerViewActive && (plannerLoading || plannerRefreshing)) ? "Обновление займёт не больше 25 секунд" : "Можно обновить вручную в любой момент. Рекомендованный интервал — 2 минуты."}><span className={loading || (plannerViewActive && (plannerLoading || plannerRefreshing)) ? "spin" : ""}>↻</span>{loading || (plannerViewActive && (plannerLoading || plannerRefreshing)) ? "Обновляем…" : inventoryRetrySeconds ? `Через ${formatCountdown(inventoryRetrySeconds)}` : plannerViewActive && plannerRetrySeconds ? `Через ${formatCountdown(plannerRetrySeconds)}` : "Обновить"}</button><button className="primary-btn" type="button" onClick={() => downloadCsv(filteredRows, `ostatki-${isOzon ? "ozon" : isYandex ? "yandex" : "wb"}`)} disabled={!rows.length}>Экспорт<span>↓</span></button></div></header>
 
         <div className="content" id="overview">
           {cabinet && <section className={`cabinet-strip ${cabinet.configured ? "ready" : "waiting"}`}>
@@ -2163,7 +2233,7 @@ export default function Home() {
                 <p className="analytics-source-note">{analyticsFactAvailable ? "FBO и FBS считаются по оперативной статистике WB. Возвраты не включены." : "WB временно ограничил статистику. Не подменяем продажи созданными заказами — повторим запрос автоматически."}</p>
               </> : null}
             </section>
-          ) : activeView === "sales" ? (
+          ) : activeView === "sales" && ffPlanningSupported(cabinet?.marketplace) ? (
             <FfSupplyPlanner
               warehouses={plannerWarehouses}
               daily={plannerSnapshot?.daily ?? []}
@@ -2180,6 +2250,8 @@ export default function Home() {
               warnings={plannerSnapshot?.warnings ?? []}
               source={plannerSnapshot?.source ?? defaultFfPlanningSource}
             />
+          ) : activeView === "sales" ? (
+            <FfPlannerMarketplaceUnavailable marketplaceName={marketplaceName} />
           ) : <>
             <section className={`metric-grid ${activeView !== "overview" ? "view-hidden" : ""}`} aria-label="Ключевые показатели">
               <article className="metric-card featured"><div className="metric-top"><span>Остаток на складах {marketplaceName}</span><span className="trend up">● {marketplaceCode} API</span></div><strong className="metric-value">{loading ? "—" : formatNumber.format(totals.available)} <small>шт.</small></strong><div className="spark-bars" aria-hidden="true">{[24,31,28,42,38,52,47,62,58,74,69,83].map((height, index) => <i key={index} style={{ height }} />)}</div><p>Фактический остаток FBO · отдельно от FBS</p></article>

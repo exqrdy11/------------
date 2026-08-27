@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { calculateFfPlan, effectivePeriod, groupSupplyPlans } from "../lib/ff-planning.ts";
+import * as planningModule from "../lib/ff-planning.ts";
 
 test("effectivePeriod counts selected dates inclusively", () => {
   assert.deepEqual(effectivePeriod({ from: "2026-08-01", to: "2026-08-07" }), {
@@ -45,4 +46,22 @@ test("groupSupplyPlans calculates each FF before summing", () => {
   assert.equal(result[0].demand, 12);
   assert.equal(result[0].recommendedSupply, 10);
   assert.deepEqual(result[0].plans.map((plan) => plan.ffId), ["a", "b"]);
+});
+
+test("inventory planner generation distinguishes fresh, cached, partial, and independent refreshes", () => {
+  const exported = planningModule as Record<string, unknown>;
+  assert.equal(typeof exported.resolveInventoryPlannerGeneration, "function");
+  const marker = exported.resolveInventoryPlannerGeneration as (input: {
+    requestedGeneration: string | null;
+    snapshotIsComplete: boolean;
+    fallbackGeneration?: string | null;
+    usedFallback?: boolean;
+  }) => string | null;
+  const generation = "2026-08-27T09:00:02.000Z";
+  const oldGeneration = "2026-08-27T08:58:00.000Z";
+  assert.equal(marker({ requestedGeneration: generation, snapshotIsComplete: true }), generation);
+  assert.equal(marker({ requestedGeneration: generation, snapshotIsComplete: false }), null, "a partial fresh response must not claim the requested generation");
+  assert.equal(marker({ requestedGeneration: generation, snapshotIsComplete: false, fallbackGeneration: oldGeneration, usedFallback: true }), oldGeneration, "a cached HTTP 200 keeps its old marker so the client rejects it as a mismatch");
+  assert.equal(marker({ requestedGeneration: null, snapshotIsComplete: true, fallbackGeneration: oldGeneration }), null, "ordinary independent inventory refresh must clear an older planner generation");
+  assert.equal(marker({ requestedGeneration: null, snapshotIsComplete: false }), null);
 });

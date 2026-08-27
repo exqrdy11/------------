@@ -223,6 +223,8 @@ test("FF planning API route exposes the shared planner response envelope", async
   assert.match(route, /updatedAt/);
   assert.match(route, /retryAt/);
   assert.match(inventory, /export async function refreshWbFfPlanningMetrics/);
+  assert.match(inventory, /searchParams\.get\("plannerGeneration"\)/);
+  assert.match(inventory, /resolveInventoryPlannerGeneration/);
 });
 
 test("FF warehouse route accepts planning metadata fields", async () => {
@@ -245,9 +247,12 @@ test("multi-FF supply planner is connected to navigation, owner settings, FF det
   assert.match(page, /navigateTo\("sales"\)[\s\S]{0,180}План поставок/);
   assert.match(page, /activeView === "sales"[\s\S]{0,300}<FfSupplyPlanner/);
   assert.match(page, /onRefresh=\{\(\) => void refreshFfPlanning\(\)\}/);
-  assert.match(page, /runAtomicFfPlannerRefresh/);
+  assert.match(page, /runCoherentFfPlannerRefresh/);
   assert.match(page, /dataAvailable=\{Boolean\(plannerSnapshot\)\}/);
-  assert.match(page, /activeView === "sales" \? refreshFfPlanning\(\) : loadData\(true\)/);
+  assert.match(page, /ffPlanningSupported\(cabinet\?\.marketplace\)/);
+  assert.match(page, /FfPlannerMarketplaceUnavailable/);
+  assert.match(page, /const plannerViewActive = activeView === "sales" && ffPlanningSupported\(cabinet\?\.marketplace\)/);
+  assert.match(page, /plannerViewActive \? refreshFfPlanning\(\) : loadData\(true\)/);
   assert.match(page, /Рассчитать поставку/);
   assert.match(page, /openPlannerForWarehouse\(selectedFulfillmentWarehouse\.warehouse\.id\)/);
   assert.match(page, /Дата открытия/);

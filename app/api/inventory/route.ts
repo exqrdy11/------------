@@ -4,6 +4,7 @@ import { fbsHandoverMetrics, recordFbsHandoverObservations, type HandoverMetrics
 import { getInventoryRefreshCooldown, loadInventorySnapshot, releaseInventoryRefresh, reserveInventoryRefresh, saveInventorySnapshot } from "@/db/inventory-snapshots";
 import { replaceFfDailyMetricsRange } from "@/db/ff-planning";
 import { cabinetSummary, cabinetToken, getAdminCabinet, type CabinetId, type CabinetSummary } from "@/lib/admin-auth";
+import { resolveInventoryPlannerGeneration } from "@/lib/ff-planning";
 import { aggregateWbPlanningMetrics, paginateWbPlanningOrders } from "@/lib/ff-planning-source";
 
 export const dynamic = "force-dynamic";
@@ -91,6 +92,7 @@ type DashboardPayload = {
   warnings: string[];
   retryAt: string | null;
   updatedAt: string;
+  plannerGeneration: string | null;
   handoverTiming: HandoverMetrics & { byLocation?: Record<string, HandoverTiming> };
 };
 
@@ -479,6 +481,7 @@ async function attachFfStocks(payload: DashboardPayload, cabinetId: CabinetId): 
   } catch (error) {
     return {
       ...payload,
+      plannerGeneration: null,
       rows: payload.rows.map((row) => ({ ...row, ffStock: emptyFfStock(), ffExpiry: emptyFfExpiry(), ffBatches: emptyFfBatches() })),
       manualWarehouses: [],
       handoverTiming: { ...payload.handoverTiming, byLocation: {} },
@@ -501,7 +504,12 @@ export async function GET(request: Request) {
     );
   }
 
-  const force = new URL(request.url).searchParams.get("refresh") === "1";
+  const searchParams = new URL(request.url).searchParams;
+  const force = searchParams.get("refresh") === "1";
+  // A generation marker is meaningful only for the forced inventory half of
+  // a planner refresh. A normal refresh deliberately creates an unpaired
+  // inventory snapshot and therefore clears any previous planner marker.
+  const requestedPlannerGeneration = force ? searchParams.get("plannerGeneration") : null;
   const cached = memoryCache.get(cabinetId);
   const persisted = await loadInventorySnapshot<DashboardPayload>(cabinetId).catch(() => null);
   const durableSnapshot = persisted && Array.isArray(persisted.rows) ? persisted : null;
@@ -514,6 +522,7 @@ export async function GET(request: Request) {
   if (!force && lastKnown) {
     const snapshot = {
       ...lastKnown,
+      plannerGeneration: resolveInventoryPlannerGeneration({ requestedGeneration: null, snapshotIsComplete: false, fallbackGeneration: lastKnown.plannerGeneration, usedFallback: true }),
       retryAt: laterRetryAt(lastKnown.retryAt, currentCooldownUntil),
     };
     return NextResponse.json(await attachFfStocks(snapshot, cabinetId), { headers: { "Cache-Control": "private, max-age=0" } });
@@ -527,6 +536,7 @@ export async function GET(request: Request) {
     if (lastKnown) {
       const snapshot = {
         ...lastKnown,
+        plannerGeneration: resolveInventoryPlannerGeneration({ requestedGeneration: requestedPlannerGeneration, snapshotIsComplete: false, fallbackGeneration: lastKnown.plannerGeneration, usedFallback: true }),
         retryAt: laterRetryAt(lastKnown.retryAt, reservation.cooldownUntil),
       };
       return NextResponse.json(await attachFfStocks(snapshot, cabinetId), { headers: { "Cache-Control": "private, max-age=0" } });
@@ -562,6 +572,7 @@ export async function GET(request: Request) {
     if (refreshTimedOut && lastKnown) {
       const fallback = {
         ...lastKnown,
+        plannerGeneration: resolveInventoryPlannerGeneration({ requestedGeneration: requestedPlannerGeneration, snapshotIsComplete: false, fallbackGeneration: lastKnown.plannerGeneration, usedFallback: true }),
         retryAt: lastKnown.retryAt,
         warnings: [...new Set([...lastKnown.warnings, "WB отвечает дольше 25 секунд — показаны последние корректные данные"])],
       };
@@ -586,10 +597,12 @@ export async function GET(request: Request) {
     });
   }
 
+  let warehouseSyncSucceeded = true;
   if (sellerWarehouses.length) {
     try {
       await syncWbFbsWarehouses({ cabinetId, warehouses: sellerWarehouses });
     } catch (error) {
+      warehouseSyncSucceeded = false;
       warnings.push(warningFor("Склады ФФ", error));
     }
   }
@@ -600,6 +613,7 @@ export async function GET(request: Request) {
   if (refreshTimedOut && lastKnown) {
     const fallback = {
       ...lastKnown,
+      plannerGeneration: resolveInventoryPlannerGeneration({ requestedGeneration: requestedPlannerGeneration, snapshotIsComplete: false, fallbackGeneration: lastKnown.plannerGeneration, usedFallback: true }),
       retryAt: lastKnown.retryAt,
       warnings: [...new Set([...lastKnown.warnings, "WB отвечает дольше 25 секунд — показаны последние корректные данные"])],
     };
@@ -758,6 +772,7 @@ export async function GET(request: Request) {
     && wbStocksResult.status === "fulfilled"
     && ordersResult.status === "fulfilled"
     && sellerWarehousesResult.status === "fulfilled"
+    && warehouseSyncSucceeded
     && fbsStockResult.errors.length === 0;
   // A partial response must never become the new baseline. Otherwise a 429
   // would replace real FF/FBS values with zeros after the process restarts.
@@ -766,7 +781,8 @@ export async function GET(request: Request) {
     ...fbsStockResult.syncedWarehouseIds,
     ...fallbackFbsWarehouseIds,
   ])];
-  const payload: DashboardPayload = { configured: true, cabinet, rows, warehouseNames, manualWarehouses: [], fbsStockSyncedWarehouseIds, totals, warnings, retryAt, updatedAt, handoverTiming };
+  const plannerGeneration = resolveInventoryPlannerGeneration({ requestedGeneration: requestedPlannerGeneration, snapshotIsComplete });
+  const payload: DashboardPayload = { configured: true, cabinet, rows, warehouseNames, manualWarehouses: [], fbsStockSyncedWarehouseIds, totals, warnings, retryAt, updatedAt, plannerGeneration, handoverTiming };
   memoryCache.set(cabinetId, { payload });
   if (snapshotIsComplete) {
     await saveInventorySnapshot(cabinetId, payload, updatedAt).catch(() => undefined);

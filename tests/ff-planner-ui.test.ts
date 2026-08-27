@@ -154,12 +154,12 @@ test("planner does not turn an unavailable demand snapshot into zero demand", ()
   assert.doesNotMatch(loadingText, /Нет спроса/);
 });
 
-test("atomic planner refresh keeps the previous coherent snapshot after either request fails", async () => {
+test("planner refresh is sequential and commits only a matching fresh generation", async () => {
   const exported = Page as Record<string, unknown>;
-  assert.equal(typeof exported.runAtomicFfPlannerRefresh, "function");
-  const refresh = exported.runAtomicFfPlannerRefresh as (
+  assert.equal(typeof exported.runCoherentFfPlannerRefresh, "function");
+  const refresh = exported.runCoherentFfPlannerRefresh as (
     fetchPlanning: () => Promise<Record<string, unknown>>,
-    fetchInventory: () => Promise<Record<string, unknown>>,
+    fetchInventory: (generation: string) => Promise<Record<string, unknown>>,
     commit: (snapshot: Record<string, unknown>) => void,
   ) => Promise<Record<string, unknown>>;
   const source = {
@@ -168,28 +168,70 @@ test("atomic planner refresh keeps the previous coherent snapshot after either r
   };
   const previous = { marker: "previous coherent planner" };
   let committed: Record<string, unknown> = previous;
+  let inventoryCalls = 0;
   await assert.rejects(() => refresh(
-    async () => ({ warehouses: [], daily: [], source, warnings: [], updatedAt: "2026-08-27T09:00:00.000Z" }),
-    async () => { throw new Error("inventory failed"); },
+    async () => { throw new Error("planning failed"); },
+    async () => { inventoryCalls += 1; return { configured: true, rows: [] }; },
     (snapshot) => { committed = snapshot; },
-  ), /inventory failed/);
+  ), /planning failed/);
+  assert.equal(inventoryCalls, 0, "inventory refresh must not start after a planning failure");
   assert.equal(committed, previous, "a partial refresh must not replace any part of the coherent snapshot");
 
   await assert.rejects(() => refresh(
-    async () => { throw new Error("planning failed"); },
-    async () => ({ configured: true, rows: [], warnings: [], updatedAt: "2026-08-27T09:00:01.000Z" }),
+    async () => ({ warehouses: [], daily: [], source, warnings: [], updatedAt: null }),
+    async () => { inventoryCalls += 1; return { configured: true, rows: [] }; },
     (snapshot) => { committed = snapshot; },
-  ), /planning failed/);
-  assert.equal(committed, previous, "fresh stock must not be combined with stale demand after a planning failure");
+  ), /снимок спроса ещё не создан/i);
+  assert.equal(inventoryCalls, 0, "an absent demand snapshot must stop before inventory is requested");
+  assert.equal(committed, previous);
+
+  await assert.rejects(() => refresh(
+    async () => ({ warehouses: [], daily: [], source, warnings: [], updatedAt: "2026-08-27T09:00:02.000Z", retryAt: "2026-08-27T09:02:00.000Z" }),
+    async (generation) => {
+      inventoryCalls += 1;
+      assert.equal(generation, "2026-08-27T09:00:02.000Z");
+      return { configured: true, rows: [], warnings: [], updatedAt: "2026-08-27T08:59:00.000Z", plannerGeneration: "2026-08-27T08:58:00.000Z" };
+    },
+    (snapshot) => { committed = snapshot; },
+  ), (error: unknown) => {
+    assert.ok(error instanceof Error);
+    assert.match(error.message, /поколен/i);
+    assert.equal((error as Error & { retryAt?: string }).retryAt, "2026-08-27T09:02:00.000Z", "a successful planning POST keeps its cooldown even when inventory is rejected");
+    return true;
+  });
+  assert.equal(committed, previous, "HTTP 200 with an old cached inventory generation must not replace the coherent snapshot");
 
   const next = await refresh(
-    async () => ({ warehouses: [], daily: [], source, warnings: [], updatedAt: "2026-08-27T09:00:00.000Z" }),
-    async () => ({ configured: true, rows: [], warnings: [], updatedAt: "2026-08-27T09:00:01.000Z" }),
+    async () => ({ warehouses: [], daily: [], source, warnings: [], updatedAt: "2026-08-27T09:00:02.000Z", retryAt: "2026-08-27T09:02:00.000Z" }),
+    async (generation) => ({ configured: true, rows: [], warnings: [], updatedAt: "2026-08-27T09:00:03.000Z", plannerGeneration: generation }),
     (snapshot) => { committed = snapshot; },
   );
   assert.equal(committed, next);
   assert.deepEqual(next.daily, []);
   assert.deepEqual(next.rows, []);
+  assert.equal(next.retryAt, "2026-08-27T09:02:00.000Z", "the successful planning cooldown must remain on the coherent snapshot");
+  assert.equal(next.generation, "2026-08-27T09:00:02.000Z");
+
+  const clockSkewSafe = await refresh(
+    async () => ({ warehouses: [], daily: [], source, warnings: [], updatedAt: "2026-08-27T08:59:58.000Z" }),
+    async (generation) => ({ configured: true, rows: [], warnings: [], updatedAt: "2026-08-27T08:59:59.000Z", plannerGeneration: generation }),
+    () => undefined,
+  );
+  assert.equal(clockSkewSafe.generation, "2026-08-27T08:59:58.000Z", "the server-issued generation, not browser clock skew, establishes coherence");
+});
+
+test("FF planner is explicitly unavailable outside Wildberries", () => {
+  const exported = Page as Record<string, unknown>;
+  assert.equal(typeof exported.ffPlanningSupported, "function");
+  const supported = exported.ffPlanningSupported as (marketplace: string | null | undefined) => boolean;
+  assert.equal(supported("wb"), true);
+  assert.equal(supported("ozon"), false);
+  assert.equal(supported("yandex"), false);
+  assert.equal(typeof exported.FfPlannerMarketplaceUnavailable, "function");
+  const Unavailable = exported.FfPlannerMarketplaceUnavailable as React.ComponentType<{ marketplaceName: string }>;
+  const text = visibleText(renderToStaticMarkup(React.createElement(Unavailable, { marketplaceName: "Ozon" })));
+  assert.match(text, /План поставок доступен только для Wildberries/);
+  assert.match(text, /Ozon/);
 });
 
 test("planner state transitions apply bulk values, preserve overrides, and hydrate untouched owner defaults", () => {

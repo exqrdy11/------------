@@ -13,11 +13,29 @@ type FfDailyMetricRow = {
   sold: number;
 };
 
+type FfPlanningSnapshotRow = {
+  cooldown_until: string | null;
+  refresh_updated_at: string | null;
+  warehouse_id: string | null;
+  product_key: string | null;
+  nm_id: number | null;
+  sku: string | null;
+  metric_date: string | null;
+  demand: number | null;
+  sold: number | null;
+};
+
 export type FfDailyMetricFilter = {
   from?: string;
   to?: string;
   warehouseId?: string;
   productKey?: string;
+};
+
+export type FfPlanningMetricSnapshot = {
+  daily: FfDailyMetric[];
+  cooldownUntil: string | null;
+  updatedAt: string | null;
 };
 
 const createFfDailyMetricsTableSql = `
@@ -185,6 +203,72 @@ export async function getFfPlanningRefreshState(cabinetId: CabinetId): Promise<R
   const d1 = await getFfPlanningDb();
   return await d1.prepare("SELECT cooldown_until, updated_at FROM ff_planning_refreshes WHERE cabinet_id = ?")
     .bind(cabinetId).first<RefreshState>() ?? { cooldown_until: null, updated_at: null };
+}
+
+export async function loadFfPlanningMetricSnapshotInDb(
+  d1: PlanningDatabase,
+  cabinetId: CabinetId,
+  filter: FfDailyMetricFilter = {},
+): Promise<FfPlanningMetricSnapshot> {
+  const joinConditions = ["m.cabinet_id = c.cabinet_id", "m.updated_at = r.updated_at"];
+  const values: string[] = [cabinetId];
+  if (filter.from) {
+    joinConditions.push("m.metric_date >= ?");
+    values.push(normalizePlanningDate(filter.from));
+  }
+  if (filter.to) {
+    joinConditions.push("m.metric_date <= ?");
+    values.push(normalizePlanningDate(filter.to));
+  }
+  if (filter.warehouseId) {
+    joinConditions.push("m.warehouse_id = ?");
+    values.push(filter.warehouseId);
+  }
+  if (filter.productKey) {
+    joinConditions.push("m.product_key = ?");
+    values.push(filter.productKey);
+  }
+  // The generation and its rows are deliberately returned by one SQLite
+  // statement. The updated_at equality also prevents rows from an older range
+  // refresh from being labelled as part of the current generation.
+  const result = await d1.prepare(`
+    SELECT
+      r.cooldown_until,
+      r.updated_at AS refresh_updated_at,
+      m.warehouse_id,
+      m.product_key,
+      m.nm_id,
+      m.sku,
+      m.metric_date,
+      m.demand,
+      m.sold
+    FROM (SELECT ? AS cabinet_id) AS c
+    LEFT JOIN ff_planning_refreshes AS r ON r.cabinet_id = c.cabinet_id
+    LEFT JOIN ff_daily_metrics AS m ON ${joinConditions.join(" AND ")}
+    ORDER BY m.metric_date, m.warehouse_id, m.product_key, m.sku
+  `).bind(...values).all<FfPlanningSnapshotRow>();
+  const rows = result.results ?? [];
+  const state = rows[0];
+  const daily = rows.flatMap((row): FfDailyMetric[] => row.metric_date && row.warehouse_id && row.product_key
+    ? [{
+      warehouseId: row.warehouse_id,
+      productKey: row.product_key,
+      nmId: row.nm_id,
+      sku: row.sku ?? "",
+      date: row.metric_date,
+      demand: Math.max(0, Number(row.demand) || 0),
+      sold: Math.max(0, Number(row.sold) || 0),
+    }]
+    : []);
+  return {
+    daily,
+    cooldownUntil: state?.cooldown_until ?? null,
+    updatedAt: state?.refresh_updated_at ?? null,
+  };
+}
+
+export async function loadFfPlanningMetricSnapshot(cabinetId: CabinetId, filter: FfDailyMetricFilter = {}) {
+  return loadFfPlanningMetricSnapshotInDb(await getFfPlanningDb(), cabinetId, filter);
 }
 
 export async function reserveFfPlanningRefreshInDb(d1: PlanningDatabase, cabinetId: CabinetId, now = new Date()) {

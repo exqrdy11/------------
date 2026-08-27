@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { getFfPlanningRefreshState, listFfDailyMetrics, reserveFfPlanningRefresh } from "@/db/ff-planning";
+import { loadFfPlanningMetricSnapshot, reserveFfPlanningRefresh } from "@/db/ff-planning";
 import { listFfWarehouses } from "@/db/ff-stocks";
 import { cabinetToken, getAdminSession, type CabinetId } from "@/lib/admin-auth";
 import { effectivePeriod, ffPlanningRoleCan, type EffectivePeriod } from "@/lib/ff-planning";
@@ -18,13 +18,12 @@ function requestPeriod(from: unknown, to: unknown): EffectivePeriod {
 }
 
 async function planningPayload(cabinetId: CabinetId, period: EffectivePeriod, warnings: string[] = []) {
-  const [warehouses, daily, state] = await Promise.all([
+  const [warehouses, metrics] = await Promise.all([
     listFfWarehouses(cabinetId),
-    listFfDailyMetrics(cabinetId, { from: period.from, to: period.to }),
-    getFfPlanningRefreshState(cabinetId),
+    loadFfPlanningMetricSnapshot(cabinetId, { from: period.from, to: period.to }),
   ]);
-  const retryAt = state.cooldown_until && Date.parse(state.cooldown_until) > Date.now() ? state.cooldown_until : null;
-  return { period, warehouses, daily, source: SOURCE, warnings, updatedAt: state.updated_at, retryAt };
+  const retryAt = metrics.cooldownUntil && Date.parse(metrics.cooldownUntil) > Date.now() ? metrics.cooldownUntil : null;
+  return { period, warehouses, daily: metrics.daily, source: SOURCE, warnings, updatedAt: metrics.updatedAt, retryAt };
 }
 
 function errorPayload(error: string, period: EffectivePeriod | null = null) {
