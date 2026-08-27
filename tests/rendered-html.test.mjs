@@ -234,3 +234,27 @@ test("FF warehouse route accepts planning metadata fields", async () => {
   assert.match(route, /openedAt,/);
   assert.match(route, /planningTargetDays[ },]/);
 });
+
+test("multi-FF supply planner is connected to navigation, owner settings, FF detail, and responsive layout", async () => {
+  const [page, css] = await Promise.all([
+    readFile(new URL("app/page.tsx", root), "utf8"),
+    readFile(new URL("app/globals.css", root), "utf8"),
+  ]);
+
+  assert.match(page, /import \{ calculateFfPlan, effectivePeriod/);
+  assert.match(page, /navigateTo\("sales"\)[\s\S]{0,180}План поставок/);
+  assert.match(page, /activeView === "sales"[\s\S]{0,300}<FfSupplyPlanner/);
+  assert.match(page, /onRefresh=\{\(\) => void refreshFfPlanning\(\)\}/);
+  assert.match(page, /Promise\.all\(\[requestFfPlanning\(true\), loadData\(true\)\]\)/);
+  assert.match(page, /activeView === "sales" \? refreshFfPlanning\(\) : loadData\(true\)/);
+  assert.match(page, /Рассчитать поставку/);
+  assert.match(page, /openPlannerForWarehouse\(selectedFulfillmentWarehouse\.warehouse\.id\)/);
+  assert.match(page, /Дата открытия/);
+  assert.match(page, /Целевой запас по умолчанию/);
+  assert.match(page, /openedAt: draft\.openedAt/);
+  assert.match(page, /planningTargetDays: Number\(draft\.planningTargetDays\)/);
+
+  assert.match(css, /\.planner-ff-grid/);
+  assert.match(css, /\.planner-expanded-grid/);
+  assert.match(css, /@media \(max-width: 760px\)[\s\S]*\.planner-bulk-bar[\s\S]*\.planner-ff-grid[\s\S]*\.planner-expanded-grid/);
+});

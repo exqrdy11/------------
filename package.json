@@ -9,7 +9,7 @@
     "dev": "vinext dev",
     "build": "vinext build",
     "start": "vinext start",
-    "test": "npm run build && node --test tests/rendered-html.test.mjs && node --experimental-strip-types --test tests/fbs-summary.test.ts tests/ff-planning.test.ts tests/ff-planning-source.test.ts tests/ff-planning-db-shape.test.ts tests/ff-planning-api-behavior.test.ts",
+    "test": "npm run build && node --test tests/rendered-html.test.mjs && tsx --test tests/ff-planner-ui.test.ts && node --experimental-strip-types --test tests/fbs-summary.test.ts tests/ff-planning.test.ts tests/ff-planning-source.test.ts tests/ff-planning-db-shape.test.ts tests/ff-planning-api-behavior.test.ts",
     "lint": "eslint . --ignore-pattern dist --ignore-pattern .next",
     "db:generate": "drizzle-kit generate"
   },
@@ -33,6 +33,7 @@
     "eslint-config-next": "16.2.6",
     "react-server-dom-webpack": "19.2.6",
     "tailwindcss": "4.2.1",
+    "tsx": "4.22.1",
     "typescript": "5.9.3",
     "vinext": "0.0.50",
     "vite": "8.0.13",
