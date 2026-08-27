@@ -15,6 +15,13 @@ test("effectivePeriod clamps the start to an FF opening date", () => {
   });
 });
 
+test("effectivePeriod rejects an original period over 90 days even when opening date clamps it", () => {
+  assert.throws(
+    () => effectivePeriod({ from: "2026-01-01", to: "2026-04-01", openedAt: "2026-03-01" }),
+    /90 дней/,
+  );
+});
+
 test("zero demand has no coverage and recommends no supply", () => {
   const plan = calculateFfPlan({ from: "2026-08-01", to: "2026-08-07", demand: 0, freeStock: 20, targetCoverageDays: 14 });
   assert.equal(plan.effectiveDays, 7);

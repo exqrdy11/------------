@@ -73,10 +73,11 @@ export function effectivePeriod(input: PlanningPeriodInput): EffectivePeriod {
   const selectedFrom = parseDate(input.from);
   const to = parseDate(input.to);
   const opened = input.openedAt ? parseDate(input.openedAt) : selectedFrom;
-  const fromMs = Math.max(selectedFrom, opened);
   if (selectedFrom > to) throw new Error("Дата начала позже даты окончания");
+  const selectedDays = Math.floor((to - selectedFrom) / DAY_MS) + 1;
+  if (selectedDays > 90) throw new Error("Период не может быть больше 90 дней");
+  const fromMs = Math.max(selectedFrom, opened);
   const days = fromMs > to ? 0 : Math.floor((to - fromMs) / DAY_MS) + 1;
-  if (days > 90) throw new Error("Период не может быть больше 90 дней");
   return { from: new Date(fromMs).toISOString().slice(0, 10), to: input.to, days };
 }
 
