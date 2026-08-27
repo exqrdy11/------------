@@ -38,6 +38,7 @@ test("planner renders multi-FF controls and keeps demand, confirmed sold, and pe
     warehouses,
     daily,
     rows,
+    dataAvailable: true,
     selectedWarehouseIds: ["alpha", "beta"],
     onSelectedWarehouseIdsChange: () => undefined,
     onRefresh: () => undefined,
@@ -78,6 +79,7 @@ test("planner renders multi-FF controls and keeps demand, confirmed sold, and pe
     warehouses,
     daily,
     rows,
+    dataAvailable: true,
     selectedWarehouseIds: ["alpha", "beta"],
     onSelectedWarehouseIdsChange: () => undefined,
     onRefresh: () => undefined,
@@ -94,6 +96,100 @@ test("planner renders multi-FF controls and keeps demand, confirmed sold, and pe
   }));
   assert.match(cooldownHtml, /<button[^>]*planner-refresh-btn[^>]*disabled=""/);
   assert.match(visibleText(cooldownHtml), /Через 01:10/);
+});
+
+test("planner does not turn an unavailable demand snapshot into zero demand", () => {
+  const exported = Page as Record<string, unknown>;
+  assert.equal(typeof exported.FfSupplyPlanner, "function");
+  const Planner = exported.FfSupplyPlanner as React.ComponentType<Record<string, unknown>>;
+  const warehouses = [{
+    id: "alpha", city: "Казань", name: "Альфа ФФ", position: 10, wbWarehouseId: 1,
+    wbWarehouseName: "Казань", serviceRateKopecks: 0, isHidden: false, openedAt: null, planningTargetDays: 14,
+  }];
+  const rows = [{
+    key: "nm:101", sku: "SKU-101", nmId: 101, name: "Тестовый товар", category: "Тест", color: "#999",
+    warehouses: {}, ffStock: { alpha: 30 }, ffExpiry: {}, ffBatches: {}, fbs: 0,
+    fbsByLocation: { alpha: 0 }, sales7d: 0, sales7dByLocation: {}, receiving: 0,
+    receivingByLocation: {}, toSale: 0, toSaleByLocation: {}, status: "В норме", updated: "12:00",
+  }];
+  const source = {
+    demand: { kind: "marketplace_orders", label: "Оперативные заказы", dateBasis: "created_at" },
+    sold: { kind: "marketplace_sales", label: "Финансовые выкупы", dateBasis: "sold_at" },
+  };
+  const commonProps = {
+    today: "2026-08-27",
+    warehouses,
+    daily: [],
+    rows,
+    dataAvailable: false,
+    selectedWarehouseIds: ["alpha"],
+    onSelectedWarehouseIdsChange: () => undefined,
+    onRefresh: () => undefined,
+    refreshing: false,
+    updatedAt: null,
+    retrySeconds: null,
+    warnings: [],
+    source,
+  };
+
+  const unavailableText = visibleText(renderToStaticMarkup(React.createElement(Planner, {
+    ...commonProps,
+    loading: false,
+    error: "Остатки временно недоступны",
+  })));
+  assert.match(unavailableText, /План поставок пока недоступен/);
+  assert.match(unavailableText, /Остатки временно недоступны/);
+  assert.match(unavailableText, /Оперативные заказы/);
+  assert.match(unavailableText, /Финансовые выкупы/);
+  assert.doesNotMatch(unavailableText, /Нет спроса/);
+  assert.doesNotMatch(unavailableText, /Рекомендовано 0/);
+
+  const loadingText = visibleText(renderToStaticMarkup(React.createElement(Planner, {
+    ...commonProps,
+    loading: true,
+    error: null,
+  })));
+  assert.match(loadingText, /Загружаем общий снимок/);
+  assert.match(loadingText, /Оперативные заказы.*Финансовые выкупы/);
+  assert.doesNotMatch(loadingText, /Нет спроса/);
+});
+
+test("atomic planner refresh keeps the previous coherent snapshot after either request fails", async () => {
+  const exported = Page as Record<string, unknown>;
+  assert.equal(typeof exported.runAtomicFfPlannerRefresh, "function");
+  const refresh = exported.runAtomicFfPlannerRefresh as (
+    fetchPlanning: () => Promise<Record<string, unknown>>,
+    fetchInventory: () => Promise<Record<string, unknown>>,
+    commit: (snapshot: Record<string, unknown>) => void,
+  ) => Promise<Record<string, unknown>>;
+  const source = {
+    demand: { kind: "created_fbs_orders", label: "Созданные заказы FBS", dateBasis: "order_created_at" },
+    sold: { kind: "confirmed_buyouts", label: "Подтверждённые выкупы", dateBasis: "order_created_at" },
+  };
+  const previous = { marker: "previous coherent planner" };
+  let committed: Record<string, unknown> = previous;
+  await assert.rejects(() => refresh(
+    async () => ({ warehouses: [], daily: [], source, warnings: [], updatedAt: "2026-08-27T09:00:00.000Z" }),
+    async () => { throw new Error("inventory failed"); },
+    (snapshot) => { committed = snapshot; },
+  ), /inventory failed/);
+  assert.equal(committed, previous, "a partial refresh must not replace any part of the coherent snapshot");
+
+  await assert.rejects(() => refresh(
+    async () => { throw new Error("planning failed"); },
+    async () => ({ configured: true, rows: [], warnings: [], updatedAt: "2026-08-27T09:00:01.000Z" }),
+    (snapshot) => { committed = snapshot; },
+  ), /planning failed/);
+  assert.equal(committed, previous, "fresh stock must not be combined with stale demand after a planning failure");
+
+  const next = await refresh(
+    async () => ({ warehouses: [], daily: [], source, warnings: [], updatedAt: "2026-08-27T09:00:00.000Z" }),
+    async () => ({ configured: true, rows: [], warnings: [], updatedAt: "2026-08-27T09:00:01.000Z" }),
+    (snapshot) => { committed = snapshot; },
+  );
+  assert.equal(committed, next);
+  assert.deepEqual(next.daily, []);
+  assert.deepEqual(next.rows, []);
 });
 
 test("planner state transitions apply bulk values, preserve overrides, and hydrate untouched owner defaults", () => {
@@ -131,4 +227,47 @@ test("planner state transitions apply bulk values, preserve overrides, and hydra
     { id: "beta", planningTargetDays: 60 },
   ], { from: "2026-08-21", to: "2026-08-27" }, new Set(["alpha", "beta"]));
   assert.equal(explicitSameValue.alpha.targetDays, 14, "an explicit override equal to the old default must still survive hydration");
+});
+
+test("unassigned demand follows the union of applied selected FF periods, not the common draft", () => {
+  const exported = Page as Record<string, unknown>;
+  assert.equal(typeof exported.summarizePlannerUnassigned, "function");
+  const summarize = exported.summarizePlannerUnassigned as (
+    daily: Array<{ warehouseId: string; date: string; demand: number; sold: number }>,
+    warehouses: Array<{ id: string; openedAt: string | null }>,
+    ranges: Record<string, { from: string; to: string; targetDays: number }>,
+    fallback: { from: string; to: string },
+  ) => { facts: unknown[]; demand: number; sold: number };
+  const applyBulk = exported.applyPlannerRangeToSelected as (
+    current: Record<string, { from: string; to: string; targetDays: number }>,
+    ids: string[],
+    range: { from: string; to: string },
+    targetDays: number,
+  ) => Record<string, { from: string; to: string; targetDays: number }>;
+  const daily = [
+    { warehouseId: "unassigned", productKey: "nm:1", nmId: 1, sku: "one", date: "2026-08-01", demand: 1, sold: 0 },
+    { warehouseId: "unassigned", productKey: "nm:2", nmId: 2, sku: "two", date: "2026-08-02", demand: 1, sold: 1 },
+    { warehouseId: "unassigned", productKey: "nm:3", nmId: 3, sku: "three", date: "2026-08-03", demand: 1, sold: 0 },
+  ];
+  const warehouses = [
+    { id: "alpha", openedAt: null },
+    { id: "beta", openedAt: "2026-08-03" },
+  ];
+  const applied = {
+    alpha: { from: "2026-08-01", to: "2026-08-01", targetDays: 14 },
+    beta: { from: "2026-08-03", to: "2026-08-03", targetDays: 14 },
+  };
+  const fallback = { from: "2026-08-01", to: "2026-08-03" };
+  const beforeApply = summarize(daily, warehouses, applied, fallback);
+  assert.equal(beforeApply.demand, 2, "disjoint selected FF periods must use their union, not one enclosing range");
+  assert.equal(beforeApply.sold, 0);
+
+  const commonDraft = { from: "2026-08-01", to: "2026-08-03" };
+  const whileDraftOnly = summarize(daily, warehouses, applied, fallback);
+  assert.deepEqual(whileDraftOnly, beforeApply, "editing the common draft must not change visible unassigned facts");
+
+  const afterApplyRanges = applyBulk(applied, ["alpha", "beta"], commonDraft, 14);
+  const afterApply = summarize(daily, warehouses, afterApplyRanges, fallback);
+  assert.equal(afterApply.demand, 3, "unassigned facts may change only after applying the draft to selected FFs");
+  assert.equal(afterApply.sold, 1);
 });

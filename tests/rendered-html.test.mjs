@@ -245,7 +245,8 @@ test("multi-FF supply planner is connected to navigation, owner settings, FF det
   assert.match(page, /navigateTo\("sales"\)[\s\S]{0,180}План поставок/);
   assert.match(page, /activeView === "sales"[\s\S]{0,300}<FfSupplyPlanner/);
   assert.match(page, /onRefresh=\{\(\) => void refreshFfPlanning\(\)\}/);
-  assert.match(page, /Promise\.all\(\[requestFfPlanning\(true\), loadData\(true\)\]\)/);
+  assert.match(page, /runAtomicFfPlannerRefresh/);
+  assert.match(page, /dataAvailable=\{Boolean\(plannerSnapshot\)\}/);
   assert.match(page, /activeView === "sales" \? refreshFfPlanning\(\) : loadData\(true\)/);
   assert.match(page, /Рассчитать поставку/);
   assert.match(page, /openPlannerForWarehouse\(selectedFulfillmentWarehouse\.warehouse\.id\)/);
@@ -257,4 +258,5 @@ test("multi-FF supply planner is connected to navigation, owner settings, FF det
   assert.match(css, /\.planner-ff-grid/);
   assert.match(css, /\.planner-expanded-grid/);
   assert.match(css, /@media \(max-width: 760px\)[\s\S]*\.planner-bulk-bar[\s\S]*\.planner-ff-grid[\s\S]*\.planner-expanded-grid/);
+  assert.match(css, /@media \(max-width: 760px\)[\s\S]*\.planner-table-wrap table[\s\S]*min-width:\s*0/);
 });

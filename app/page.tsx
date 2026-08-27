@@ -174,6 +174,41 @@ type FfPlanningResponse = {
   error?: string;
 };
 
+type FfPlannerSnapshot = {
+  warehouses: ManualWarehouse[];
+  daily: FfPlanningDailyMetric[];
+  rows: StockRow[];
+  source: FfPlanningSource;
+  warnings: string[];
+  updatedAt: string;
+  inventory: InventoryResponse;
+};
+
+export async function runAtomicFfPlannerRefresh(
+  fetchPlanning: () => Promise<FfPlanningResponse>,
+  fetchInventory: () => Promise<InventoryResponse>,
+  commit: (snapshot: FfPlannerSnapshot) => void,
+) {
+  const [planning, inventory] = await Promise.all([fetchPlanning(), fetchInventory()]);
+  if (!Array.isArray(planning.warehouses) || !Array.isArray(planning.daily) || !planning.source) {
+    throw new Error("Источник спроса вернул неполный снимок");
+  }
+  if (!Array.isArray(inventory.rows)) throw new Error("Источник остатков вернул неполный снимок");
+  const sourceUpdatedAt = [planning.updatedAt, inventory.updatedAt]
+    .flatMap((value) => typeof value === "string" && Number.isFinite(Date.parse(value)) ? [Date.parse(value)] : []);
+  const snapshot: FfPlannerSnapshot = {
+    warehouses: planning.warehouses,
+    daily: planning.daily,
+    rows: inventory.rows,
+    source: planning.source,
+    warnings: [...new Set([...(planning.warnings ?? []), ...(inventory.warnings ?? [])])],
+    updatedAt: sourceUpdatedAt.length ? new Date(Math.min(...sourceUpdatedAt)).toISOString() : new Date().toISOString(),
+    inventory,
+  };
+  commit(snapshot);
+  return snapshot;
+}
+
 const defaultManualWarehouses: ManualWarehouse[] = [
   { id: "kazan", city: "Казань", name: "Наш склад", position: 10, wbWarehouseId: 1692397, wbWarehouseName: null, serviceRateKopecks: 0, isHidden: false, openedAt: null, planningTargetDays: 14 },
   { id: "moscow", city: "Москва", name: "БИК ФФ", position: 20, wbWarehouseId: null, wbWarehouseName: null, serviceRateKopecks: 0, isHidden: false, openedAt: null, planningTargetDays: 14 },
@@ -556,6 +591,30 @@ export function syncPlannerWarehouseRanges(
   }));
 }
 
+export function summarizePlannerUnassigned(
+  daily: FfPlanningDailyMetric[],
+  selectedWarehouses: Array<Pick<ManualWarehouse, "id" | "openedAt">>,
+  warehouseRanges: Record<string, PlannerRange>,
+  fallbackRange: Pick<PlannerRange, "from" | "to">,
+) {
+  const appliedPeriods = selectedWarehouses.flatMap((warehouse) => {
+    const range = warehouseRanges[warehouse.id] ?? { ...fallbackRange, targetDays: 14 };
+    try {
+      const period = effectivePeriod({ from: range.from, to: range.to, openedAt: warehouse.openedAt });
+      return period.days > 0 ? [{ from: period.from, to: period.to }] : [];
+    } catch {
+      return [];
+    }
+  });
+  const facts = daily.filter((metric) => metric.warehouseId === "unassigned"
+    && appliedPeriods.some((period) => metric.date >= period.from && metric.date <= period.to));
+  return {
+    facts,
+    demand: facts.reduce((sum, metric) => sum + metric.demand, 0),
+    sold: facts.reduce((sum, metric) => sum + metric.sold, 0),
+  };
+}
+
 function offsetPlanningDate(date: string, dayOffset: number) {
   const value = new Date(`${date}T00:00:00.000Z`);
   value.setUTCDate(value.getUTCDate() + dayOffset);
@@ -584,6 +643,7 @@ export function FfSupplyPlanner({
   warehouses,
   daily,
   rows,
+  dataAvailable,
   selectedWarehouseIds,
   onSelectedWarehouseIdsChange,
   onRefresh,
@@ -599,6 +659,7 @@ export function FfSupplyPlanner({
   warehouses: ManualWarehouse[];
   daily: FfPlanningDailyMetric[];
   rows: StockRow[];
+  dataAvailable: boolean;
   selectedWarehouseIds: string[];
   onSelectedWarehouseIdsChange: (ids: string[]) => void;
   onRefresh: () => void;
@@ -763,13 +824,14 @@ export function FfSupplyPlanner({
   const soldSourceLabel = source.sold.kind === "confirmed_buyouts" ? "подтверждённые выкупы" : `${source.sold.label.charAt(0).toLocaleLowerCase("ru-RU")}${source.sold.label.slice(1)}`;
   const demandLabel = `Спрос · ${demandSourceLabel}`;
   const soldLabel = `Продано · ${soldSourceLabel}`;
-  const unassignedFacts = daily.filter((metric) => metric.warehouseId === "unassigned" && metric.date >= commonRange.from && metric.date <= commonRange.to);
-  const unassignedDemand = unassignedFacts.reduce((sum, metric) => sum + metric.demand, 0);
-  const unassignedSold = unassignedFacts.reduce((sum, metric) => sum + metric.sold, 0);
+  const unassigned = summarizePlannerUnassigned(daily, selectedWarehouses, warehouseRanges, initialRange);
+  const unassignedFacts = unassigned.facts;
+  const unassignedDemand = unassigned.demand;
+  const unassignedSold = unassigned.sold;
 
   return <section className="planner-panel" aria-label="План поставок">
     <div className="section-heading planner-heading">
-      <div><span className="section-kicker">ОБЩИЙ ПЛАН · НЕСКОЛЬКО ФФ</span><h2>Что и куда довезти</h2><p className="section-note">Спрос — созданные FBS-заказы без отмен. Продано — только подтверждённые выкупы. Эти показатели не смешиваются.</p></div>
+      <div><span className="section-kicker">ОБЩИЙ ПЛАН · НЕСКОЛЬКО ФФ</span><h2>Что и куда довезти</h2><p className="section-note">{source.demand.label} и {source.sold.label} загружаются одним согласованным снимком и не смешиваются.</p></div>
       <button className="secondary-btn planner-refresh-btn" type="button" onClick={onRefresh} disabled={refreshing || loading || Boolean(retrySeconds)}><span className={refreshing ? "spin" : ""}>↻</span>{refreshing ? "Обновляем…" : retrySeconds ? `Через ${formatCountdown(retrySeconds)}` : "Обновить данные"}</button>
     </div>
 
@@ -796,10 +858,11 @@ export function FfSupplyPlanner({
       </article>;
     })}</div>
 
+    {!dataAvailable ? <div className={loading ? "loading-state planner-snapshot-state" : "empty-state planner-snapshot-state"} role={loading ? "status" : "alert"}>{loading ? <><span className="loader"/><strong>Загружаем общий снимок</strong><small>{source.demand.label} и {source.sold.label} будут показаны только вместе с остатками</small></> : <><strong>План поставок пока недоступен</strong><span>{error || `Не удалось согласованно загрузить ${source.demand.label.toLocaleLowerCase("ru-RU")} и остатки.`}</span><small>Частичные данные не подменяются нулями. Обновите снимок ещё раз.</small></>}</div> : <>
     {error && <div className="planner-notice error" role="alert">{error}</div>}
     {warnings.length > 0 && <div className="planner-notice warning">{warnings.join(" · ")}</div>}
     {calculation.invalidWarehouseIds.size > 0 && <div className="planner-notice error">Проверьте период выбранных ФФ.</div>}
-    {unassignedFacts.length > 0 && <div className="planner-unassigned-note"><strong>Не назначено на ФФ</strong><span>{demandLabel} {formatNumber.format(unassignedDemand)} шт. · {soldLabel} {formatNumber.format(unassignedSold)} шт.</span><small>Привяжите склад маркетплейса в настройках — эти данные не добавлены ни к одному ФФ.</small></div>}
+    {unassignedFacts.length > 0 && <div className="planner-unassigned-note"><strong>Не назначено на ФФ</strong><span>{demandLabel} {formatNumber.format(unassignedDemand)} шт. · {soldLabel} {formatNumber.format(unassignedSold)} шт.</span><small>Считаем по объединению применённых периодов выбранных ФФ. Общий период изменит итог только после «Применить выбранным».</small></div>}
 
     <div className="planner-summary-grid">{warehouseSummaries.map((summary) => <article key={summary.warehouse.id}>
       <div><span>ФФ</span><h3>{formatManualWarehouse(summary.warehouse)}</h3></div>
@@ -812,8 +875,9 @@ export function FfSupplyPlanner({
       <div className="planner-table-wrap"><table><thead><tr><th>Товар / артикул</th><th>{demandLabel}</th><th>{soldLabel}</th><th>Свободный остаток</th><th>Среднее в день</th><th>Хватит на</th><th>Рекомендовано</th></tr></thead><tbody>{plannerGroups.map((group) => [
         <tr className="planner-sku-row" key={`${group.product.key}:summary`}><td><div className="product-cell"><span className="product-swatch" style={{ background: group.product.color }}>{group.product.name.charAt(0).toUpperCase()}</span><span><strong>{group.product.name}</strong><small>{group.product.sku}{group.product.nmId ? ` · WB ${group.product.nmId}` : ""}</small></span></div></td><td><span>{demandLabel}</span><strong>{formatNumber.format(group.demand)} <small>шт.</small></strong></td><td><span>{soldLabel}</span><strong>{formatNumber.format(group.sold)} <small>шт.</small></strong></td><td><strong>{formatNumber.format(group.freeStock)} <small>шт.</small></strong></td><td><strong>{plannerNumber(group.averageDemandPerDay)}</strong></td><td><span>Хватит на</span><strong>{plannerCoverage(group.coverageDays)}</strong></td><td><span>Рекомендовано</span><strong className={group.recommendedSupply > 0 ? "needed" : "covered"}>{plannerSupply(group.recommendedSupply)}</strong></td></tr>,
         <tr className="planner-sku-details-row" key={`${group.product.key}:details`}><td colSpan={7}><details><summary>По складам ФФ</summary><div className="planner-expanded-grid">{group.plans.map(({ warehouse, plan }) => <article key={warehouse.id}><div><h4>{formatManualWarehouse(warehouse)}</h4><small>{compactPlanningDate(plan.from)}–{compactPlanningDate(plan.to)} · {plan.effectiveDays} {plan.effectiveDays === 1 ? "день" : plan.effectiveDays >= 2 && plan.effectiveDays <= 4 ? "дня" : "дней"}</small></div><dl><div><dt>{demandLabel}</dt><dd>{formatNumber.format(plan.demand)} шт.</dd></div><div><dt>{soldLabel}</dt><dd>{formatNumber.format(plan.sold)} шт.</dd></div><div><dt>Свободный остаток</dt><dd>{formatNumber.format(plan.freeStock)} шт.</dd></div><div><dt>Среднее в день</dt><dd>{plannerNumber(plan.averageDemandPerDay)}</dd></div><div><dt>Хватит на</dt><dd>{plannerCoverage(plan.coverageDays)}</dd></div><div><dt>Рекомендовано</dt><dd className={plan.recommendedSupply > 0 ? "needed" : "covered"}>{plannerSupply(plan.recommendedSupply)}</dd></div></dl></article>)}</div></details></td></tr>,
-      ])}</tbody></table>{loading && <div className="loading-state"><span className="loader"/><strong>Загружаем общий снимок</strong><small>Спрос и подтверждённые выкупы остаются отдельными метриками</small></div>}{!loading && selectedWarehouses.length > 0 && !plannerGroups.length && <div className="empty-state"><strong>За выбранный период данных нет</strong><span>Попробуйте другой период или обновите общий снимок.</span></div>}{!selectedWarehouses.length && <div className="empty-state"><strong>Выберите хотя бы один ФФ</strong><span>Отметьте склады выше, чтобы построить план поставок.</span></div>}</div>
+      ])}</tbody></table>{loading && <div className="loading-state"><span className="loader"/><strong>Обновляем согласованный снимок</strong><small>{source.demand.label} и {source.sold.label} остаются отдельными метриками</small></div>}{!loading && selectedWarehouses.length > 0 && !plannerGroups.length && <div className="empty-state"><strong>За выбранный период данных нет</strong><span>Попробуйте другой период или обновите общий снимок.</span></div>}{!selectedWarehouses.length && <div className="empty-state"><strong>Выберите хотя бы один ФФ</strong><span>Отметьте склады выше, чтобы построить план поставок.</span></div>}</div>
     </section>
+    </>}
   </section>;
 }
 
@@ -900,16 +964,14 @@ export default function Home() {
   const [manualCompetitorNmId, setManualCompetitorNmId] = useState("");
   const [competitorPriceDrafts, setCompetitorPriceDrafts] = useState<Record<number, string>>({});
   const [pricingClock, setPricingClock] = useState(() => Date.now());
-  const [plannerDaily, setPlannerDaily] = useState<FfPlanningDailyMetric[]>([]);
-  const [plannerSource, setPlannerSource] = useState<FfPlanningSource>(defaultFfPlanningSource);
+  const [plannerSnapshot, setPlannerSnapshot] = useState<FfPlannerSnapshot | null>(null);
   const [plannerSelectedWarehouseIds, setPlannerSelectedWarehouseIds] = useState<string[]>([]);
   const [plannerLoading, setPlannerLoading] = useState(false);
   const [plannerRefreshing, setPlannerRefreshing] = useState(false);
-  const [plannerUpdatedAt, setPlannerUpdatedAt] = useState<string | null>(null);
   const [plannerRetryAt, setPlannerRetryAt] = useState<string | null>(null);
-  const [plannerWarnings, setPlannerWarnings] = useState<string[]>([]);
   const [plannerError, setPlannerError] = useState<string | null>(null);
   const [plannerClock, setPlannerClock] = useState(() => Date.now());
+  const plannerRequestVersionRef = useRef(0);
   const [analyticsPeriod, setAnalyticsPeriod] = useState<"7d" | "14d" | "30d" | "custom">("7d");
   const [analyticsRange, setAnalyticsRange] = useState({ from: isoDate(6), to: isoDate(0) });
   const [analyticsDraft, setAnalyticsDraft] = useState({ from: isoDate(6), to: isoDate(0) });
@@ -933,7 +995,6 @@ export default function Home() {
   const [loading, setLoading] = useState(true);
   const [inventoryRetryAt, setInventoryRetryAt] = useState<string | null>(null);
   const [inventoryClock, setInventoryClock] = useState(() => Date.now());
-  const [inventoryLoadingStartedAt, setInventoryLoadingStartedAt] = useState<number | null>(null);
   const [newWarehouseCity, setNewWarehouseCity] = useState("");
   const [newWarehouseName, setNewWarehouseName] = useState("");
   const [warehouseSaving, setWarehouseSaving] = useState(false);
@@ -980,37 +1041,70 @@ export default function Home() {
   }, []);
 
   const requestFfPlanning = useCallback(async (refresh: boolean) => {
-    if (refresh) setPlannerRefreshing(true);
-    else setPlannerLoading(true);
+    const requestVersion = ++plannerRequestVersionRef.current;
+    setPlannerRefreshing(refresh);
+    setPlannerLoading(!refresh);
     setPlannerError(null);
     const range = { from: isoDate(89), to: isoDate(0) };
+    const withRetryAt = (message: string, retryAt?: string | null) => Object.assign(new Error(message), { retryAt: retryAt ?? null });
     try {
-      const response = await fetch(refresh ? "/api/ff-planning" : `/api/ff-planning?${new URLSearchParams(range)}`, refresh ? {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ action: "refresh", ...range }),
-        cache: "no-store",
-      } : { cache: "no-store" });
-      const data = await response.json() as FfPlanningResponse;
-      if (response.status === 401) {
-        setAuthState("unauthenticated");
-        return;
-      }
-      if (data.warehouses && (response.ok || response.status === 429 || response.status === 502)) setManualWarehouses(data.warehouses);
-      if (data.daily && (response.ok || response.status === 429 || response.status === 502)) setPlannerDaily(data.daily);
-      if (data.source) setPlannerSource(data.source);
-      setPlannerWarnings(data.warnings ?? []);
-      setPlannerUpdatedAt(data.updatedAt ?? null);
-      setPlannerRetryAt(data.retryAt ?? null);
-      if (!response.ok && response.status !== 429 && response.status !== 502) throw new Error(data.error || "Не удалось загрузить план поставок");
-      if (data.error) throw new Error(data.error);
+      await runAtomicFfPlannerRefresh(async () => {
+        const response = await fetch(refresh ? "/api/ff-planning" : `/api/ff-planning?${new URLSearchParams(range)}`, refresh ? {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ action: "refresh", ...range }),
+          cache: "no-store",
+        } : { cache: "no-store" });
+        const data = await response.json() as FfPlanningResponse;
+        if (response.status === 401) {
+          setAuthState("unauthenticated");
+          throw withRetryAt("Сессия истекла", data.retryAt);
+        }
+        if (!response.ok || data.error) throw withRetryAt(data.error || data.warnings?.join(" · ") || "Не удалось загрузить спрос и продажи", data.retryAt);
+        return data;
+      }, async () => {
+        const targetMarketplace = cabinet?.marketplace;
+        const inventoryEndpoint = targetMarketplace === "ozon" ? "/api/ozon/inventory" : targetMarketplace === "yandex" ? "/api/yandex/inventory" : "/api/inventory";
+        const response = await fetch(`${inventoryEndpoint}${refresh ? "?refresh=1" : ""}`, { cache: "no-store" });
+        const data = await response.json() as InventoryResponse;
+        if (response.status === 401) {
+          setAuthState("unauthenticated");
+          throw withRetryAt("Сессия истекла", data.retryAt);
+        }
+        const targetName = targetMarketplace === "ozon" ? "Ozon" : targetMarketplace === "yandex" ? "Яндекс Маркет" : "Wildberries";
+        if (!response.ok || data.error) throw withRetryAt(data.error || `Не удалось загрузить остатки ${targetName}`, data.retryAt);
+        return data;
+      }, (snapshot) => {
+        if (requestVersion !== plannerRequestVersionRef.current) return;
+        const data = snapshot.inventory;
+        setPlannerSnapshot(snapshot);
+        setManualWarehouses(snapshot.warehouses);
+        setConfigured(data.configured);
+        setWarnings(data.warnings ?? []);
+        setInventoryRetryAt(data.retryAt ?? null);
+        if (data.cabinet) setCabinet(data.cabinet);
+        setWarehouseNames(data.warehouseNames ?? []);
+        setRows(snapshot.rows);
+        setTotals(data.totals ? { ...emptyTotals, ...data.totals, ffStock: data.totals.ffStock ?? {}, fbsByLocation: { ...emptyFbsBreakdown, ...data.totals.fbsByLocation } } : emptyTotals);
+        setHandoverTiming(data.handoverTiming ? { ...emptyHandoverMetrics, ...data.handoverTiming, overall: { ...emptyHandoverMetrics.overall, ...data.handoverTiming.overall }, byLocation: data.handoverTiming.byLocation ?? {} } : emptyHandoverMetrics);
+        setUpdatedAt(data.updatedAt ?? snapshot.updatedAt);
+      });
+      if (requestVersion === plannerRequestVersionRef.current) setPlannerRetryAt(null);
     } catch (planningError) {
-      setPlannerError(planningError instanceof Error ? planningError.message : "Не удалось загрузить план поставок");
+      if (requestVersion !== plannerRequestVersionRef.current) return;
+      const retryAt = planningError && typeof planningError === "object" && "retryAt" in planningError
+        ? (planningError as { retryAt?: string | null }).retryAt
+        : null;
+      setPlannerRetryAt(retryAt ?? null);
+      const message = planningError instanceof Error ? planningError.message : "Не удалось загрузить план поставок";
+      setPlannerError(`Согласованный снимок не обновлён: ${message}. Частичные данные не применены.`);
     } finally {
-      if (refresh) setPlannerRefreshing(false);
-      else setPlannerLoading(false);
+      if (requestVersion === plannerRequestVersionRef.current) {
+        setPlannerRefreshing(false);
+        setPlannerLoading(false);
+      }
     }
-  }, []);
+  }, [cabinet?.marketplace]);
 
   const loadFfPlanning = useCallback(() => requestFfPlanning(false), [requestFfPlanning]);
 
@@ -1121,7 +1215,6 @@ export default function Home() {
 
   const loadData = useCallback(async (force = false, marketplaceOverride?: CabinetSummary["marketplace"]) => {
     setLoading(true);
-    setInventoryLoadingStartedAt(Date.now());
     setError(null);
     try {
       const targetMarketplace = marketplaceOverride ?? cabinet?.marketplace;
@@ -1148,14 +1241,10 @@ export default function Home() {
       setError(loadError instanceof Error ? loadError.message : "Не удалось получить данные маркетплейса");
     } finally {
       setLoading(false);
-      setInventoryLoadingStartedAt(null);
     }
   }, [cabinet?.marketplace]);
 
-  const refreshFfPlanning = useCallback(
-    () => Promise.all([requestFfPlanning(true), loadData(true)]).then(() => undefined),
-    [loadData, requestFfPlanning],
-  );
+  const refreshFfPlanning = useCallback(() => requestFfPlanning(true), [requestFfPlanning]);
 
   const loadAnalytics = useCallback(async (range = analyticsRange, force = false) => {
     setAnalyticsLoading(true);
@@ -1228,11 +1317,6 @@ export default function Home() {
     const milliseconds = Date.parse(plannerRetryAt) - plannerClock;
     return Number.isFinite(milliseconds) ? Math.max(0, Math.ceil(milliseconds / 1000)) : null;
   }, [plannerClock, plannerRetryAt]);
-
-  const inventoryRefreshSeconds = useMemo(() => {
-    if (!loading || !inventoryLoadingStartedAt) return null;
-    return Math.min(25, Math.max(0, Math.floor((inventoryClock - inventoryLoadingStartedAt) / 1000)));
-  }, [inventoryClock, inventoryLoadingStartedAt, loading]);
 
   useEffect(() => {
     void (async () => {
@@ -1312,15 +1396,16 @@ export default function Home() {
   }, [plannerRetryAt]);
 
   const visibleManualWarehouses = useMemo(() => manualWarehouses.filter((warehouse) => !warehouse.isHidden), [manualWarehouses]);
+  const plannerWarehouses = plannerSnapshot?.warehouses ?? manualWarehouses;
 
   useEffect(() => {
-    const visibleIds = manualWarehouses.filter((warehouse) => !warehouse.isHidden).map((warehouse) => warehouse.id);
+    const visibleIds = plannerWarehouses.filter((warehouse) => !warehouse.isHidden).map((warehouse) => warehouse.id);
     const timer = window.setTimeout(() => setPlannerSelectedWarehouseIds((current) => {
         const valid = current.filter((id) => visibleIds.includes(id));
         return valid.length ? valid : visibleIds;
       }), 0);
     return () => window.clearTimeout(timer);
-  }, [manualWarehouses]);
+  }, [plannerWarehouses]);
 
   const selectedImportWarehouseId = manualWarehouses.some((item) => item.id === importWarehouseId)
     ? importWarehouseId
@@ -1712,8 +1797,9 @@ export default function Home() {
 
   const logoutAdmin = async () => {
     await fetch("/api/auth/logout", { method: "POST" }).catch(() => undefined);
+    plannerRequestVersionRef.current += 1;
     setRows([]);
-    setPlannerDaily([]);
+    setPlannerSnapshot(null);
     setPlannerSelectedWarehouseIds([]);
     setSelected(null);
     setCabinet(null);
@@ -1745,11 +1831,10 @@ export default function Home() {
       setWarehouseNames([]);
       setTotals(emptyTotals);
       setManualWarehouses(defaultManualWarehouses);
-      setPlannerDaily([]);
+      plannerRequestVersionRef.current += 1;
+      setPlannerSnapshot(null);
       setPlannerSelectedWarehouseIds([]);
-      setPlannerUpdatedAt(null);
       setPlannerRetryAt(null);
-      setPlannerWarnings([]);
       setPlannerError(null);
       setSelected(null);
       setSelectedFulfillmentWarehouseId(null);
@@ -1834,7 +1919,7 @@ export default function Home() {
       </aside>
 
       <section className="workspace">
-        <header className="topbar"><div><p className="eyebrow">{currentViewTitle.eyebrow}</p><h1>{currentViewTitle.title}</h1></div><div className="header-actions"><span className="refresh-guidance">Можно обновить вручную · рекомендуем раз в 2 мин</span><div className="sync-state"><span className={error ? "live-dot offline" : "live-dot"} /><span>Последнее обновление<br/><strong>{formatSyncTime(updatedAt)} МСК</strong></span></div><button className="logout-btn" type="button" onClick={() => void logoutAdmin()}>Выйти</button><button className="secondary-btn" type="button" onClick={() => void (activeView === "sales" ? refreshFfPlanning() : loadData(true))} disabled={loading || Boolean(inventoryRetrySeconds) || (activeView === "sales" && (plannerRefreshing || Boolean(plannerRetrySeconds)))} title={inventoryRetrySeconds ? `Общий запрос к ${marketplaceName} уже выполняется` : activeView === "sales" && plannerRetrySeconds ? "Обновление плана временно ограничено" : loading || plannerRefreshing ? "Обновление займёт не больше 25 секунд" : "Можно обновить вручную в любой момент. Рекомендованный интервал — 2 минуты."}><span className={loading || (activeView === "sales" && plannerRefreshing) ? "spin" : ""}>↻</span>{loading || (activeView === "sales" && plannerRefreshing) ? `Обновляем ${inventoryRefreshSeconds ?? 0}/25 с` : inventoryRetrySeconds ? `Через ${formatCountdown(inventoryRetrySeconds)}` : activeView === "sales" && plannerRetrySeconds ? `Через ${formatCountdown(plannerRetrySeconds)}` : "Обновить"}</button><button className="primary-btn" type="button" onClick={() => downloadCsv(filteredRows, `ostatki-${isOzon ? "ozon" : isYandex ? "yandex" : "wb"}`)} disabled={!rows.length}>Экспорт<span>↓</span></button></div></header>
+        <header className="topbar"><div><p className="eyebrow">{currentViewTitle.eyebrow}</p><h1>{currentViewTitle.title}</h1></div><div className="header-actions"><span className="refresh-guidance">Можно обновить вручную · рекомендуем раз в 2 мин</span><div className="sync-state"><span className={error ? "live-dot offline" : "live-dot"} /><span>Последнее обновление<br/><strong>{formatSyncTime(updatedAt)} МСК</strong></span></div><button className="logout-btn" type="button" onClick={() => void logoutAdmin()}>Выйти</button><button className="secondary-btn" type="button" onClick={() => void (activeView === "sales" ? refreshFfPlanning() : loadData(true))} disabled={loading || Boolean(inventoryRetrySeconds) || (activeView === "sales" && (plannerLoading || plannerRefreshing || Boolean(plannerRetrySeconds)))} title={inventoryRetrySeconds ? `Общий запрос к ${marketplaceName} уже выполняется` : activeView === "sales" && plannerRetrySeconds ? "Обновление плана временно ограничено" : loading || plannerLoading || plannerRefreshing ? "Обновление займёт не больше 25 секунд" : "Можно обновить вручную в любой момент. Рекомендованный интервал — 2 минуты."}><span className={loading || (activeView === "sales" && (plannerLoading || plannerRefreshing)) ? "spin" : ""}>↻</span>{loading || (activeView === "sales" && (plannerLoading || plannerRefreshing)) ? "Обновляем…" : inventoryRetrySeconds ? `Через ${formatCountdown(inventoryRetrySeconds)}` : activeView === "sales" && plannerRetrySeconds ? `Через ${formatCountdown(plannerRetrySeconds)}` : "Обновить"}</button><button className="primary-btn" type="button" onClick={() => downloadCsv(filteredRows, `ostatki-${isOzon ? "ozon" : isYandex ? "yandex" : "wb"}`)} disabled={!rows.length}>Экспорт<span>↓</span></button></div></header>
 
         <div className="content" id="overview">
           {cabinet && <section className={`cabinet-strip ${cabinet.configured ? "ready" : "waiting"}`}>
@@ -2080,19 +2165,20 @@ export default function Home() {
             </section>
           ) : activeView === "sales" ? (
             <FfSupplyPlanner
-              warehouses={manualWarehouses}
-              daily={plannerDaily}
-              rows={rows}
+              warehouses={plannerWarehouses}
+              daily={plannerSnapshot?.daily ?? []}
+              rows={plannerSnapshot?.rows ?? []}
+              dataAvailable={Boolean(plannerSnapshot)}
               selectedWarehouseIds={plannerSelectedWarehouseIds}
               onSelectedWarehouseIdsChange={setPlannerSelectedWarehouseIds}
               onRefresh={() => void refreshFfPlanning()}
-              loading={plannerLoading || loading}
+              loading={plannerLoading}
               refreshing={plannerRefreshing}
-              updatedAt={plannerUpdatedAt}
+              updatedAt={plannerSnapshot?.updatedAt ?? null}
               retrySeconds={plannerRetrySeconds}
               error={plannerError}
-              warnings={plannerWarnings}
-              source={plannerSource}
+              warnings={plannerSnapshot?.warnings ?? []}
+              source={plannerSnapshot?.source ?? defaultFfPlanningSource}
             />
           ) : <>
             <section className={`metric-grid ${activeView !== "overview" ? "view-hidden" : ""}`} aria-label="Ключевые показатели">
