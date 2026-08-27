@@ -6,14 +6,14 @@ import { aggregateDailyFfMetrics } from "../lib/ff-planning-source.ts";
 test("excludes canceled FBS orders and canceled buyouts while keeping date, FF, and SKU distinct", () => {
   const result = aggregateDailyFfMetrics({
     orders: [
-      { id: "o-1", createdAt: "2026-08-10T09:00:00Z", warehouseId: "wb-1", productKey: "nm:10", nmId: 10, sku: "A", quantity: 2 },
-      { id: "o-2", createdAt: "2026-08-10T10:00:00Z", warehouseId: "wb-1", productKey: "nm:10", nmId: 10, sku: "A", quantity: 1 },
-      { id: "o-3", createdAt: "2026-08-11T10:00:00Z", warehouseId: "wb-2", productKey: "nm:10", nmId: 10, sku: "A", quantity: 3 },
+      { id: "o-1", createdAt: "2026-08-10T09:00:00Z", warehouseId: "wb-1", productKey: "nm:10", nmId: 10, sku: "A", quantity: 2, fulfillmentType: "FBS", isCreated: true },
+      { id: "o-2", createdAt: "2026-08-10T10:00:00Z", warehouseId: "wb-1", productKey: "nm:10", nmId: 10, sku: "A", quantity: 1, fulfillmentType: "FBS", isCreated: true },
+      { id: "o-3", createdAt: "2026-08-11T10:00:00Z", warehouseId: "wb-2", productKey: "nm:10", nmId: 10, sku: "A", quantity: 3, fulfillmentType: "FBS", isCreated: true },
     ],
     statuses: [{ orderId: "o-2", status: "cancelled", quantity: 1 }],
     sales: [
-      { id: "s-1", soldAt: "2026-08-10T12:00:00Z", warehouseId: "wb-1", productKey: "nm:10", nmId: 10, sku: "A", quantity: 2 },
-      { id: "s-2", soldAt: "2026-08-10T13:00:00Z", warehouseId: "wb-1", productKey: "nm:10", nmId: 10, sku: "A", quantity: 1, canceled: true },
+      { id: "s-1", soldAt: "2026-08-10T12:00:00Z", warehouseId: "wb-1", productKey: "nm:10", nmId: 10, sku: "A", quantity: 2, confirmedBuyout: true },
+      { id: "s-2", soldAt: "2026-08-10T13:00:00Z", warehouseId: "wb-1", productKey: "nm:10", nmId: 10, sku: "A", quantity: 1, canceled: true, confirmedBuyout: true },
     ],
     warehouseMappings: { "wb-1": "ff-a", "wb-2": "ff-b" },
   });
@@ -26,8 +26,8 @@ test("excludes canceled FBS orders and canceled buyouts while keeping date, FF, 
 
 test("keeps unmapped marketplace warehouses as unassigned", () => {
   const result = aggregateDailyFfMetrics({
-    orders: [{ id: "o-1", createdAt: "2026-08-12", warehouseName: "Новый склад", productKey: "sku:X", sku: "X", quantity: 1 }],
-    sales: [{ id: "s-1", soldAt: "2026-08-12", warehouseName: "Новый склад", productKey: "sku:X", sku: "X", quantity: 1 }],
+    orders: [{ id: "o-1", createdAt: "2026-08-12", warehouseName: "Новый склад", productKey: "sku:X", sku: "X", quantity: 1, fulfillmentType: "FBS", isCreated: true }],
+    sales: [{ id: "s-1", soldAt: "2026-08-12", warehouseName: "Новый склад", productKey: "sku:X", sku: "X", quantity: 1, confirmedBuyout: true }],
     warehouseMappings: [{ warehouseId: "wb-1", warehouseName: "Известный склад", ffWarehouseId: "ff-a" }],
   });
 
@@ -60,8 +60,32 @@ test("counts sold only for confirmed buyouts", () => {
 
 test("supports record warehouse mappings by normalized marketplace warehouse name", () => {
   const result = aggregateDailyFfMetrics({
-    orders: [{ id: "o-1", createdAt: "2026-08-14", warehouseName: "  Склад Имени  ", productKey: "sku:N", sku: "N", quantity: 1 }],
+    orders: [{ id: "o-1", createdAt: "2026-08-14", warehouseName: "  Склад Имени  ", productKey: "sku:N", sku: "N", quantity: 1, fulfillmentType: "FBS", isCreated: true }],
     warehouseMappings: { "склад имени": "ff-name" },
   });
   assert.equal(result[0]?.warehouseId, "ff-name");
+});
+
+test("excludes demand when FBS and created metadata are missing", () => {
+  const result = aggregateDailyFfMetrics({
+    orders: [{ id: "missing", createdAt: "2026-08-15", warehouseId: "wb-1", productKey: "sku:M", sku: "M", quantity: 1 }],
+    warehouseMappings: { "wb-1": "ff-a" },
+  });
+  assert.deepEqual(result, []);
+});
+
+test("excludes sold when buyout confirmation metadata is missing", () => {
+  const result = aggregateDailyFfMetrics({
+    sales: [{ id: "missing", soldAt: "2026-08-15", warehouseId: "wb-1", productKey: "sku:M", sku: "M", quantity: 1 }],
+    warehouseMappings: { "wb-1": "ff-a" },
+  });
+  assert.deepEqual(result, []);
+});
+
+test("indexes nested record warehouse mapping names", () => {
+  const result = aggregateDailyFfMetrics({
+    orders: [{ id: "o-1", createdAt: "2026-08-16", warehouseName: "Склад", productKey: "sku:R", sku: "R", quantity: 1, fulfillmentType: "FBS", isCreated: true }],
+    warehouseMappings: { "wb-1": { warehouseName: "Склад", ffWarehouseId: "ff-a" } },
+  });
+  assert.equal(result[0]?.warehouseId, "ff-a");
 });

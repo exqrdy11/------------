@@ -99,8 +99,12 @@ function mappingLookup(input: AggregateDailyFfMetricsInput) {
       if (typeof value === "string") {
         byId.set(marketplaceId, value);
         byName.set(marketplaceId.trim().toLocaleLowerCase("ru-RU"), value);
+      } else if (value?.ffWarehouseId ?? value?.id) {
+        const ffId = String(value.ffWarehouseId ?? value.id);
+        byId.set(marketplaceId, ffId);
+        if (value.warehouseName?.trim()) byName.set(value.warehouseName.trim().toLocaleLowerCase("ru-RU"), ffId);
+        if (value.name?.trim()) byName.set(value.name.trim().toLocaleLowerCase("ru-RU"), ffId);
       }
-      else if (value?.ffWarehouseId ?? value?.id) byId.set(marketplaceId, String(value.ffWarehouseId ?? value.id));
     }
   }
   return (event: { warehouseId?: string | number | null; warehouseName?: string | null }) => {
@@ -112,16 +116,15 @@ function mappingLookup(input: AggregateDailyFfMetricsInput) {
 }
 
 function isCreatedFbsOrder(order: NormalizedOrderEvent): boolean {
-  if (order.isFbs === false || order.isCreated === false || order.created === false) return false;
-  if (order.fulfillmentType && !/fbs/i.test(order.fulfillmentType)) return false;
-  if (order.orderType && !/fbs/i.test(order.orderType)) return false;
-  return true;
+  const affirmativeFbs = order.isFbs === true || /fbs/i.test(order.fulfillmentType ?? "") || /fbs/i.test(order.orderType ?? "");
+  const affirmativeCreated = order.isCreated === true || order.created === true;
+  return affirmativeFbs && affirmativeCreated;
 }
 
 function isConfirmedBuyout(sale: NormalizedSaleEvent): boolean {
-  if (sale.confirmedBuyout === false || sale.buyoutConfirmed === false || sale.isBuyoutConfirmed === false || sale.confirmed === false) return false;
-  if (sale.status && !/buyout|выкуп|confirm|complete|sold|продаж/i.test(sale.status)) return false;
-  return true;
+  const affirmativeSignal = sale.confirmedBuyout === true || sale.buyoutConfirmed === true || sale.isBuyoutConfirmed === true || sale.confirmed === true;
+  const affirmativeStatus = /buyout|выкуп|confirm|complete|sold|продаж/i.test(sale.status ?? "");
+  return affirmativeSignal || affirmativeStatus;
 }
 
 function product(event: { productKey?: string | null; nmId?: string | number | null; sku?: string | null }) {

@@ -32,3 +32,12 @@
 - Full verification: `npm test`; build completed, rendered 12/12, TypeScript 14/14 passed.
 - Fixes: explicit FBS/created filters for demand, confirmed buyout filters for sold, and normalized record-name mapping lookup.
 - Commit: `b897154` — `fix: restrict planning source events`.
+
+## Fix round 2
+
+- Added negative coverage for missing FBS/created metadata and missing buyout confirmation, plus nested record mapping names.
+- RED command: `node --experimental-strip-types --test tests/ff-planning-source.test.ts`; 5 passed, 3 failed (demand/sold missing metadata were included; nested mapping resolved to `unassigned`).
+- GREEN command: `node --experimental-strip-types --test tests/ff-planning-source.test.ts`; 8/8 passed.
+- Full verification: `npm test`; build completed, rendered 12/12, TypeScript 17/17 passed.
+- Fixes are fail-closed: demand requires affirmative FBS and created signals; sold requires affirmative confirmed-buyout signal or canonical status; nested record mapping names are indexed.
+- Commit: separate Fix round 2 commit created with this report update.
