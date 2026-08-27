@@ -49,4 +49,4 @@
 - GREEN command: `node --experimental-strip-types --test tests/ff-planning-source.test.ts`; 10/10 passed.
 - Full verification: `npm test`; build completed, rendered 12/12, TypeScript 19/19 passed.
 - Fixes: explicit false/non-FBS/not-created aliases veto demand; explicit unconfirmed signals veto sold; buyout statuses use exact normalized canonical matching.
-- Commit: Fix round 3 commit created with this report update.
+- Commit: `affe1da` — `fix: veto conflicting planning event metadata`.
