@@ -3,6 +3,7 @@
 import { type ChangeEvent, type FormEvent, useCallback, useEffect, useMemo, useState } from "react";
 import * as CFB from "cfb";
 import * as XLSX from "xlsx";
+import { summarizeActiveFbsLocations } from "@/lib/fbs-summary";
 
 type StockStatus = "В норме" | "Мало" | "Заканчивается";
 type View = "overview" | "stock" | "fbs" | "sales" | "analytics" | "pricing" | "payments" | "reports" | "fulfillment" | "manual" | "cabinets";
@@ -943,6 +944,10 @@ export default function Home() {
     if ((activeFbsByLocation.unassigned ?? 0) > 0) locations.push({ id: "unassigned", city: "Не назначено", label: "Выберите склад ФФ" });
     return locations;
   }, [activeFbsByLocation.unassigned, marketplaceCode, visibleManualWarehouses]);
+  const activeFbsLocationSummary = useMemo(
+    () => summarizeActiveFbsLocations(fbsLocations, activeFbsByLocation, 2),
+    [activeFbsByLocation, fbsLocations],
+  );
 
   const ffReservedFromStockTotal = useMemo(() => visibleManualWarehouses.reduce((sum, warehouse) => (
     sum + (totals.fbsByLocation[warehouse.id] ?? 0)
@@ -1703,7 +1708,7 @@ export default function Home() {
             <section className={`metric-grid ${activeView !== "overview" ? "view-hidden" : ""}`} aria-label="Ключевые показатели">
               <article className="metric-card featured"><div className="metric-top"><span>Остаток на складах {marketplaceName}</span><span className="trend up">● {marketplaceCode} API</span></div><strong className="metric-value">{loading ? "—" : formatNumber.format(totals.available)} <small>шт.</small></strong><div className="spark-bars" aria-hidden="true">{[24,31,28,42,38,52,47,62,58,74,69,83].map((height, index) => <i key={index} style={{ height }} />)}</div><p>Фактический остаток FBO · отдельно от FBS</p></article>
               <article className="metric-card"><div className="metric-icon green">□</div><div className="metric-label">Свободно к продаже на ФФ</div><strong className="metric-value">{loading ? "—" : formatNumber.format(ffAvailableTotal)} <small>шт.</small></strong><p>Фактически на ФФ {formatNumber.format(ffPhysicalTotal)} · новые FBS в резерве {formatNumber.format(ffReservedFromStockTotal)}</p></article>
-              <article className="metric-card"><div className="metric-icon blue">→</div><div className="metric-label">Активные FBS</div><strong className="metric-value">{loading ? "—" : formatNumber.format(activeFbsTotal)} <small>шт.</small></strong><p>{fbsLocations.map((location) => <span key={location.id}>{location.city} <b>{activeFbsByLocation[location.id] ?? 0}</b>{" · "}</span>)}</p></article>
+              <article className="metric-card"><div className="metric-icon blue">→</div><div className="metric-label">Активные FBS</div><strong className="metric-value">{loading ? "—" : formatNumber.format(activeFbsTotal)} <small>шт.</small></strong><p className="metric-location-summary">{activeFbsLocationSummary.items.length ? <><span>{activeFbsLocationSummary.items.map((location) => `${location.city} ${formatNumber.format(location.quantity)}`).join(" · ")}</span>{activeFbsLocationSummary.hiddenLabel && <small>{activeFbsLocationSummary.hiddenLabel}</small>}</> : <span>Нет активных заказов</span>}</p></article>
               <article className="metric-card"><div className="metric-icon amber">◷</div><div className="metric-label">Продано</div><strong className="metric-value">{loading ? "—" : formatNumber.format(totals.toSale)} <small>шт.</small></strong><p>Факт выкупа · без отмен</p></article>
             </section>
 

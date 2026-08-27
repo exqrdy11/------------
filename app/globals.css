@@ -86,6 +86,9 @@ h1 { margin: 0; font-size: 24px; font-weight: 680; letter-spacing: -.035em; }
 .metric-card p { position: absolute; bottom: 18px; margin: 0; color: #929baa; font-size: 10px; }
 .metric-card.featured p { max-width: 190px; color: #8997ae; line-height: 1.35; }
 .metric-card p b { color: #505a69; font-weight: 700; }.metric-card.featured p b { color: white; }
+.metric-card p.metric-location-summary { left: 21px; right: 21px; display: grid; gap: 3px; line-height: 1.25; }
+.metric-location-summary > span, .metric-location-summary > small { display: block; min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.metric-location-summary > small { color: #a2aab6; font-size: 8px; }
 .metric-icon { width: 29px; height: 29px; display: grid; place-items: center; border-radius: 9px; font-weight: 750; font-size: 15px; }.metric-icon.blue { color: var(--blue); background: #edf1ff; }.metric-icon.amber { color: var(--amber); background: #fff5e3; }.metric-icon.green { color: var(--green); background: #eaf8f1; }.metric-icon.red { color: var(--red); background: #fff0ef; }
 .metric-label { position: absolute; top: 25px; left: 60px; color: #778093; font-size: 11px; }
 .spark-bars { position: absolute; right: 19px; bottom: 19px; height: 68px; width: 123px; display: flex; align-items: end; gap: 4px; opacity: .9; }
