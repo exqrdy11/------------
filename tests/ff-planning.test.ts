@@ -22,6 +22,12 @@ test("effectivePeriod rejects an original period over 90 days even when opening 
   );
 });
 
+test("effectivePeriod accepts exactly 90 inclusive selected days", () => {
+  assert.deepEqual(effectivePeriod({ from: "2026-01-01", to: "2026-03-31" }), {
+    from: "2026-01-01", to: "2026-03-31", days: 90,
+  });
+});
+
 test("zero demand has no coverage and recommends no supply", () => {
   const plan = calculateFfPlan({ from: "2026-08-01", to: "2026-08-07", demand: 0, freeStock: 20, targetCoverageDays: 14 });
   assert.equal(plan.effectiveDays, 7);
