@@ -11,6 +11,8 @@ export const ffWarehouses = sqliteTable("ff_warehouses", {
   wbWarehouseName: text("wb_warehouse_name"),
   serviceRateKopecks: integer("service_rate_kopecks").notNull().default(0),
   isHidden: integer("is_hidden", { mode: "boolean" }).notNull().default(false),
+  openedAt: text("opened_at"),
+  planningTargetDays: integer("planning_target_days").notNull().default(14),
   createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
 }, (table) => [primaryKey({ columns: [table.cabinetId, table.id] })]);
 
@@ -36,6 +38,18 @@ export const ffStockBatches = sqliteTable("ff_stock_batches", {
   quantity: integer("quantity").notNull().default(0),
   updatedAt: text("updated_at").notNull().default(sql`CURRENT_TIMESTAMP`),
 }, (table) => [primaryKey({ columns: [table.cabinetId, table.productKey, table.location, table.batchCode, table.expiresAt] })]);
+
+export const ffDailyMetrics = sqliteTable("ff_daily_metrics", {
+  cabinetId: text("cabinet_id").notNull().default("metanutrix"),
+  metricDate: text("metric_date").notNull(),
+  warehouseId: text("warehouse_id").notNull(),
+  productKey: text("product_key").notNull(),
+  nmId: integer("nm_id"),
+  sku: text("sku").notNull().default(""),
+  demand: integer("demand").notNull().default(0),
+  sold: integer("sold").notNull().default(0),
+  updatedAt: text("updated_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+}, (table) => [primaryKey({ columns: [table.cabinetId, table.metricDate, table.warehouseId, table.productKey, table.sku] })]);
 
 export const marketplaceCredentials = sqliteTable("marketplace_credentials", {
   cabinetId: text("cabinet_id").notNull().default("metanutrix"),

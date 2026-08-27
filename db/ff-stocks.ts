@@ -1,5 +1,6 @@
 import { getD1 } from "./index";
 import { cabinetIds, type CabinetId } from "@/lib/admin-auth";
+import { normalizeOpenedAt, normalizePlanningTargetDays } from "./ff-planning";
 
 export type ManualWarehouse = {
   id: string;
@@ -10,6 +11,8 @@ export type ManualWarehouse = {
   wbWarehouseName: string | null;
   serviceRateKopecks: number;
   isHidden: boolean;
+  openedAt: string | null;
+  planningTargetDays: number;
 };
 
 export type FfStock = Record<string, number>;
@@ -34,9 +37,9 @@ type FfBatchRow = {
 };
 
 const defaultWarehouses: ManualWarehouse[] = [
-  { id: "kazan", city: "Казань", name: "Наш склад", position: 10, wbWarehouseId: 1692397, wbWarehouseName: null, serviceRateKopecks: 0, isHidden: false },
-  { id: "moscow", city: "Москва", name: "БИК ФФ", position: 20, wbWarehouseId: null, wbWarehouseName: null, serviceRateKopecks: 0, isHidden: false },
-  { id: "spb", city: "Питер", name: "Rus ФФ", position: 30, wbWarehouseId: null, wbWarehouseName: null, serviceRateKopecks: 0, isHidden: false },
+  { id: "kazan", city: "Казань", name: "Наш склад", position: 10, wbWarehouseId: 1692397, wbWarehouseName: null, serviceRateKopecks: 0, isHidden: false, openedAt: null, planningTargetDays: 14 },
+  { id: "moscow", city: "Москва", name: "БИК ФФ", position: 20, wbWarehouseId: null, wbWarehouseName: null, serviceRateKopecks: 0, isHidden: false, openedAt: null, planningTargetDays: 14 },
+  { id: "spb", city: "Питер", name: "Rus ФФ", position: 30, wbWarehouseId: null, wbWarehouseName: null, serviceRateKopecks: 0, isHidden: false, openedAt: null, planningTargetDays: 14 },
 ];
 
 const createStocksTableSql = `
@@ -63,6 +66,8 @@ const createWarehousesTableSql = `
     wb_warehouse_name TEXT,
     service_rate_kopecks INTEGER NOT NULL DEFAULT 0,
     is_hidden INTEGER NOT NULL DEFAULT 0,
+    opened_at TEXT,
+    planning_target_days INTEGER NOT NULL DEFAULT 14,
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     PRIMARY KEY (cabinet_id, id)
   )
@@ -163,6 +168,8 @@ async function getFfStockDb() {
       if (!currentWarehouseColumnNames.has("wb_warehouse_name")) await d1.prepare("ALTER TABLE ff_warehouses ADD COLUMN wb_warehouse_name TEXT").run();
       if (!currentWarehouseColumnNames.has("service_rate_kopecks")) await d1.prepare("ALTER TABLE ff_warehouses ADD COLUMN service_rate_kopecks INTEGER NOT NULL DEFAULT 0").run();
       if (!currentWarehouseColumnNames.has("is_hidden")) await d1.prepare("ALTER TABLE ff_warehouses ADD COLUMN is_hidden INTEGER NOT NULL DEFAULT 0").run();
+      if (!currentWarehouseColumnNames.has("opened_at")) await d1.prepare("ALTER TABLE ff_warehouses ADD COLUMN opened_at TEXT").run();
+      if (!currentWarehouseColumnNames.has("planning_target_days")) await d1.prepare("ALTER TABLE ff_warehouses ADD COLUMN planning_target_days INTEGER NOT NULL DEFAULT 14").run();
 
       await d1.batch([
         d1.prepare("DELETE FROM ff_stock_batches WHERE cabinet_id = 'trusthome'"),
@@ -192,11 +199,11 @@ async function getFfStockDb() {
 
 export async function listFfWarehouses(cabinetId: CabinetId) {
   const d1 = await getFfStockDb();
-  const result = await d1.prepare("SELECT id, city, name, position, wb_warehouse_id AS wbWarehouseId, wb_warehouse_name AS wbWarehouseName, service_rate_kopecks AS serviceRateKopecks, is_hidden AS isHidden FROM ff_warehouses WHERE cabinet_id = ? ORDER BY position, city, name").bind(cabinetId).all<ManualWarehouse & { serviceRateKopecks: number | null; isHidden: boolean | number }>();
-  return (result.results ?? []).map((warehouse) => ({ ...warehouse, serviceRateKopecks: Math.max(0, Number(warehouse.serviceRateKopecks) || 0), isHidden: Boolean(warehouse.isHidden) }));
+  const result = await d1.prepare("SELECT id, city, name, position, wb_warehouse_id AS wbWarehouseId, wb_warehouse_name AS wbWarehouseName, service_rate_kopecks AS serviceRateKopecks, is_hidden AS isHidden, opened_at AS openedAt, planning_target_days AS planningTargetDays FROM ff_warehouses WHERE cabinet_id = ? ORDER BY position, city, name").bind(cabinetId).all<ManualWarehouse & { serviceRateKopecks: number | null; isHidden: boolean | number; planningTargetDays: number | null }>();
+  return (result.results ?? []).map((warehouse) => ({ ...warehouse, serviceRateKopecks: Math.max(0, Number(warehouse.serviceRateKopecks) || 0), isHidden: Boolean(warehouse.isHidden), openedAt: normalizeOpenedAt(warehouse.openedAt), planningTargetDays: Number.isInteger(warehouse.planningTargetDays) && warehouse.planningTargetDays >= 1 && warehouse.planningTargetDays <= 365 ? warehouse.planningTargetDays : 14 }));
 }
 
-export async function createFfWarehouse(input: { cabinetId: CabinetId; city: string; name: string }) {
+export async function createFfWarehouse(input: { cabinetId: CabinetId; city: string; name: string; openedAt?: string | null; planningTargetDays?: number }) {
   const d1 = await getFfStockDb();
   const current = await listFfWarehouses(input.cabinetId);
   const warehouse: ManualWarehouse = {
@@ -208,8 +215,10 @@ export async function createFfWarehouse(input: { cabinetId: CabinetId; city: str
     wbWarehouseName: null,
     serviceRateKopecks: 0,
     isHidden: false,
+    openedAt: normalizeOpenedAt(input.openedAt),
+    planningTargetDays: normalizePlanningTargetDays(input.planningTargetDays),
   };
-  await d1.prepare("INSERT INTO ff_warehouses (cabinet_id, id, city, name, position, wb_warehouse_id, wb_warehouse_name, service_rate_kopecks, is_hidden) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)").bind(
+  await d1.prepare("INSERT INTO ff_warehouses (cabinet_id, id, city, name, position, wb_warehouse_id, wb_warehouse_name, service_rate_kopecks, is_hidden, opened_at, planning_target_days) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)").bind(
     input.cabinetId,
     warehouse.id,
     warehouse.city,
@@ -219,6 +228,8 @@ export async function createFfWarehouse(input: { cabinetId: CabinetId; city: str
     warehouse.wbWarehouseName,
     warehouse.serviceRateKopecks,
     warehouse.isHidden,
+    warehouse.openedAt,
+    warehouse.planningTargetDays,
   ).run();
   return warehouse;
 }
@@ -230,14 +241,18 @@ export async function updateFfWarehouse(input: ManualWarehouse & { cabinetId: Ca
     city: input.city.trim(),
     name: input.name.trim(),
     wbWarehouseName: input.wbWarehouseName?.trim() || null,
+    openedAt: normalizeOpenedAt(input.openedAt),
+    planningTargetDays: normalizePlanningTargetDays(input.planningTargetDays),
   };
-  await d1.prepare("UPDATE ff_warehouses SET city = ?, name = ?, wb_warehouse_id = ?, wb_warehouse_name = ?, service_rate_kopecks = ?, is_hidden = ? WHERE cabinet_id = ? AND id = ?").bind(
+  await d1.prepare("UPDATE ff_warehouses SET city = ?, name = ?, wb_warehouse_id = ?, wb_warehouse_name = ?, service_rate_kopecks = ?, is_hidden = ?, opened_at = ?, planning_target_days = ? WHERE cabinet_id = ? AND id = ?").bind(
     warehouse.city,
     warehouse.name,
     warehouse.wbWarehouseId,
     warehouse.wbWarehouseName,
     Math.max(0, Math.round(Number(warehouse.serviceRateKopecks) || 0)),
     warehouse.isHidden,
+    warehouse.openedAt,
+    warehouse.planningTargetDays,
     warehouse.cabinetId,
     warehouse.id,
   ).run();
