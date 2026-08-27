@@ -31,4 +31,4 @@
 - GREEN command: `node --experimental-strip-types --test tests/ff-planning-source.test.ts`; 5/5 passed.
 - Full verification: `npm test`; build completed, rendered 12/12, TypeScript 14/14 passed.
 - Fixes: explicit FBS/created filters for demand, confirmed buyout filters for sold, and normalized record-name mapping lookup.
-- Commit: recorded below after verification.
+- Commit: `b897154` — `fix: restrict planning source events`.
