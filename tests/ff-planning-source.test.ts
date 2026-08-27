@@ -35,3 +35,33 @@ test("keeps unmapped marketplace warehouses as unassigned", () => {
     { warehouseId: "unassigned", productKey: "sku:X", nmId: null, sku: "X", date: "2026-08-12", demand: 1, sold: 1 },
   ]);
 });
+
+test("counts demand only for created FBS orders", () => {
+  const result = aggregateDailyFfMetrics({
+    orders: [
+      { id: "fbs", createdAt: "2026-08-13", warehouseId: "wb-1", productKey: "sku:F", sku: "F", quantity: 2, fulfillmentType: "FBS", isCreated: true },
+      { id: "fbo", createdAt: "2026-08-13", warehouseId: "wb-1", productKey: "sku:F", sku: "F", quantity: 7, fulfillmentType: "FBO", isCreated: false },
+    ],
+    warehouseMappings: { "wb-1": "ff-a" },
+  });
+  assert.equal(result[0]?.demand, 2);
+});
+
+test("counts sold only for confirmed buyouts", () => {
+  const result = aggregateDailyFfMetrics({
+    sales: [
+      { id: "confirmed", soldAt: "2026-08-13", warehouseId: "wb-1", productKey: "sku:S", sku: "S", quantity: 2, confirmedBuyout: true },
+      { id: "pending", soldAt: "2026-08-13", warehouseId: "wb-1", productKey: "sku:S", sku: "S", quantity: 7, confirmedBuyout: false },
+    ],
+    warehouseMappings: { "wb-1": "ff-a" },
+  });
+  assert.equal(result[0]?.sold, 2);
+});
+
+test("supports record warehouse mappings by normalized marketplace warehouse name", () => {
+  const result = aggregateDailyFfMetrics({
+    orders: [{ id: "o-1", createdAt: "2026-08-14", warehouseName: "  Склад Имени  ", productKey: "sku:N", sku: "N", quantity: 1 }],
+    warehouseMappings: { "склад имени": "ff-name" },
+  });
+  assert.equal(result[0]?.warehouseId, "ff-name");
+});

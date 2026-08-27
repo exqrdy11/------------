@@ -11,6 +11,11 @@ export type NormalizedOrderEvent = {
   quantity?: number | null;
   canceled?: boolean;
   isCanceled?: boolean;
+  fulfillmentType?: string | null;
+  orderType?: string | null;
+  isFbs?: boolean;
+  isCreated?: boolean;
+  created?: boolean;
 };
 
 export type NormalizedStatusEvent = {
@@ -33,6 +38,10 @@ export type NormalizedSaleEvent = {
   canceled?: boolean;
   isCanceled?: boolean;
   status?: string | null;
+  confirmedBuyout?: boolean;
+  buyoutConfirmed?: boolean;
+  isBuyoutConfirmed?: boolean;
+  confirmed?: boolean;
 };
 
 export type WarehouseMapping = {
@@ -87,7 +96,10 @@ function mappingLookup(input: AggregateDailyFfMetricsInput) {
     }
   } else {
     for (const [marketplaceId, value] of Object.entries(input.warehouseMappings ?? {})) {
-      if (typeof value === "string") byId.set(marketplaceId, value);
+      if (typeof value === "string") {
+        byId.set(marketplaceId, value);
+        byName.set(marketplaceId.trim().toLocaleLowerCase("ru-RU"), value);
+      }
       else if (value?.ffWarehouseId ?? value?.id) byId.set(marketplaceId, String(value.ffWarehouseId ?? value.id));
     }
   }
@@ -97,6 +109,19 @@ function mappingLookup(input: AggregateDailyFfMetricsInput) {
     const name = event.warehouseName?.trim().toLocaleLowerCase("ru-RU");
     return name ? byName.get(name) ?? "unassigned" : "unassigned";
   };
+}
+
+function isCreatedFbsOrder(order: NormalizedOrderEvent): boolean {
+  if (order.isFbs === false || order.isCreated === false || order.created === false) return false;
+  if (order.fulfillmentType && !/fbs/i.test(order.fulfillmentType)) return false;
+  if (order.orderType && !/fbs/i.test(order.orderType)) return false;
+  return true;
+}
+
+function isConfirmedBuyout(sale: NormalizedSaleEvent): boolean {
+  if (sale.confirmedBuyout === false || sale.buyoutConfirmed === false || sale.isBuyoutConfirmed === false || sale.confirmed === false) return false;
+  if (sale.status && !/buyout|выкуп|confirm|complete|sold|продаж/i.test(sale.status)) return false;
+  return true;
 }
 
 function product(event: { productKey?: string | null; nmId?: string | number | null; sku?: string | null }) {
@@ -127,10 +152,11 @@ export function aggregateDailyFfMetrics(input: AggregateDailyFfMetricsInput): Da
     metrics.set(key, current);
   };
   for (const order of input.orders ?? []) {
+    if (!isCreatedFbsOrder(order)) continue;
     const total = quantity(order.quantity);
     const canceled = order.canceled || order.isCanceled ? total : Math.min(total, cancellations.get(order.id) ?? 0);
     add(order, "demand", total - canceled, order.createdAt);
   }
-  for (const sale of input.sales ?? []) add(sale, "sold", sale.canceled || sale.isCanceled || /cancel|отмен/i.test(sale.status ?? "") ? 0 : quantity(sale.quantity), sale.soldAt);
+  for (const sale of input.sales ?? []) add(sale, "sold", !isConfirmedBuyout(sale) || sale.canceled || sale.isCanceled || /cancel|отмен/i.test(sale.status ?? "") ? 0 : quantity(sale.quantity), sale.soldAt);
   return [...metrics.values()].sort((a, b) => a.date.localeCompare(b.date) || a.warehouseId.localeCompare(b.warehouseId) || a.productKey.localeCompare(b.productKey) || a.sku.localeCompare(b.sku));
 }
