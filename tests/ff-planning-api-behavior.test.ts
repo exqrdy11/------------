@@ -35,6 +35,8 @@ class FakePlanningD1 {
   metrics: MetricRow[];
   refreshes = new Map<string, { cooldownUntil: string | null; updatedAt: string | null }>();
   failSku: string | null = null;
+  failRefreshUpdate = false;
+  batches: string[][] = [];
 
   constructor(metrics: MetricRow[] = []) {
     this.metrics = structuredClone(metrics);
@@ -43,6 +45,7 @@ class FakePlanningD1 {
   prepare(sql: string) { return new FakeStatement(this, sql); }
 
   async batch(statements: FakeStatement[]) {
+    this.batches.push(statements.map((statement) => statement.sql.replace(/\s+/g, " ").trim()));
     const metrics = structuredClone(this.metrics);
     const refreshes = structuredClone(this.refreshes);
     try {
@@ -76,6 +79,14 @@ class FakePlanningD1 {
       if (!this.refreshes.has(cabinetId)) this.refreshes.set(cabinetId, { cooldownUntil: null, updatedAt: null });
       return { meta: { changes: 1 } };
     }
+    if (sql.startsWith("INSERT INTO ff_planning_refreshes")) {
+      if (this.failRefreshUpdate) throw new Error("simulated refresh timestamp failure");
+      const [cabinetId, updatedAt] = statement.values.map(String);
+      const current = this.refreshes.get(cabinetId) ?? { cooldownUntil: null, updatedAt: null };
+      current.updatedAt = updatedAt;
+      this.refreshes.set(cabinetId, current);
+      return { meta: { changes: 1 } };
+    }
     if (sql.startsWith("UPDATE ff_planning_refreshes") && sql.includes("SET cooldown_until")) {
       const [cooldownUntil, cabinetId, now] = statement.values.map(String);
       const current = this.refreshes.get(cabinetId)!;
@@ -100,7 +111,7 @@ function metric(date: string, sku: string, demand: number): MetricRow {
   return { cabinetId: "metanutrix", date, warehouseId: "ff-a", productKey: `sku:${sku}`, nmId: null, sku, demand, sold: 0, updatedAt: "old" };
 }
 
-test("range replacement preserves history outside the interval and rolls back all writes on failure", async () => {
+test("range replacement commits metrics and refresh timestamp in one batch and rolls both back on failure", async () => {
   assert.equal(typeof planningDb.replaceFfDailyMetricsRangeInDb, "function");
   if (typeof planningDb.replaceFfDailyMetricsRangeInDb !== "function") return;
   const database = new FakePlanningD1([
@@ -108,6 +119,7 @@ test("range replacement preserves history outside the interval and rolls back al
     metric("2026-08-01", "OLD", 2),
     metric("2026-08-03", "AFTER", 3),
   ]);
+  database.refreshes.set("metanutrix", { cooldownUntil: "2026-08-27T10:02:00.000Z", updatedAt: "2026-08-27T09:00:00.000Z" });
 
   await planningDb.replaceFfDailyMetricsRangeInDb(database as never, {
     cabinetId: "metanutrix", from: "2026-08-01", to: "2026-08-02",
@@ -116,15 +128,23 @@ test("range replacement preserves history outside the interval and rolls back al
   assert.deepEqual(database.metrics.map((row) => [row.date, row.sku, row.demand]), [
     ["2026-07-31", "BEFORE", 1], ["2026-08-03", "AFTER", 3], ["2026-08-02", "NEW", 4],
   ]);
+  assert.equal(database.refreshes.get("metanutrix")?.updatedAt, "2026-08-27T10:00:00.000Z");
+  assert.equal(database.batches.length, 1);
+  assert.deepEqual(database.batches[0].map((sql) => sql.split(" ").slice(0, 4).join(" ")), [
+    "DELETE FROM ff_daily_metrics WHERE",
+    "INSERT INTO ff_daily_metrics (cabinet_id,",
+    "INSERT INTO ff_planning_refreshes (cabinet_id,",
+  ]);
 
-  database.failSku = "FAIL";
+  database.failRefreshUpdate = true;
   await assert.rejects(() => planningDb.replaceFfDailyMetricsRangeInDb(database as never, {
     cabinetId: "metanutrix", from: "2026-08-01", to: "2026-08-02",
-    metrics: [{ warehouseId: "ff-a", productKey: "sku:FAIL", nmId: null, sku: "FAIL", date: "2026-08-01", demand: 9, sold: 0 }],
-  }, "2026-08-27T10:01:00.000Z"), /simulated insert failure/);
+    metrics: [{ warehouseId: "ff-a", productKey: "sku:NEXT", nmId: null, sku: "NEXT", date: "2026-08-01", demand: 9, sold: 0 }],
+  }, "2026-08-27T10:01:00.000Z"), /simulated refresh timestamp failure/);
   assert.deepEqual(database.metrics.map((row) => [row.date, row.sku, row.demand]), [
     ["2026-07-31", "BEFORE", 1], ["2026-08-03", "AFTER", 3], ["2026-08-02", "NEW", 4],
   ]);
+  assert.equal(database.refreshes.get("metanutrix")?.updatedAt, "2026-08-27T10:00:00.000Z");
 });
 
 test("warehouse planning patch preserves omitted metadata and applies explicit values", () => {

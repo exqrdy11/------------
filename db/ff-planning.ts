@@ -168,7 +168,13 @@ export async function replaceFfDailyMetricsRangeInDb(d1: PlanningDatabase, input
   await d1.batch([
     d1.prepare("DELETE FROM ff_daily_metrics WHERE cabinet_id = ? AND metric_date >= ? AND metric_date <= ?").bind(input.cabinetId, from, to),
     ...metricInsertStatements(d1, input.cabinetId, metrics, updatedAt),
+    d1.prepare(`
+      INSERT INTO ff_planning_refreshes (cabinet_id, cooldown_until, updated_at)
+      VALUES (?, NULL, ?)
+      ON CONFLICT(cabinet_id) DO UPDATE SET updated_at = excluded.updated_at
+    `).bind(input.cabinetId, updatedAt),
   ]);
+  return updatedAt;
 }
 
 export async function replaceFfDailyMetricsRange(input: { cabinetId: CabinetId; from: string; to: string; metrics: DailyFfMetric[] }) {
@@ -196,11 +202,6 @@ export async function reserveFfPlanningRefreshInDb(d1: PlanningDatabase, cabinet
 
 export async function reserveFfPlanningRefresh(cabinetId: CabinetId) {
   return reserveFfPlanningRefreshInDb(await getFfPlanningDb(), cabinetId);
-}
-
-export async function markFfPlanningUpdated(cabinetId: CabinetId, updatedAt: string) {
-  const d1 = await getFfPlanningDb();
-  await d1.prepare("UPDATE ff_planning_refreshes SET updated_at = ? WHERE cabinet_id = ?").bind(updatedAt, cabinetId).run();
 }
 
 export async function listFfDailyMetrics(cabinetId: CabinetId, filter: FfDailyMetricFilter = {}): Promise<FfDailyMetric[]> {

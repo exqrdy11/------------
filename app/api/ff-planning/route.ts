@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { getFfPlanningRefreshState, listFfDailyMetrics, markFfPlanningUpdated, reserveFfPlanningRefresh } from "@/db/ff-planning";
+import { getFfPlanningRefreshState, listFfDailyMetrics, reserveFfPlanningRefresh } from "@/db/ff-planning";
 import { listFfWarehouses } from "@/db/ff-stocks";
 import { cabinetToken, getAdminSession, type CabinetId } from "@/lib/admin-auth";
 import { effectivePeriod, ffPlanningRoleCan, type EffectivePeriod } from "@/lib/ff-planning";
@@ -70,11 +70,9 @@ export async function POST(request: Request) {
       return NextResponse.json({ ...payload, retryAt: reservation.cooldownUntil }, { status: 429, headers: { "Cache-Control": "no-store" } });
     }
     const refreshed = await refreshWbFfPlanningMetrics({ cabinetId: session.cabinetId, token, from: period.from, to: period.to });
-    const updatedAt = new Date().toISOString();
-    await markFfPlanningUpdated(session.cabinetId, updatedAt);
     return NextResponse.json(await planningPayload(session.cabinetId, period, refreshed.warnings), { headers: { "Cache-Control": "no-store" } });
   } catch {
-    const payload = await planningPayload(session.cabinetId, period, ["WB не обновил дневную историю — показан последний общий снимок"])
+    const payload = await planningPayload(session.cabinetId, period, ["Не удалось завершить запрос обновления — показан текущий общий снимок"])
       .catch(() => errorPayload("Не удалось обновить план поставок", period));
     return NextResponse.json(payload, { status: 502, headers: { "Cache-Control": "no-store" } });
   }

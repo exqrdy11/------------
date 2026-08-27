@@ -316,8 +316,8 @@ export async function refreshWbFfPlanningMetrics(input: { cabinetId: CabinetId; 
     statuses: [...statuses.values()],
     warehouseMappings,
   });
-  await replaceFfDailyMetricsRange({ cabinetId: input.cabinetId, from: input.from, to: input.to, metrics: daily });
-  return { daily, warnings };
+  const updatedAt = await replaceFfDailyMetricsRange({ cabinetId: input.cabinetId, from: input.from, to: input.to, metrics: daily });
+  return { daily, warnings, updatedAt };
 }
 
 function getOrCreateRow(map: Map<string, DashboardRow>, input: { nmId?: number; sku?: string; name?: string; category?: string }) {
