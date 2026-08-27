@@ -2,9 +2,9 @@ import { NextResponse } from "next/server";
 import { batchesForProduct, emptyFfBatches, emptyFfExpiry, emptyFfStock, expiryForProduct, listFfStocks, listFfWarehouses, stockForProduct, syncWbFbsWarehouses, type FfBatches, type FfExpiry, type FfStock, type ManualWarehouse } from "@/db/ff-stocks";
 import { fbsHandoverMetrics, recordFbsHandoverObservations, type HandoverMetrics } from "@/db/fbs-handover-metrics";
 import { getInventoryRefreshCooldown, loadInventorySnapshot, releaseInventoryRefresh, reserveInventoryRefresh, saveInventorySnapshot } from "@/db/inventory-snapshots";
-import { listFfDailyMetrics, replaceFfDailyMetrics } from "@/db/ff-planning";
+import { replaceFfDailyMetricsRange } from "@/db/ff-planning";
 import { cabinetSummary, cabinetToken, getAdminCabinet, type CabinetId, type CabinetSummary } from "@/lib/admin-auth";
-import { aggregateDailyFfMetrics } from "@/lib/ff-planning-source";
+import { aggregateWbPlanningMetrics, paginateWbPlanningOrders } from "@/lib/ff-planning-source";
 
 export const dynamic = "force-dynamic";
 
@@ -254,18 +254,12 @@ async function getFbsStocks(token: string, cards: WbCard[], warehouses: Array<{ 
 }
 
 async function getOrders(token: string, signal?: AbortSignal): Promise<{ orders: WbOrder[]; statuses: Map<number, OrderStatus> }> {
-  const orders: WbOrder[] = [];
   const now = Math.floor(Date.now() / 1000);
   const dateFrom = now - 30 * 24 * 60 * 60;
-  let next = 0;
-  for (let page = 0; page < 30; page += 1) {
-    const params = new URLSearchParams({ limit: "1000", next: String(next), dateFrom: String(dateFrom), dateTo: String(now) });
-    const data = await wbFetch<{ next?: number; orders?: WbOrder[] }>(token, `${WB_MARKETPLACE}/api/v3/orders?${params}`, undefined, signal);
-    const batch = data.orders ?? [];
-    orders.push(...batch);
-    if (batch.length < 1000 || !data.next || data.next === next) break;
-    next = data.next;
-  }
+  const orders = await paginateWbPlanningOrders<WbOrder>({ fetchPage: (cursor) => {
+    const params = new URLSearchParams({ limit: "1000", next: String(cursor), dateFrom: String(dateFrom), dateTo: String(now) });
+    return wbFetch<{ next?: number; orders?: WbOrder[] }>(token, `${WB_MARKETPLACE}/api/v3/orders?${params}`, undefined, signal);
+  } });
 
   const statuses = new Map<number, OrderStatus>();
   for (const batch of chunks(orders.map((order) => order.id), 1000)) {
@@ -288,15 +282,11 @@ async function getPlanningOrders(token: string, from: string, to: string): Promi
 
   for (let windowStart = firstSecond; windowStart <= lastSecond; windowStart += windowSeconds) {
     const windowEnd = Math.min(lastSecond, windowStart + windowSeconds - 1);
-    let next = 0;
-    for (let page = 0; page < 30; page += 1) {
-      const params = new URLSearchParams({ limit: "1000", next: String(next), dateFrom: String(windowStart), dateTo: String(windowEnd) });
-      const data = await wbFetch<{ next?: number; orders?: WbOrder[] }>(token, `${WB_MARKETPLACE}/api/v3/orders?${params}`);
-      const batch = data.orders ?? [];
-      for (const order of batch) byId.set(order.id, order);
-      if (batch.length < 1000 || !data.next || data.next === next) break;
-      next = data.next;
-    }
+    const orders = await paginateWbPlanningOrders<WbOrder>({ fetchPage: (cursor) => {
+      const params = new URLSearchParams({ limit: "1000", next: String(cursor), dateFrom: String(windowStart), dateTo: String(windowEnd) });
+      return wbFetch<{ next?: number; orders?: WbOrder[] }>(token, `${WB_MARKETPLACE}/api/v3/orders?${params}`);
+    } });
+    for (const order of orders) byId.set(order.id, order);
   }
 
   const orders = [...byId.values()];
@@ -312,56 +302,21 @@ async function getPlanningOrders(token: string, from: string, to: string): Promi
 }
 
 export async function refreshWbFfPlanningMetrics(input: { cabinetId: CabinetId; token: string; from: string; to: string }) {
-  const [{ orders, statuses }, warehouses, previous] = await Promise.all([
+  const [{ orders, statuses }, warehouses] = await Promise.all([
     getPlanningOrders(input.token, input.from, input.to),
     listFfWarehouses(input.cabinetId),
-    listFfDailyMetrics(input.cabinetId),
   ]);
-  const eligibleOrders = orders.filter((order): order is WbOrder & { createdAt: string } => Boolean(order.createdAt));
   const warehouseMappings = warehouses.map((warehouse) => ({
     warehouseId: warehouse.wbWarehouseId,
     warehouseName: warehouse.wbWarehouseName,
     ffWarehouseId: warehouse.id,
   }));
-  const daily = aggregateDailyFfMetrics({
-    orders: eligibleOrders.map((order) => ({
-      id: String(order.id),
-      createdAt: order.createdAt,
-      warehouseId: order.warehouseId,
-      productKey: order.nmId ? `nm:${order.nmId}` : `sku:${order.article ?? ""}`,
-      nmId: order.nmId,
-      sku: order.article,
-      quantity: 1,
-      fulfillmentType: "FBS",
-      isCreated: true,
-    })),
-    statuses: [...statuses.values()].map((status) => ({
-      orderId: String(status.id),
-      status: status.wbStatus ?? status.supplierStatus,
-      canceled: status.supplierStatus === "cancel" || ["canceled", "canceled_by_client", "declined_by_client", "defect"].includes(status.wbStatus ?? ""),
-    })),
-    sales: eligibleOrders.flatMap((order) => {
-      const status = statuses.get(order.id);
-      return status?.wbStatus === "sold" ? [{
-        id: String(order.id),
-        soldAt: order.createdAt,
-        warehouseId: order.warehouseId,
-        productKey: order.nmId ? `nm:${order.nmId}` : `sku:${order.article ?? ""}`,
-        nmId: order.nmId,
-        sku: order.article,
-        quantity: 1,
-        status: "sold",
-        confirmedBuyout: true,
-      }] : [];
-    }),
+  const { daily, warnings } = aggregateWbPlanningMetrics({
+    orders,
+    statuses: [...statuses.values()],
     warehouseMappings,
   });
-  const history = previous.filter((metric) => metric.date < input.from || metric.date > input.to);
-  await replaceFfDailyMetrics({ cabinetId: input.cabinetId, metrics: [...history, ...daily] });
-  const warnings = orders.length === eligibleOrders.length
-    ? []
-    : [`${orders.length - eligibleOrders.length} заказов WB без даты не включены в дневную историю`];
-  warnings.push("Подтверждённые выкупы сгруппированы по дате создания FBS-заказа: WB status API не возвращает отдельную дату выкупа.");
+  await replaceFfDailyMetricsRange({ cabinetId: input.cabinetId, from: input.from, to: input.to, metrics: daily });
   return { daily, warnings };
 }
 

@@ -69,6 +69,96 @@ export type AggregateDailyFfMetricsInput = {
   warehouseMappings?: Record<string, string | WarehouseMapping> | WarehouseMapping[];
 };
 
+export type WbPlanningOrder = {
+  id: number;
+  createdAt?: string;
+  warehouseId?: number;
+  nmId?: number;
+  article?: string;
+};
+
+export type WbPlanningOrderStatus = {
+  id: number;
+  supplierStatus?: string;
+  wbStatus?: string;
+};
+
+export async function paginateWbPlanningOrders<T>(input: {
+  fetchPage: (cursor: number) => Promise<{ orders?: T[]; next?: number }>;
+  pageSize?: number;
+  maxPages?: number;
+}): Promise<T[]> {
+  const pageSize = input.pageSize ?? 1000;
+  const maxPages = input.maxPages ?? 1000;
+  if (!Number.isInteger(pageSize) || pageSize < 1 || !Number.isInteger(maxPages) || maxPages < 1) throw new Error("Некорректные настройки пагинации WB");
+  const orders: T[] = [];
+  const seenCursors = new Set<number>([0]);
+  let cursor = 0;
+  for (let page = 0; page < maxPages; page += 1) {
+    const response = await input.fetchPage(cursor);
+    const batch = response.orders ?? [];
+    orders.push(...batch);
+    if (batch.length < pageSize) return orders;
+    if (!Number.isFinite(response.next) || seenCursors.has(response.next!)) {
+      throw new Error("WB вернул полную страницу без нового курсора; история не сохранена");
+    }
+    cursor = response.next!;
+    seenCursors.add(cursor);
+  }
+  throw new Error("WB order pagination reached the safety limit; history was not saved");
+}
+
+function isWbPlanningCancellation(status: WbPlanningOrderStatus | undefined) {
+  return status?.supplierStatus === "cancel" || ["canceled", "canceled_by_client", "declined_by_client", "defect"].includes(status?.wbStatus ?? "");
+}
+
+export function aggregateWbPlanningMetrics(input: {
+  orders: WbPlanningOrder[];
+  statuses: WbPlanningOrderStatus[];
+  warehouseMappings?: AggregateDailyFfMetricsInput["warehouseMappings"];
+}) {
+  const statuses = new Map(input.statuses.map((status) => [status.id, status]));
+  const eligibleOrders = input.orders.filter((order): order is WbPlanningOrder & { createdAt: string } => Boolean(order.createdAt));
+  const daily = aggregateDailyFfMetrics({
+    orders: eligibleOrders.map((order) => ({
+      id: String(order.id),
+      createdAt: order.createdAt,
+      warehouseId: order.warehouseId,
+      productKey: order.nmId ? `nm:${order.nmId}` : `sku:${order.article ?? ""}`,
+      nmId: order.nmId,
+      sku: order.article,
+      quantity: 1,
+      fulfillmentType: "FBS",
+      isCreated: true,
+    })),
+    statuses: input.statuses.map((status) => ({
+      orderId: String(status.id),
+      status: status.wbStatus ?? status.supplierStatus,
+      canceled: isWbPlanningCancellation(status),
+    })),
+    sales: eligibleOrders.flatMap((order) => {
+      const status = statuses.get(order.id);
+      return status?.wbStatus === "sold" && !isWbPlanningCancellation(status) ? [{
+        id: String(order.id),
+        soldAt: order.createdAt,
+        warehouseId: order.warehouseId,
+        productKey: order.nmId ? `nm:${order.nmId}` : `sku:${order.article ?? ""}`,
+        nmId: order.nmId,
+        sku: order.article,
+        quantity: 1,
+        status: "sold",
+        confirmedBuyout: true,
+      }] : [];
+    }),
+    warehouseMappings: input.warehouseMappings,
+  });
+  const warnings = input.orders.length === eligibleOrders.length
+    ? []
+    : [`${input.orders.length - eligibleOrders.length} заказов WB без даты не включены в дневную историю`];
+  warnings.push("Подтверждённые выкупы сгруппированы по дате создания FBS-заказа: WB status API не возвращает отдельную дату выкупа.");
+  return { daily, warnings };
+}
+
 function datePart(value: string): string {
   const date = value.slice(0, 10);
   if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) throw new Error(`Некорректная дата события: ${value}`);

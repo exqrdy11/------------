@@ -9,7 +9,7 @@
     "dev": "vinext dev",
     "build": "vinext build",
     "start": "vinext start",
-    "test": "npm run build && node --test tests/rendered-html.test.mjs && node --experimental-strip-types --test tests/fbs-summary.test.ts tests/ff-planning.test.ts tests/ff-planning-source.test.ts",
+    "test": "npm run build && node --test tests/rendered-html.test.mjs && node --experimental-strip-types --test tests/fbs-summary.test.ts tests/ff-planning.test.ts tests/ff-planning-source.test.ts tests/ff-planning-db-shape.test.ts tests/ff-planning-api-behavior.test.ts",
     "lint": "eslint . --ignore-pattern dist --ignore-pattern .next",
     "db:generate": "drizzle-kit generate"
   },

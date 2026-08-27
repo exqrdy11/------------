@@ -34,6 +34,18 @@ const createFfDailyMetricsTableSql = `
     PRIMARY KEY (cabinet_id, metric_date, warehouse_id, product_key, sku)
   )
 `;
+const createFfPlanningRefreshesTableSql = `
+  CREATE TABLE IF NOT EXISTS ff_planning_refreshes (
+    cabinet_id TEXT PRIMARY KEY,
+    cooldown_until TEXT,
+    updated_at TEXT
+  )
+`;
+
+export const FF_PLANNING_REFRESH_COOLDOWN_MS = 2 * 60 * 1000;
+type PlanningDatabase = Pick<D1Database, "prepare" | "batch">;
+type RefreshState = { cooldown_until: string | null; updated_at: string | null };
+export type WarehousePlanningSettings = { openedAt: string | null; planningTargetDays: number };
 
 let initializePromise: Promise<D1Database> | null = null;
 
@@ -58,6 +70,19 @@ export function normalizePlanningTargetDays(value: number | null | undefined): n
   if (value == null) return 14;
   if (!Number.isInteger(value) || value < 1 || value > 365) throw new Error("Плановый срок должен быть от 1 до 365 дней");
   return value;
+}
+
+export function mergeWarehousePlanningSettings(current: WarehousePlanningSettings, patch: { openedAt?: unknown; planningTargetDays?: unknown }): WarehousePlanningSettings {
+  let openedAt = current.openedAt;
+  let planningTargetDays = current.planningTargetDays;
+  if (Object.hasOwn(patch, "openedAt")) {
+    if (patch.openedAt != null && typeof patch.openedAt !== "string") throw new Error("Дата открытия должна быть в формате YYYY-MM-DD");
+    openedAt = normalizeOpenedAt(patch.openedAt as string | null | undefined);
+  }
+  if (Object.hasOwn(patch, "planningTargetDays")) {
+    planningTargetDays = normalizePlanningTargetDays(patch.planningTargetDays as number | null | undefined);
+  }
+  return { openedAt, planningTargetDays };
 }
 
 function normalizeMetricCount(value: number, field: "demand" | "sold") {
@@ -110,24 +135,72 @@ async function getFfPlanningDb() {
     initializePromise = (async () => {
       const { getD1 } = await import("./index");
       const d1 = getD1();
-      await d1.prepare(createFfDailyMetricsTableSql).run();
+      await d1.batch([d1.prepare(createFfDailyMetricsTableSql), d1.prepare(createFfPlanningRefreshesTableSql)]);
       return d1;
     })();
   }
   return initializePromise;
 }
 
+function metricInsertStatements(d1: PlanningDatabase, cabinetId: CabinetId, metrics: FfDailyMetric[], updatedAt: string) {
+  return metrics.map((metric) => d1.prepare(`
+    INSERT INTO ff_daily_metrics (cabinet_id, metric_date, warehouse_id, product_key, nm_id, sku, demand, sold, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).bind(cabinetId, metric.date, metric.warehouseId, metric.productKey, metric.nmId, metric.sku, metric.demand, metric.sold, updatedAt));
+}
+
 export async function replaceFfDailyMetrics(input: { cabinetId: CabinetId; metrics: DailyFfMetric[] }) {
   const metrics = normalizeFfDailyMetrics(input.metrics);
   const d1 = await getFfPlanningDb();
-  await d1.prepare("DELETE FROM ff_daily_metrics WHERE cabinet_id = ?").bind(input.cabinetId).run();
   const updatedAt = new Date().toISOString();
-  for (let index = 0; index < metrics.length; index += 100) {
-    await d1.batch(metrics.slice(index, index + 100).map((metric) => d1.prepare(`
-      INSERT INTO ff_daily_metrics (cabinet_id, metric_date, warehouse_id, product_key, nm_id, sku, demand, sold, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `).bind(input.cabinetId, metric.date, metric.warehouseId, metric.productKey, metric.nmId, metric.sku, metric.demand, metric.sold, updatedAt)));
-  }
+  await d1.batch([
+    d1.prepare("DELETE FROM ff_daily_metrics WHERE cabinet_id = ?").bind(input.cabinetId),
+    ...metricInsertStatements(d1, input.cabinetId, metrics, updatedAt),
+  ]);
+}
+
+export async function replaceFfDailyMetricsRangeInDb(d1: PlanningDatabase, input: { cabinetId: CabinetId; from: string; to: string; metrics: DailyFfMetric[] }, updatedAt = new Date().toISOString()) {
+  const from = normalizePlanningDate(input.from);
+  const to = normalizePlanningDate(input.to);
+  if (from > to) throw new Error("Дата начала позже даты окончания");
+  const metrics = normalizeFfDailyMetrics(input.metrics);
+  if (metrics.some((metric) => metric.date < from || metric.date > to)) throw new Error("Дневная метрика выходит за границы обновляемого периода");
+  await d1.batch([
+    d1.prepare("DELETE FROM ff_daily_metrics WHERE cabinet_id = ? AND metric_date >= ? AND metric_date <= ?").bind(input.cabinetId, from, to),
+    ...metricInsertStatements(d1, input.cabinetId, metrics, updatedAt),
+  ]);
+}
+
+export async function replaceFfDailyMetricsRange(input: { cabinetId: CabinetId; from: string; to: string; metrics: DailyFfMetric[] }) {
+  return replaceFfDailyMetricsRangeInDb(await getFfPlanningDb(), input);
+}
+
+export async function getFfPlanningRefreshState(cabinetId: CabinetId): Promise<RefreshState> {
+  const d1 = await getFfPlanningDb();
+  return await d1.prepare("SELECT cooldown_until, updated_at FROM ff_planning_refreshes WHERE cabinet_id = ?")
+    .bind(cabinetId).first<RefreshState>() ?? { cooldown_until: null, updated_at: null };
+}
+
+export async function reserveFfPlanningRefreshInDb(d1: PlanningDatabase, cabinetId: CabinetId, now = new Date()) {
+  await d1.prepare("INSERT OR IGNORE INTO ff_planning_refreshes (cabinet_id, cooldown_until, updated_at) VALUES (?, NULL, NULL)").bind(cabinetId).run();
+  const cooldownUntil = new Date(now.getTime() + FF_PLANNING_REFRESH_COOLDOWN_MS).toISOString();
+  const result = await d1.prepare(`
+    UPDATE ff_planning_refreshes
+    SET cooldown_until = ?
+    WHERE cabinet_id = ? AND (cooldown_until IS NULL OR cooldown_until <= ?)
+  `).bind(cooldownUntil, cabinetId, now.toISOString()).run();
+  const state = await d1.prepare("SELECT cooldown_until, updated_at FROM ff_planning_refreshes WHERE cabinet_id = ?")
+    .bind(cabinetId).first<RefreshState>() ?? { cooldown_until: null, updated_at: null };
+  return { reserved: Number(result.meta?.changes ?? 0) > 0, cooldownUntil: state.cooldown_until };
+}
+
+export async function reserveFfPlanningRefresh(cabinetId: CabinetId) {
+  return reserveFfPlanningRefreshInDb(await getFfPlanningDb(), cabinetId);
+}
+
+export async function markFfPlanningUpdated(cabinetId: CabinetId, updatedAt: string) {
+  const d1 = await getFfPlanningDb();
+  await d1.prepare("UPDATE ff_planning_refreshes SET updated_at = ? WHERE cabinet_id = ?").bind(updatedAt, cabinetId).run();
 }
 
 export async function listFfDailyMetrics(cabinetId: CabinetId, filter: FfDailyMetricFilter = {}): Promise<FfDailyMetric[]> {

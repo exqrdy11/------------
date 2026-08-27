@@ -208,7 +208,7 @@ test("цены конкурентов Яндекс Маркета обновля
   assert.match(publicPrices, /Сохранили последнюю цену/);
 });
 
-test("FF planning API exposes one shared, explicitly refreshed 90-day snapshot", async () => {
+test("FF planning API route exposes the shared planner response envelope", async () => {
   const [route, inventory] = await Promise.all([
     readFile(new URL("app/api/ff-planning/route.ts", root), "utf8"),
     readFile(new URL("app/api/inventory/route.ts", root), "utf8"),
@@ -216,14 +216,6 @@ test("FF planning API exposes one shared, explicitly refreshed 90-day snapshot",
 
   assert.match(route, /export async function GET/);
   assert.match(route, /export async function POST/);
-  assert.match(route, /getAdminSession/);
-  assert.doesNotMatch(route, /getOwnerSession/);
-  assert.match(route, /action !== "refresh"/);
-  assert.match(route, /effectivePeriod/);
-  assert.match(route, /FF_PLANNING_REFRESH_COOLDOWN_MS = 2 \* 60 \* 1000/);
-  assert.match(route, /CREATE TABLE IF NOT EXISTS ff_planning_refreshes/);
-  assert.match(route, /listFfDailyMetrics/);
-  assert.match(route, /listFfWarehouses/);
   assert.match(route, /period/);
   assert.match(route, /daily/);
   assert.match(route, /source/);
@@ -231,21 +223,14 @@ test("FF planning API exposes one shared, explicitly refreshed 90-day snapshot",
   assert.match(route, /updatedAt/);
   assert.match(route, /retryAt/);
   assert.match(inventory, /export async function refreshWbFfPlanningMetrics/);
-  assert.match(inventory, /aggregateDailyFfMetrics/);
-  assert.match(inventory, /fulfillmentType: "FBS"/);
-  assert.match(inventory, /canceled_by_client/);
-  assert.match(inventory, /status\?\.wbStatus === "sold"/);
-  assert.match(inventory, /replaceFfDailyMetrics/);
 });
 
-test("FF warehouse planning metadata remains owner-only and validated", async () => {
+test("FF warehouse route accepts planning metadata fields", async () => {
   const route = await readFile(new URL("app/api/ff-warehouses/route.ts", root), "utf8");
 
-  assert.match(route, /getOwnerSession/);
+  assert.match(route, /export async function PATCH/);
   assert.match(route, /openedAt\?: unknown/);
   assert.match(route, /planningTargetDays\?: unknown/);
-  assert.match(route, /normalizeOpenedAt/);
-  assert.match(route, /normalizePlanningTargetDays/);
   assert.match(route, /openedAt,/);
   assert.match(route, /planningTargetDays[ },]/);
 });

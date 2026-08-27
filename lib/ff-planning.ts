@@ -1,5 +1,14 @@
 /** Pure date and replenishment calculations for fulfillment warehouses. */
 
+import type { UserRole } from "./admin-auth";
+
+export type FfPlanningOperation = "read" | "refresh" | "write-settings";
+
+export function ffPlanningRoleCan(role: UserRole | null, operation: FfPlanningOperation) {
+  if (!role) return false;
+  return operation === "write-settings" ? role === "owner" : role === "owner" || role === "viewer";
+}
+
 export type PlanningPeriodInput = {
   from: string;
   to: string;
