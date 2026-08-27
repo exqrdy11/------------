@@ -116,14 +116,18 @@ function mappingLookup(input: AggregateDailyFfMetricsInput) {
 }
 
 function isCreatedFbsOrder(order: NormalizedOrderEvent): boolean {
+  if (order.isFbs === false || order.isCreated === false || order.created === false) return false;
+  if (order.fulfillmentType && !/fbs/i.test(order.fulfillmentType)) return false;
+  if (order.orderType && !/fbs/i.test(order.orderType)) return false;
   const affirmativeFbs = order.isFbs === true || /fbs/i.test(order.fulfillmentType ?? "") || /fbs/i.test(order.orderType ?? "");
   const affirmativeCreated = order.isCreated === true || order.created === true;
   return affirmativeFbs && affirmativeCreated;
 }
 
 function isConfirmedBuyout(sale: NormalizedSaleEvent): boolean {
+  if (sale.confirmedBuyout === false || sale.buyoutConfirmed === false || sale.isBuyoutConfirmed === false || sale.confirmed === false) return false;
   const affirmativeSignal = sale.confirmedBuyout === true || sale.buyoutConfirmed === true || sale.isBuyoutConfirmed === true || sale.confirmed === true;
-  const affirmativeStatus = /buyout|выкуп|confirm|complete|sold|продаж/i.test(sale.status ?? "");
+  const affirmativeStatus = new Set(["buyout", "confirmed_buyout", "confirmed buyout", "выкуп", "sold", "complete", "completed"]).has((sale.status ?? "").trim().toLocaleLowerCase("ru-RU"));
   return affirmativeSignal || affirmativeStatus;
 }
 

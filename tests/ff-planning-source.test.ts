@@ -89,3 +89,19 @@ test("indexes nested record warehouse mapping names", () => {
   });
   assert.equal(result[0]?.warehouseId, "ff-a");
 });
+
+test("rejects conflicting FBS and created aliases", () => {
+  const result = aggregateDailyFfMetrics({
+    orders: [{ id: "conflict", createdAt: "2026-08-17", warehouseId: "wb-1", productKey: "sku:C", sku: "C", quantity: 1, isFbs: true, fulfillmentType: "FBO", isCreated: true, created: false }],
+    warehouseMappings: { "wb-1": "ff-a" },
+  });
+  assert.deepEqual(result, []);
+});
+
+test("explicit unconfirmed buyout vetoes a sold status", () => {
+  const result = aggregateDailyFfMetrics({
+    sales: [{ id: "conflict", soldAt: "2026-08-17", warehouseId: "wb-1", productKey: "sku:C", sku: "C", quantity: 1, confirmedBuyout: false, status: "sold" }],
+    warehouseMappings: { "wb-1": "ff-a" },
+  });
+  assert.deepEqual(result, []);
+});

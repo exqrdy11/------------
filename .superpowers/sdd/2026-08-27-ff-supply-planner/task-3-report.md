@@ -40,4 +40,13 @@
 - GREEN command: `node --experimental-strip-types --test tests/ff-planning-source.test.ts`; 8/8 passed.
 - Full verification: `npm test`; build completed, rendered 12/12, TypeScript 17/17 passed.
 - Fixes are fail-closed: demand requires affirmative FBS and created signals; sold requires affirmative confirmed-buyout signal or canonical status; nested record mapping names are indexed.
-- Commit: separate Fix round 2 commit created with this report update.
+- Commit: `d52b447` — `fix: fail closed planning source metadata`.
+
+## Fix round 3
+
+- Added regressions for contradictory FBS/created aliases and explicit unconfirmed buyout with a sold status.
+- RED command: `node --experimental-strip-types --test tests/ff-planning-source.test.ts`; 8 passed, 2 failed (conflicting order and unconfirmed sale were included).
+- GREEN command: `node --experimental-strip-types --test tests/ff-planning-source.test.ts`; 10/10 passed.
+- Full verification: `npm test`; build completed, rendered 12/12, TypeScript 19/19 passed.
+- Fixes: explicit false/non-FBS/not-created aliases veto demand; explicit unconfirmed signals veto sold; buyout statuses use exact normalized canonical matching.
+- Commit: Fix round 3 commit created with this report update.
