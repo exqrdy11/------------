@@ -102,12 +102,117 @@ function fullRefreshPeriod() {
   return source;
 }
 
+export function patchFfPlanningStockAttachment(input) {
+  if (typeof input !== "string" || !input.trim()) throw new Error("Пустой файл хранилища анализа ФФ");
+  if (input.includes("Object.prototype.hasOwnProperty.call(ffStock, warehouse.id)")) return input;
+
+  let source = input;
+  source = replaceRequired(
+    source,
+    /const ffStock = \{\};\s*\n(\s*)const ffExpiry = \{\};/g,
+    `const ffStock = row.ffStock && typeof row.ffStock === "object" && !Array.isArray(row.ffStock)
+      ? { ...row.ffStock }
+      : {};
+$1const ffExpiry = {};`,
+    "сохранённый API-остаток ФФ",
+  );
+  source = replaceRequired(
+    source,
+    /ffStock\[warehouse\.id\] = Math\.max\(0, Number\(stock\?\.quantity\) \|\| 0\);/g,
+    `if (stock) ffStock[warehouse.id] = Math.max(0, Number(stock.quantity) || 0);
+      else if (!Object.prototype.hasOwnProperty.call(ffStock, warehouse.id)) ffStock[warehouse.id] = 0;`,
+    "приоритет явного ручного остатка",
+  );
+  return source;
+}
+
+const PLANNING_FBS_STOCK_HELPERS = `function assertCompletePlanningFbsStocks(warehouses, result, hasSellableProducts) {
+  if (!hasSellableProducts) return;
+  const mappedWarehouseIds = [...new Set((warehouses ?? [])
+    .filter((warehouse) => !warehouse.isHidden && warehouse.wbWarehouseId)
+    .map((warehouse) => String(warehouse.wbWarehouseId)))];
+  const mappedWarehouseIdSet = new Set(mappedWarehouseIds);
+  const failed = (result.errors ?? []).find((entry) => mappedWarehouseIdSet.has(String(entry.warehouseId)));
+  if (failed) {
+    if (failed.reason instanceof Error) throw failed.reason;
+    throw new Error(String(failed.reason ?? \`WB не вернул остатки FBS склада \${failed.warehouse ?? failed.warehouseId}\`));
+  }
+  const syncedWarehouseIds = new Set((result.syncedWarehouseIds ?? []).map(String));
+  const missingWarehouseId = mappedWarehouseIds.find((warehouseId) => !syncedWarehouseIds.has(warehouseId));
+  if (missingWarehouseId) throw new Error(\`WB не вернул остатки FBS склада \${missingWarehouseId}\`);
+}
+
+function attachPlanningFbsStocks(rows, warehouses, result) {
+  const syncedWarehouseIds = new Set((result.syncedWarehouseIds ?? []).map(String));
+  return (rows ?? []).map((row) => {
+    const ffStock = row.ffStock && typeof row.ffStock === "object" && !Array.isArray(row.ffStock)
+      ? { ...row.ffStock }
+      : {};
+    for (const warehouse of warehouses ?? []) {
+      const wbWarehouseId = warehouse.wbWarehouseId ? String(warehouse.wbWarehouseId) : null;
+      if (!wbWarehouseId || !syncedWarehouseIds.has(wbWarehouseId)) continue;
+      const stock = result.stockByWarehouse?.get(wbWarehouseId);
+      const nmId = Number(row.nmId);
+      ffStock[warehouse.id] = Number.isInteger(nmId) && nmId > 0
+        ? Math.max(0, Number(stock?.get(nmId)) || 0)
+        : 0;
+    }
+    return { ...row, ffStock };
+  });
+}
+
+`;
+
+export function patchFfPlanningServerStocks(input) {
+  if (typeof input !== "string" || !input.trim()) throw new Error("Пустой серверный runtime анализа ФФ");
+  if (input.includes("function attachPlanningFbsStocks(rows, warehouses, result)")) return input;
+
+  let source = input;
+  source = replaceRequired(
+    source,
+    /async function prepareWbFfPlanningMetrics\(input\) \{/g,
+    `${PLANNING_FBS_STOCK_HELPERS}async function prepareWbFfPlanningMetrics(input) {`,
+    "подключение API-остатков к снимку",
+  );
+  source = replaceRequired(
+    source,
+    /const sellableNmIds = sellableWbProductIds\(sellableCards\);/g,
+    `const sellableNmIds = sellableWbProductIds(sellableCards);
+  const sellerWarehouses = await getSellerWarehouses(input.token, input.signal);
+  const visibleWbWarehouseIds = new Set(warehouses
+    .filter((warehouse) => !warehouse.isHidden && warehouse.wbWarehouseId)
+    .map((warehouse) => String(warehouse.wbWarehouseId)));
+  const planningSellerWarehouses = sellerWarehouses.filter((warehouse) => visibleWbWarehouseIds.has(String(warehouse.id)));
+  const fbsStockResult = await getFbsStocks(input.token, sellableCards, planningSellerWarehouses, input.signal);
+  input.signal?.throwIfAborted();
+  assertCompletePlanningFbsStocks(warehouses, fbsStockResult, sellableNmIds.size > 0);`,
+    "загрузка FBS-остатков WB",
+  );
+  source = replaceRequired(
+    source,
+    /inventoryRows: buildPlanningInventoryRows\(\{([\s\S]*?)\n(\s*)\}\),\n(\s*)warnings,/g,
+    `inventoryRows: attachPlanningFbsStocks(buildPlanningInventoryRows({$1
+$2}), warehouses, fbsStockResult),
+$3warnings,`,
+    "сохранение API-остатков в снимке",
+  );
+  return source;
+}
+
 async function main() {
   const target = process.argv[2];
   const kind = process.argv[3] ?? "store";
   if (!target) throw new Error("Передайте путь к runtime-файлу анализа ФФ");
   const current = await readFile(target, "utf8");
-  const patcher = kind === "route" ? patchFfPlanningRoute : kind === "client" ? patchFfAnalysisClient : patchFfPlanningStore;
+  const patcher = kind === "route"
+    ? patchFfPlanningRoute
+    : kind === "client"
+      ? patchFfAnalysisClient
+      : kind === "stock-store"
+        ? patchFfPlanningStockAttachment
+        : kind === "server-stocks"
+          ? patchFfPlanningServerStocks
+          : patchFfPlanningStore;
   const patched = patcher(current);
   if (patched !== current) await writeFile(target, patched, "utf8");
   process.stdout.write(patched === current ? "already-patched\n" : "patched\n");

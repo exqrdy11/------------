@@ -1,7 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { patchFfAnalysisClient, patchFfPlanningRoute, patchFfPlanningStore } from "../ops/patch-ff-planning-store.mjs";
+import * as planningPatches from "../ops/patch-ff-planning-store.mjs";
+
+const { patchFfAnalysisClient, patchFfPlanningRoute, patchFfPlanningStore } = planningPatches;
 
 const brokenStore = String.raw`
 const READ_PLANNING_METRICS_SQL = \`
@@ -81,4 +83,151 @@ const planning = await postPlanningAction("refresh", { from: state.from, to: sta
   assert.match(patched, /function fullRefreshPeriod\(\)/);
   assert.match(patched, /postPlanningAction\("refresh", fullRefreshPeriod\(\), fetchImpl\)/);
   assert.match(patched, /Автообновление ежедневно в 07:00 МСК/);
+});
+
+const brokenStockAttachment = `
+function indexPhysicalStocks(stocks) {
+  return new Map(stocks.map((stock) => [\`${"${stock.location}"}:${"${stock.productKey}"}\`, stock]));
+}
+function indexPhysicalBatches() { return new Map(); }
+function selectedIndexedStock(row, location, index) { return index.get(\`${"${location}"}:${"${row.key}"}\`) ?? null; }
+function indexKey(location, productKey) { return \`${"${location}"}:${"${productKey}"}\`; }
+function stockProductKey(stock) { return stock.productKey; }
+
+export function attachPhysicalStocks(rows, warehouses, stocks, batches) {
+  const stockIndex = indexPhysicalStocks(stocks);
+  const batchIndex = indexPhysicalBatches(batches);
+  return rows.map(row => {
+    const ffStock = {};
+    const ffExpiry = {};
+    const ffBatches = {};
+    for (const warehouse of warehouses) {
+      const stock = selectedIndexedStock(row, warehouse.id, stockIndex);
+      ffStock[warehouse.id] = Math.max(0, Number(stock?.quantity) || 0);
+      ffExpiry[warehouse.id] = stock?.expiresAt ?? stock?.expires_at ?? null;
+      ffBatches[warehouse.id] = stock ? (batchIndex.get(indexKey(warehouse.id, stockProductKey(stock))) ?? [])
+        .map(batch => ({ quantity: Math.max(0, Number(batch.quantity) || 0) }))
+        : [];
+    }
+    return { ...row, ffStock, ffExpiry, ffBatches };
+  });
+}
+`;
+
+test("production stock attachment keeps saved WB FBS stock when no manual stock row exists", () => {
+  assert.equal(typeof planningPatches.patchFfPlanningStockAttachment, "function");
+  const patched = planningPatches.patchFfPlanningStockAttachment(brokenStockAttachment);
+  const attachPhysicalStocks = new Function(`${patched.replace("export function", "function")}\nreturn attachPhysicalStocks;`)();
+  const [row] = attachPhysicalStocks(
+    [{ key: "nm:123", ffStock: { ff_api: 24, ff_manual: 9 } }],
+    [{ id: "ff_api" }, { id: "ff_manual" }, { id: "ff_empty" }],
+    [{ location: "ff_manual", productKey: "nm:123", quantity: 4 }],
+    [],
+  );
+
+  assert.deepEqual(row.ffStock, { ff_api: 24, ff_manual: 4, ff_empty: 0 });
+});
+
+const brokenPlanningRefresh = `
+async function prepareWbFfPlanningMetrics(input) {
+  const d1 = await getFfPlanningDb();
+  input.signal?.throwIfAborted();
+  const [{ orders, statuses }, currentOrders, warehouses, cards] = await Promise.all([
+        getPlanningOrders(input.token, input.from, input.to, input.signal),
+        getOrders$1(input.token, input.signal),
+        listFfWarehouses(input.cabinetId),
+        getCards(input.token, input.signal)
+  ]);
+  input.signal?.throwIfAborted();
+  assertUniqueWbWarehouseMappings(warehouses);
+  const sellableCards = selectSellableWbCards(cards);
+  const sellableNmIds = sellableWbProductIds(sellableCards);
+  const sellableOrders = orders.filter((order) => isSellableWbProduct(sellableNmIds, order.nmId));
+  const warehouseMappings = warehouses.map((warehouse) => ({
+        warehouseId: warehouse.wbWarehouseId,
+        warehouseName: warehouse.wbWarehouseName,
+        ffWarehouseId: warehouse.id
+  }));
+  const { daily, warnings } = aggregateWbPlanningMetrics({
+        orders: sellableOrders,
+        statuses: [...statuses.values()],
+        warehouseMappings
+  });
+  if (!sellableNmIds.size) warnings.push("Нет товаров");
+  const products = sellableCards.flatMap((card) => {
+        const nmId = Number(card.nmID ?? card.nmId);
+        if (!Number.isInteger(nmId) || nmId <= 0) return [];
+        return [{ key: \`nm:${"${nmId}"}\`, nmId, sku: card.vendorCode, name: card.title, category: "WB", color: "blue" }];
+  });
+  return {
+    d1,
+    snapshot: {
+      cabinetId: input.cabinetId,
+      from: input.from,
+      to: input.to,
+      metrics: daily,
+      inventoryRows: buildPlanningInventoryRows({
+        products,
+        orders: currentOrders.orders.filter((order) => isSellableWbProduct(sellableNmIds, order.nmId)),
+        statuses: currentOrders.statuses,
+        warehouses
+      }),
+      warnings,
+      generation: (new Date()).toISOString()
+    }
+  };
+}
+`;
+
+function planningRefreshFromPatchedSource(source, fbsStockResult) {
+  const names = [
+    "getFfPlanningDb", "getPlanningOrders", "getOrders$1", "listFfWarehouses", "getCards",
+    "assertUniqueWbWarehouseMappings", "selectSellableWbCards", "sellableWbProductIds",
+    "isSellableWbProduct", "aggregateWbPlanningMetrics", "buildPlanningInventoryRows",
+    "getSellerWarehouses", "getFbsStocks",
+  ];
+  const values = [
+    async () => ({}),
+    async () => ({ orders: [], statuses: new Map() }),
+    async () => ({ orders: [], statuses: new Map() }),
+    async () => [{ id: "wb_1987385", wbWarehouseId: "1987385", wbWarehouseName: "Волгоград" }],
+    async () => [{ nmID: 123, vendorCode: "SKU-123", title: "Товар" }],
+    () => {},
+    (cards) => cards,
+    (cards) => new Set(cards.map((card) => card.nmID)),
+    (ids, nmId) => ids.has(nmId),
+    () => ({ daily: [], warnings: [] }),
+    ({ products }) => products,
+    async () => [{ id: 1987385, name: "Волгоград" }],
+    async () => fbsStockResult,
+  ];
+  return new Function(...names, `${source}\nreturn prepareWbFfPlanningMetrics;`)(...values);
+}
+
+test("manual planning refresh stores current WB FBS stock by mapped FF warehouse", async () => {
+  assert.equal(typeof planningPatches.patchFfPlanningServerStocks, "function");
+  const patched = planningPatches.patchFfPlanningServerStocks(brokenPlanningRefresh);
+  const refresh = planningRefreshFromPatchedSource(patched, {
+    stockByWarehouse: new Map([["1987385", new Map([[123, 24]])]]),
+    syncedWarehouseIds: ["1987385"],
+    errors: [],
+  });
+  const result = await refresh({ token: "secret", cabinetId: "metanutrix", from: "2026-08-01", to: "2026-08-31" });
+
+  assert.deepEqual(result.snapshot.inventoryRows[0].ffStock, { wb_1987385: 24 });
+});
+
+test("planning refresh refuses a partial WB stock response so it cannot replace the last good snapshot with zero", async () => {
+  assert.equal(typeof planningPatches.patchFfPlanningServerStocks, "function");
+  const patched = planningPatches.patchFfPlanningServerStocks(brokenPlanningRefresh);
+  const refresh = planningRefreshFromPatchedSource(patched, {
+    stockByWarehouse: new Map(),
+    syncedWarehouseIds: [],
+    errors: [{ warehouseId: "1987385", warehouse: "Волгоград", reason: new Error("429") }],
+  });
+
+  await assert.rejects(
+    refresh({ token: "secret", cabinetId: "metanutrix", from: "2026-08-01", to: "2026-08-31" }),
+    /429/,
+  );
 });
