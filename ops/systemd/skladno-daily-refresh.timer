@@ -1,0 +1,11 @@
+[Unit]
+Description=Refresh Skladno snapshot daily at 07:00 Moscow time
+
+[Timer]
+OnCalendar=*-*-* 04:00:00 UTC
+Persistent=true
+AccuracySec=1min
+Unit=skladno-daily-refresh.service
+
+[Install]
+WantedBy=timers.target

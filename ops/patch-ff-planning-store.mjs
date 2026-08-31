@@ -1,0 +1,118 @@
+import { readFile, writeFile } from "node:fs/promises";
+import { pathToFileURL } from "node:url";
+
+function replaceRequired(source, pattern, replacement, label) {
+  const matches = source.match(pattern) ?? [];
+  if (matches.length !== 1) {
+    throw new Error(`Шаблон «${label}» не найден ровно один раз (найдено: ${matches.length})`);
+  }
+  return source.replace(pattern, replacement);
+}
+
+export function patchFfPlanningStore(input) {
+  if (typeof input !== "string" || !input.trim()) throw new Error("Пустой файл хранилища анализа ФФ");
+  const alreadyPatched = input.includes("m.metric_date AS date,")
+    && input.includes("const key = `${date}\\u0000${warehouseId}\\u0000${productKey}\\u0000${sku}`;")
+    && input.includes("SELECT ?, json_extract(value, '$.date'),")
+    && !input.includes(".bind(input.cabinetId, period.from, generation, chunk");
+  if (alreadyPatched) return input;
+
+  let source = input;
+  source = replaceRequired(source, /s\.period_from AS date,/g, "m.metric_date AS date,", "реальная дата при чтении");
+  source = replaceRequired(
+    source,
+    /const key = `\$\{warehouseId\}\\u0000\$\{productKey\}\\u0000\$\{sku\}`;/g,
+    "const key = `${date}\\u0000${warehouseId}\\u0000${productKey}\\u0000${sku}`;",
+    "дата в ключе агрегации",
+  );
+  source = replaceRequired(
+    source,
+    /const current = aggregate\.get\(key\) \?\? \{ warehouseId, productKey, nmId: metric\.nmId \?\? null, sku, demand: 0, sold: 0 \};/g,
+    "const current = aggregate.get(key) ?? { date, warehouseId, productKey, nmId: metric.nmId ?? null, sku, demand: 0, sold: 0 };",
+    "дата в строке метрики",
+  );
+  source = replaceRequired(
+    source,
+    /return \[\.\.\.aggregate\.values\(\)\]\.sort\(\(left, right\) => left\.warehouseId\.localeCompare\(right\.warehouseId\) \|\| left\.productKey\.localeCompare\(right\.productKey\) \|\| left\.sku\.localeCompare\(right\.sku\)\);/g,
+    "return [...aggregate.values()].sort((left, right) => left.date.localeCompare(right.date) || left.warehouseId.localeCompare(right.warehouseId) || left.productKey.localeCompare(right.productKey) || left.sku.localeCompare(right.sku));",
+    "сортировка дневных метрик",
+  );
+  source = replaceRequired(
+    source,
+    /SELECT \?, \?,\s*\n\s*json_extract\(value, '\$\.warehouseId'\),/g,
+    "SELECT ?, json_extract(value, '$.date'),\n        json_extract(value, '$.warehouseId'),",
+    "дата при записи метрик",
+  );
+  source = replaceRequired(
+    source,
+    /\.bind\(input\.cabinetId, period\.from, generation, chunk/g,
+    ".bind(input.cabinetId, generation, chunk",
+    "параметры записи метрик",
+  );
+  return source;
+}
+
+export function patchFfPlanningRoute(input) {
+  if (typeof input !== "string" || !input.trim()) throw new Error("Пустой файл маршрута анализа ФФ");
+  if (input.includes("warehouseId: requestInput.warehouseId ?? null, warnings: [], fallbackToPersisted: true")) return input;
+  return replaceRequired(
+    input,
+    /loadPlanning\(\{ cabinetId, period, warehouseId: requestInput\.warehouseId \?\? null, warnings: \[\] \}\)/g,
+    "loadPlanning({ cabinetId, period, warehouseId: requestInput.warehouseId ?? null, warnings: [], fallbackToPersisted: true })",
+    "чтение последнего сохранённого снимка",
+  );
+}
+
+export function patchFfAnalysisClient(input) {
+  if (typeof input !== "string" || !input.trim()) throw new Error("Пустой клиент анализа ФФ");
+  let source = input;
+  if (!source.includes("function fullRefreshPeriod()")) {
+    source = replaceRequired(
+      source,
+      /function isoDate\(date\) \{\s*return date\.toISOString\(\)\.slice\(0, 10\);\s*\}/g,
+      `function isoDate(date) {
+  return date.toISOString().slice(0, 10);
+}
+
+function fullRefreshPeriod() {
+  const to = new Date();
+  const from = new Date(to);
+  from.setUTCDate(from.getUTCDate() - 89);
+  return { from: isoDate(from), to: isoDate(to) };
+}`,
+      "единое окно обновления",
+    );
+  }
+  if (source.includes('postPlanningAction("refresh", { from: state.from, to: state.to }, fetchImpl)')) {
+    source = replaceRequired(
+      source,
+      /postPlanningAction\("refresh", \{ from: state\.from, to: state\.to \}, fetchImpl\)/g,
+      'postPlanningAction("refresh", fullRefreshPeriod(), fetchImpl)',
+      "полное ручное обновление",
+    );
+  }
+  if (!source.includes("Автообновление ежедневно в 07:00 МСК")) {
+    source = replaceRequired(
+      source,
+      /const status = model\.updatedAt \? `Данные сохранены \$\{escapeHtml\(formatDateTime\(model\.updatedAt\)\)\}` : "Снимок ещё не создан";/g,
+      'const status = `${model.updatedAt ? `Данные сохранены ${escapeHtml(formatDateTime(model.updatedAt))}` : "Снимок ещё не создан"} · Автообновление ежедневно в 07:00 МСК`;',
+      "подпись расписания",
+    );
+  }
+  return source;
+}
+
+async function main() {
+  const target = process.argv[2];
+  const kind = process.argv[3] ?? "store";
+  if (!target) throw new Error("Передайте путь к runtime-файлу анализа ФФ");
+  const current = await readFile(target, "utf8");
+  const patcher = kind === "route" ? patchFfPlanningRoute : kind === "client" ? patchFfAnalysisClient : patchFfPlanningStore;
+  const patched = patcher(current);
+  if (patched !== current) await writeFile(target, patched, "utf8");
+  process.stdout.write(patched === current ? "already-patched\n" : "patched\n");
+}
+
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  await main();
+}

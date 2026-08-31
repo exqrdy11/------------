@@ -1,0 +1,15 @@
+[Unit]
+Description=Skladno daily Wildberries snapshot refresh
+After=network-online.target skladno.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+EnvironmentFile=/opt/skladno/shared/.env.production
+Environment=SKLADNO_INTERNAL_ORIGIN=http://127.0.0.1:3000
+ExecStart=/usr/bin/node /opt/skladno/shared/scripts/refresh-ff-planning.mjs
+User=root
+Group=root
+
+[Install]
+WantedBy=multi-user.target
