@@ -199,12 +199,18 @@ function shipmentGridStyles() {
     .ff-shipment-grid{margin-top:18px;border:1px solid #d9e2f2;border-radius:16px;background:#f8faff;overflow:hidden}
     .ff-shipment-grid__message{margin:14px 16px 0;padding:10px 12px;border-radius:10px;background:#fff1ee;color:#a33b2f;font-weight:700}
     .ff-shipment-grid__table-wrap{overflow-x:auto;background:#fff}
-    .ff-shipment-grid table{width:100%;min-width:680px;border-collapse:collapse}
+    .ff-shipment-grid table{width:100%;min-width:720px;border-collapse:collapse;table-layout:fixed}
+    .ff-shipment-grid__col-sku{width:24%}
+    .ff-shipment-grid__col-name{width:auto}
+    .ff-shipment-grid__col-quantity{width:150px}
+    .ff-shipment-grid__col-remove{width:64px}
     .ff-shipment-grid th{padding:11px 14px;background:#eef3fb;color:#64738d;font-size:12px;text-align:left;text-transform:uppercase;letter-spacing:.04em}
     .ff-shipment-grid td{padding:10px 14px;border-top:1px solid #e7ecf4;vertical-align:middle}
-    .ff-shipment-grid td:nth-child(1){font-weight:800;color:#263754;white-space:nowrap}
-    .ff-shipment-grid td:nth-child(2){width:100%;color:#52627c}
-    .ff-shipment-grid input[type=number]{width:120px;min-height:42px;padding:8px 10px;border:1px solid #cfd9ea;border-radius:10px;background:#fff;font:inherit;font-weight:800;text-align:right}
+    .ff-shipment-grid td:nth-child(1){font-weight:800;color:#263754;white-space:normal;overflow-wrap:anywhere}
+    .ff-shipment-grid td:nth-child(2){width:auto;color:#52627c;overflow-wrap:anywhere}
+    .ff-shipment-grid th:nth-child(3),.ff-shipment-grid td:nth-child(3){text-align:right}
+    .ff-shipment-grid th:nth-child(4),.ff-shipment-grid td:nth-child(4){text-align:center}
+    .ff-shipment-grid input[type=number]{width:100%;max-width:120px;min-height:42px;padding:8px 10px;border:1px solid #cfd9ea;border-radius:10px;background:#fff;font:inherit;font-weight:800;text-align:right}
     .ff-shipment-grid__remove{min-width:42px!important;padding:8px!important;border-color:#f1c8c3!important;background:#fff6f4!important;color:#b13a2c!important}
     .ff-shipment-grid__tools{display:grid;grid-template-columns:minmax(260px,1fr) auto;gap:10px;padding:14px 16px;border-top:1px solid #e1e7f1}
     .ff-shipment-grid__tools label{display:grid;gap:6px;color:#5f6e86;font-size:12px;font-weight:800}
@@ -231,7 +237,7 @@ function renderDraftShipmentGrid(supply, model) {
   const options = catalog.map((item) => `<option value="${escapeHtml(item.sku)}">${escapeHtml(item.name)} · ${escapeHtml(item.productKey)}</option>`).join("");
   return `${shipmentGridStyles()}<section class="ff-shipment-grid" data-ff-draft-grid data-shipment-id="${escapeHtml(supply.id)}">
     ${model.error ? `<p class="ff-shipment-grid__message" role="alert">${escapeHtml(model.error)}</p>` : ""}
-    <div class="ff-shipment-grid__table-wrap"><table><thead><tr><th>Артикул</th><th>Товар</th><th>Количество</th><th></th></tr></thead><tbody>${rows || `<tr><td colspan="4" class="ff-shipment-grid__empty">Добавьте товары или вставьте строки из таблицы.</td></tr>`}</tbody></table></div>
+    <div class="ff-shipment-grid__table-wrap"><table><colgroup><col class="ff-shipment-grid__col-sku"><col class="ff-shipment-grid__col-name"><col class="ff-shipment-grid__col-quantity"><col class="ff-shipment-grid__col-remove"></colgroup><thead><tr><th>Артикул</th><th>Товар</th><th>Количество</th><th></th></tr></thead><tbody>${rows || `<tr><td colspan="4" class="ff-shipment-grid__empty">Добавьте товары или вставьте строки из таблицы.</td></tr>`}</tbody></table></div>
     <div class="ff-shipment-grid__tools"><label>Добавить товар<input type="search" list="${escapeHtml(datalistId)}" data-role="shipment-catalog-query" value="${escapeHtml(model.shipmentCatalogQuery)}" placeholder="Артикул, название или WB ID" autocomplete="off"${disabledAttribute(model)}><datalist id="${escapeHtml(datalistId)}">${options}</datalist></label><button type="button" class="ff-analysis-secondary" data-action="add-shipment-grid-item" data-shipment-id="${escapeHtml(supply.id)}"${disabledAttribute(model)}>Добавить строку</button></div>
     <div class="ff-shipment-grid__paste"><textarea data-role="shipment-grid-paste" placeholder="Артикул&#9;Количество&#10;SKU-1&#9;50" aria-label="Строки из Excel или Google Sheets"${disabledAttribute(model)}>${escapeHtml(model.shipmentGridPaste)}</textarea><button type="button" class="ff-analysis-secondary" data-action="apply-shipment-grid-paste" data-shipment-id="${escapeHtml(supply.id)}"${disabledAttribute(model)}>Вставить из Excel / Google Sheets</button></div>
     <footer class="ff-shipment-grid__footer"><button type="button" class="ff-analysis-secondary" data-action="cancel-shipment-grid" data-shipment-id="${escapeHtml(supply.id)}"${disabledAttribute(model)}>Закрыть без сохранения</button><button type="button" data-action="save-shipment-grid" data-shipment-id="${escapeHtml(supply.id)}"${disabledAttribute(model, items.length === 0)}>Сохранить состав</button></footer>
