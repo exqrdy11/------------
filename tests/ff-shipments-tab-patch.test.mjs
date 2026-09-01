@@ -114,21 +114,23 @@ test("shipments tab shows every active FF and uses a human-readable title instea
       supplies: [
         { id: "7c4a9f90-617f-4f48-8ed9-f22cde0df16f", warehouseId: "volgograd", status: "draft", createdAt: "2026-09-01T07:00:00Z", items: [] },
         { id: "f464bb47-0000-4000-8000-123456789012", warehouseId: "top-full", status: "in_transit", createdAt: "2026-09-01T08:00:00Z", items: [] },
+        { id: "orphan-draft", warehouseId: "missing-ff", warehouseLabel: "Сохранённый ФФ", status: "draft", createdAt: "2026-09-01T09:00:00Z", items: [] },
         { id: "archive-uuid", warehouseId: "old", status: "received", createdAt: "2026-08-01T08:00:00Z", items: [] },
       ],
     },
   });
 
-  assert.equal(model.shipmentSupplies.length, 2);
+  assert.equal(model.shipmentSupplies.length, 3);
   const analysisHtml = renderFfWorkspaceMarkup(model, "analysis");
   const shipmentsHtml = renderFfWorkspaceMarkup(model, "shipments");
   assert.doesNotMatch(analysisHtml, /История движения/);
   assert.match(shipmentsHtml, />Отгрузки</);
   assert.match(shipmentsHtml, /Поставка → Волгоград — Upakovka · 2026-09-01/);
   assert.match(shipmentsHtml, /Поставка → Москва — Top-Full · 2026-09-01/);
+  assert.match(shipmentsHtml, /Поставка → Сохранённый ФФ · 2026-09-01/);
   assert.match(shipmentsHtml, /data-action="edit-supply"[^>]*>Редактировать состав/);
   assert.match(shipmentsHtml, />Отправить в путь</);
-  assert.equal((shipmentsHtml.match(/data-action="edit-supply"/g) ?? []).length, 1);
+  assert.equal((shipmentsHtml.match(/data-action="edit-supply"/g) ?? []).length, 2);
   assert.doesNotMatch(shipmentsHtml, />Поставка 7c4a9f90-617f-4f48-8ed9-f22cde0df16f</);
 });
 

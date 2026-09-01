@@ -66,6 +66,123 @@ export function patchFfPlanningRoute(input) {
 export function patchFfAnalysisClient(input) {
   if (typeof input !== "string" || !input.trim()) throw new Error("Пустой клиент анализа ФФ");
   let source = input;
+  if (!source.includes("const PLANNING_REQUEST_TIMEOUT_MS") && source.includes("export async function fetchSavedAnalysisSnapshot")) {
+    source = replaceRequired(
+      source,
+      /export async function fetchSavedAnalysisSnapshot/g,
+      `const PLANNING_REQUEST_TIMEOUT_MS = 25_000;
+
+export async function fetchPlanningWithTimeout(fetchImpl, url, init, timeoutMs = PLANNING_REQUEST_TIMEOUT_MS, timeoutMessage = "Сервер слишком долго отвечает") {
+  const controller = typeof AbortController === "function" ? new AbortController() : null;
+  let timeoutId;
+  const timeout = new Promise((_, reject) => {
+    timeoutId = setTimeout(() => {
+      controller?.abort();
+      reject(new Error(timeoutMessage));
+    }, timeoutMs);
+  });
+  try {
+    return await Promise.race([
+      Promise.resolve().then(() => fetchImpl(url, controller ? { ...init, signal: controller.signal } : init)),
+      timeout,
+    ]);
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
+
+function supplyItemQuantity(item) {
+  return Math.max(0, Number(item?.plannedQuantity ?? item?.actualQuantity ?? item?.quantity) || 0);
+}
+
+function supplyItemsSignature(items) {
+  return (Array.isArray(items) ? items : [])
+    .map((item) => \`${"${String(item?.productKey ?? item?.nmId ?? item?.sku ?? \"\")}:${supplyItemQuantity(item)}"}\`)
+    .sort()
+    .join("|");
+}
+
+function planningMutationApplied(action, body, supplies) {
+  const allSupplies = Array.isArray(supplies) ? supplies : [];
+  if (action === "create-supply") {
+    return allSupplies.some((supply) => supply.status === "draft"
+      && supply.warehouseId === body.warehouseId
+      && supplyItemsSignature(supply.items) === supplyItemsSignature(body.items));
+  }
+  if (action === "update-supply") {
+    return allSupplies.some((supply) => supply.id === body.shipmentId
+      && supply.status === "draft"
+      && supplyItemsSignature(supply.items) === supplyItemsSignature(body.items));
+  }
+  if (action === "dispatch-supply") return allSupplies.some((supply) => supply.id === body.shipmentId && supply.status === "in_transit");
+  if (action === "receive-supply") return allSupplies.some((supply) => supply.id === body.shipmentId && supply.status === "received");
+  if (action === "cancel-supply") return allSupplies.some((supply) => supply.id === body.shipmentId && supply.status === "cancelled");
+  return false;
+}
+
+export async function fetchSavedAnalysisSnapshot`,
+      "защита запросов планирования от зависания",
+    );
+  }
+  if (source.includes("const planningResponse = await fetchImpl(`/api/ff-planning?${query}`, init);")) {
+    source = replaceRequired(
+      source,
+      /const planningResponse = await fetchImpl\(`\/api\/ff-planning\?\$\{query\}`, init\);/g,
+      'const planningResponse = await fetchPlanningWithTimeout(fetchImpl, `/api/ff-planning?${query}`, init, PLANNING_REQUEST_TIMEOUT_MS, "Сервер слишком долго загружает сохранённые отгрузки");',
+      "таймаут чтения сохранённых отгрузок",
+    );
+  }
+  if (source.includes('const response = await fetchImpl("/api/ff-planning", {')) {
+    source = replaceRequired(
+      source,
+      /const response = await fetchImpl\("\/api\/ff-planning", \{([\s\S]*?)\n\s*\}\);/g,
+      'const response = await fetchPlanningWithTimeout(fetchImpl, "/api/ff-planning", {$1\n  }, PLANNING_REQUEST_TIMEOUT_MS, "Сервер слишком долго сохраняет отгрузку");',
+      "таймаут сохранения отгрузки",
+    );
+  }
+  if (!source.includes("Сохранённые отгрузки перепроверены") && source.includes("export async function runPlanningMutation")) {
+    source = replaceRequired(
+      source,
+      /export async function runPlanningMutation\(root, state, action, body, fetchImpl = fetch\) \{[\s\S]*?\n\}/g,
+      `export async function runPlanningMutation(root, state, action, body, fetchImpl = fetch) {
+  if (state.actionPending || state.refreshing) return false;
+  state.actionPending = true;
+  state.error = null;
+  renderState(root, state);
+  let succeeded = false;
+  const requestBody = { from: state.from, to: state.to, ...body };
+  try {
+    const planning = await postPlanningAction(action, requestBody, fetchImpl);
+    if (!Array.isArray(planning.inventory?.rows)) throw new Error("Ответ планирования не содержит сохранённые остатки");
+    applySnapshot(state, { planning, inventory: planning.inventory });
+    state.selectedProductKeys = null;
+    state.quantitiesByProduct.clear();
+    succeeded = true;
+  } catch (error) {
+    const originalMessage = error instanceof Error ? error.message : "Не удалось изменить поставку";
+    try {
+      await new Promise((resolve) => setTimeout(resolve, 500));
+      const saved = await fetchSavedAnalysisSnapshot({ from: state.from, to: state.to, fetchImpl });
+      applySnapshot(state, saved);
+      if (planningMutationApplied(action, requestBody, saved.planning?.supplies)) {
+        state.selectedProductKeys = null;
+        state.quantitiesByProduct.clear();
+        succeeded = true;
+      } else {
+        state.error = \`${"${originalMessage}"}. Сохранённые отгрузки перепроверены; незаписанные данные не заменили старые.\`;
+      }
+    } catch {
+      state.error = originalMessage;
+    }
+  } finally {
+    state.actionPending = false;
+    renderState(root, state);
+  }
+  return succeeded;
+}`,
+      "сверка сохранения черновика после сбоя",
+    );
+  }
   if (!source.includes("function fullRefreshPeriod()")) {
     source = replaceRequired(
       source,

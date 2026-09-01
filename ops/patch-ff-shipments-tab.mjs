@@ -1,6 +1,23 @@
 import { readFile, writeFile } from "node:fs/promises";
 
 const MARKER = "data-ff-shipments-nav";
+const LEGACY_SHIPMENT_INDEX = `  const visibleWarehouseIds = new Set(warehouses.map((warehouse) => warehouse.id));
+  const warehouseById = new Map(allWarehouses.map((warehouse) => [warehouse.id, warehouse]));`;
+const RESILIENT_SHIPMENT_INDEX = `  const warehouseById = new Map(allWarehouses.map((warehouse) => [warehouse.id, warehouse]));`;
+const LEGACY_SHIPMENT_SUPPLIES = `  const shipmentSupplies = allSupplies.flatMap((supply) => {
+    const warehouse = warehouseById.get(supply.warehouseId);
+    return warehouse && visibleWarehouseIds.has(supply.warehouseId)
+      ? [{ ...supply, warehouseLabel: \`\${warehouse.city} — \${warehouse.name}\` }]
+      : [];
+  });`;
+const RESILIENT_SHIPMENT_SUPPLIES = `  const shipmentSupplies = allSupplies.flatMap((supply) => {
+    const warehouse = warehouseById.get(supply.warehouseId);
+    if (warehouse?.isHidden) return [];
+    const warehouseLabel = warehouse
+      ? \`\${warehouse.city} — \${warehouse.name}\`
+      : String(supply.warehouseLabel || supply.warehouseId || "ФФ");
+    return [{ ...supply, warehouseLabel }];
+  });`;
 
 function replaceRequired(source, pattern, replacement, label) {
   const next = source.replace(pattern, replacement);
@@ -16,6 +33,9 @@ function removeRequired(source, fragment, label) {
 
 export function patchFfShipmentsTab(input) {
   let source = String(input ?? "");
+  source = source
+    .replace(LEGACY_SHIPMENT_INDEX, RESILIENT_SHIPMENT_INDEX)
+    .replace(LEGACY_SHIPMENT_SUPPLIES, RESILIENT_SHIPMENT_SUPPLIES);
   if (source.includes(MARKER)) return source;
 
   source = replaceRequired(
@@ -71,7 +91,6 @@ function supplyDisplayTitle(supply) {
     source,
     /(const warehouses = allWarehouses\.filter\(\(warehouse\) => !warehouse\.isHidden\);)/,
     `$1
-  const visibleWarehouseIds = new Set(warehouses.map((warehouse) => warehouse.id));
   const warehouseById = new Map(allWarehouses.map((warehouse) => [warehouse.id, warehouse]));`,
     "индекс активных ФФ",
   );
@@ -82,9 +101,11 @@ function supplyDisplayTitle(supply) {
     `$1
   const shipmentSupplies = allSupplies.flatMap((supply) => {
     const warehouse = warehouseById.get(supply.warehouseId);
-    return warehouse && visibleWarehouseIds.has(supply.warehouseId)
-      ? [{ ...supply, warehouseLabel: \`\${warehouse.city} — \${warehouse.name}\` }]
-      : [];
+    if (warehouse?.isHidden) return [];
+    const warehouseLabel = warehouse
+      ? \`\${warehouse.city} — \${warehouse.name}\`
+      : String(supply.warehouseLabel || supply.warehouseId || "ФФ");
+    return [{ ...supply, warehouseLabel }];
   });`,
     "единый список отгрузок",
   );

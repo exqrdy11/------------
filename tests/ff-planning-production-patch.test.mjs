@@ -85,6 +85,53 @@ const planning = await postPlanningAction("refresh", { from: state.from, to: sta
   assert.match(patched, /Автообновление ежедневно в 07:00 МСК/);
 });
 
+test("planning mutations time out and reconcile the saved server state", () => {
+  const source = `
+function fullRefreshPeriod() { return { from: "2026-01-01", to: "2026-01-31" }; }
+const scheduleLabel = "Автообновление ежедневно в 07:00 МСК";
+export async function fetchSavedAnalysisSnapshot({ from, to, fetchImpl = fetch }) {
+  const query = new URLSearchParams({ from, to });
+  const init = { method: "GET", headers: { Accept: "application/json" }, cache: "no-store", credentials: "same-origin" };
+  const planningResponse = await fetchImpl(\`/api/ff-planning?\${query}\`, init);
+  return { planning: await planningResponse.json(), inventory: {} };
+}
+export async function postPlanningAction(action, body, fetchImpl = fetch) {
+  if (!PLANNING_ACTIONS.has(action)) throw new Error("Неизвестное действие");
+  const response = await fetchImpl("/api/ff-planning", {
+    method: "POST", headers: { "Content-Type": "application/json", Accept: "application/json" }, credentials: "same-origin", body: JSON.stringify({ action, ...body }),
+  });
+  return response.json();
+}
+export async function runPlanningMutation(root, state, action, body, fetchImpl = fetch) {
+  if (state.actionPending || state.refreshing) return false;
+  state.actionPending = true;
+  state.error = null;
+  renderState(root, state);
+  let succeeded = false;
+  try {
+    const planning = await postPlanningAction(action, { from: state.from, to: state.to, ...body }, fetchImpl);
+    if (!Array.isArray(planning.inventory?.rows)) throw new Error("Ответ планирования не содержит сохранённые остатки");
+    applySnapshot(state, { planning, inventory: planning.inventory });
+    state.selectedProductKeys = null;
+    state.quantitiesByProduct.clear();
+    succeeded = true;
+  } catch (error) {
+    state.error = error instanceof Error ? error.message : "Не удалось изменить поставку";
+  } finally {
+    state.actionPending = false;
+    renderState(root, state);
+  }
+  return succeeded;
+}
+`;
+  const patched = patchFfAnalysisClient(source);
+  assert.match(patched, /PLANNING_REQUEST_TIMEOUT_MS/);
+  assert.match(patched, /fetchPlanningWithTimeout/);
+  assert.match(patched, /planningMutationApplied/);
+  assert.match(patched, /Сохранённые отгрузки перепроверены/);
+  assert.match(patched, /fetchSavedAnalysisSnapshot\(\{ from: state\.from, to: state\.to, fetchImpl \}\)/);
+});
+
 const brokenStockAttachment = `
 function indexPhysicalStocks(stocks) {
   return new Map(stocks.map((stock) => [\`${"${stock.location}"}:${"${stock.productKey}"}\`, stock]));
