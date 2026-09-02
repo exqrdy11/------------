@@ -97,7 +97,7 @@ let activeShell = null;
 
 function evaluatePatched(source) {
   const executable = source.replaceAll("export function", "function");
-  return new Function(`${executable}\nreturn { deriveAnalysisModel, renderFfWorkspaceMarkup, ffCustomViewFromHash, prepareDraftForEditing };`)();
+  return new Function(`${executable}\nreturn { deriveAnalysisModel, renderShipmentsMarkup, renderFfWorkspaceMarkup, ffCustomViewFromHash, prepareDraftForEditing };`)();
 }
 
 test("shipments tab shows every active FF and uses a human-readable title instead of UUID", () => {
@@ -156,4 +156,45 @@ test("only a draft can be selected for editing", () => {
   assert.equal(state.selectedWarehouseId, "volgograd");
   assert.equal(state.selectedProductKeys, null);
   assert.equal(state.quantitiesByProduct.size, 0);
+});
+
+test("shipments are split into active, received and archive tabs and can be filtered by FF", () => {
+  const { deriveAnalysisModel, renderShipmentsMarkup } = evaluatePatched(patchFfShipmentsTab(productionShape));
+  const baseModel = deriveAnalysisModel({
+    planning: {
+      warehouses: [
+        { id: "volgograd", city: "Волгоград", name: "Upakovka", isHidden: false },
+        { id: "top-full", city: "Москва", name: "Top-Full", isHidden: false },
+      ],
+      supplies: [
+        { id: "volgograd-draft", warehouseId: "volgograd", status: "draft", createdAt: "2026-09-02", items: [] },
+        { id: "top-full-transit", warehouseId: "top-full", status: "in_transit", createdAt: "2026-09-02", items: [] },
+        { id: "volgograd-received", warehouseId: "volgograd", status: "received", createdAt: "2026-09-01", items: [] },
+        { id: "volgograd-cancelled", warehouseId: "volgograd", status: "cancelled", createdAt: "2026-08-31", items: [] },
+      ],
+    },
+  });
+
+  const activeHtml = renderShipmentsMarkup(baseModel);
+  assert.match(activeHtml, /data-ff-shipment-filters/);
+  assert.match(activeHtml, /Активные[^<]*2/);
+  assert.match(activeHtml, /Принятые[^<]*1/);
+  assert.match(activeHtml, /Архив[^<]*1/);
+  assert.match(activeHtml, /volgograd-draft/);
+  assert.match(activeHtml, /Поставка → Москва — Top-Full · 2026-09-02/);
+  assert.doesNotMatch(activeHtml, /2026-09-01/);
+  assert.doesNotMatch(activeHtml, /2026-08-31/);
+
+  const receivedHtml = renderShipmentsMarkup({ ...baseModel, shipmentStatusFilter: "received" });
+  assert.match(receivedHtml, /Поставка → Волгоград — Upakovka · 2026-09-01/);
+  assert.doesNotMatch(receivedHtml, /volgograd-draft/);
+
+  const archiveHtml = renderShipmentsMarkup({ ...baseModel, shipmentStatusFilter: "archive" });
+  assert.match(archiveHtml, /Поставка → Волгоград — Upakovka · 2026-08-31/);
+  assert.doesNotMatch(archiveHtml, /2026-09-01/);
+
+  const filteredHtml = renderShipmentsMarkup({ ...baseModel, shipmentWarehouseFilter: "volgograd" });
+  assert.match(filteredHtml, /Активные[^<]*1/);
+  assert.match(filteredHtml, /volgograd-draft/);
+  assert.doesNotMatch(filteredHtml, /Москва — Top-Full · 2026-09-02/);
 });

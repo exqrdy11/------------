@@ -352,10 +352,12 @@ export function patchFfShipmentGrid(input) {
     "состояние табличного редактора",
   );
 
+  const filteredRenderState = /function renderState\(root, state\) \{\s*const view = root\.dataset\.ffAnalysisView === "shipments" \? "shipments" : "analysis";\s*const model = Object\.assign\(stateModel\(state\), \{\s*shipmentStatusFilter: root\.dataset\.ffShipmentStatusFilter \|\| "active",\s*shipmentWarehouseFilter: root\.dataset\.ffShipmentWarehouseFilter \|\| "",\s*\}\);\s*root\.innerHTML = renderFfWorkspaceMarkup\(model, view\);\s*\}/;
+  const legacyRenderState = /function renderState\(root, state\) \{\s*const view = root\.dataset\.ffAnalysisView === "shipments" \? "shipments" : "analysis";\s*root\.innerHTML = renderFfWorkspaceMarkup\(stateModel\(state\), view\);\s*\}/;
   source = replaceRequired(
     source,
-    /function renderState\(root, state\) \{\s*const view = root\.dataset\.ffAnalysisView === "shipments" \? "shipments" : "analysis";\s*root\.innerHTML = renderFfWorkspaceMarkup\(stateModel\(state\), view\);\s*\}/,
-    `function renderState(root, state) {\n  const view = root.dataset.ffAnalysisView === "shipments" ? "shipments" : "analysis";\n  const model = Object.assign(stateModel(state), shipmentGridViewModel(state));\n  root.innerHTML = renderFfWorkspaceMarkup(model, view);\n}`,
+    filteredRenderState.test(source) ? filteredRenderState : legacyRenderState,
+    `function renderState(root, state) {\n  const view = root.dataset.ffAnalysisView === "shipments" ? "shipments" : "analysis";\n  const model = Object.assign(stateModel(state), shipmentGridViewModel(state), {\n    shipmentStatusFilter: root.dataset.ffShipmentStatusFilter || "active",\n    shipmentWarehouseFilter: root.dataset.ffShipmentWarehouseFilter || "",\n  });\n  root.innerHTML = renderFfWorkspaceMarkup(model, view);\n}`,
     "модель редактора отгрузки",
   );
 

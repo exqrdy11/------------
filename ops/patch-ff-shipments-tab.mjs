@@ -1,6 +1,7 @@
 import { readFile, writeFile } from "node:fs/promises";
 
 const MARKER = "data-ff-shipments-nav";
+const FILTER_MARKER = "data-ff-shipment-filters";
 const LEGACY_SHIPMENT_INDEX = `  const visibleWarehouseIds = new Set(warehouses.map((warehouse) => warehouse.id));
   const warehouseById = new Map(allWarehouses.map((warehouse) => [warehouse.id, warehouse]));`;
 const RESILIENT_SHIPMENT_INDEX = `  const warehouseById = new Map(allWarehouses.map((warehouse) => [warehouse.id, warehouse]));`;
@@ -31,12 +32,130 @@ function removeRequired(source, fragment, label) {
   return next;
 }
 
+function shipmentFiltersTemplate() { /*__FF_SHIPMENT_FILTERS_START__
+export function renderShipmentsMarkup(model) {
+  const shipmentStatusFilter = ["active", "received", "archive"].includes(model.shipmentStatusFilter)
+    ? model.shipmentStatusFilter
+    : "active";
+  const shipmentWarehouseFilter = String(model.shipmentWarehouseFilter || "");
+  const currentSupplies = Array.isArray(model.shipmentSupplies) ? model.shipmentSupplies : [];
+  const archivedSupplies = Array.isArray(model.archivedSupplies) ? model.archivedSupplies : [];
+  const allSuppliesById = new Map();
+  for (const [index, supply] of [...currentSupplies, ...archivedSupplies].entries()) {
+    const key = String(supply?.id || `${supply?.warehouseId || "ff"}-${index}`);
+    if (!allSuppliesById.has(key)) allSuppliesById.set(key, supply);
+  }
+  const allSupplies = [...allSuppliesById.values()];
+  const matchesWarehouse = (supply) => !shipmentWarehouseFilter
+    || String(supply?.warehouseId || "") === shipmentWarehouseFilter;
+  const scopedSupplies = allSupplies.filter(matchesWarehouse);
+  const groups = {
+    active: scopedSupplies.filter((supply) => supply.status === "draft" || supply.status === "in_transit"),
+    received: scopedSupplies.filter((supply) => supply.status === "received"),
+    archive: scopedSupplies.filter((supply) => supply.status === "cancelled"),
+  };
+  const visibleSupplies = groups[shipmentStatusFilter];
+  const warehouseOptions = new Map();
+  for (const warehouse of Array.isArray(model.warehouses) ? model.warehouses : []) {
+    if (!warehouse?.id) continue;
+    warehouseOptions.set(String(warehouse.id), `${warehouse.city || "ФФ"} — ${warehouse.name || warehouse.id}`);
+  }
+  for (const supply of allSupplies) {
+    const warehouseId = String(supply?.warehouseId || "");
+    if (warehouseId && !warehouseOptions.has(warehouseId)) {
+      warehouseOptions.set(warehouseId, String(supply?.warehouseLabel || warehouseId));
+    }
+  }
+  const options = [`<option value=""${shipmentWarehouseFilter ? "" : " selected"}>Все ФФ</option>`]
+    .concat([...warehouseOptions.entries()].map(([warehouseId, label]) => `<option value="${escapeHtml(warehouseId)}"${warehouseId === shipmentWarehouseFilter ? " selected" : ""}>${escapeHtml(label)}</option>`))
+    .join("");
+  const tabs = [
+    ["active", "Активные", groups.active.length],
+    ["received", "Принятые", groups.received.length],
+    ["archive", "Архив", groups.archive.length],
+  ].map(([status, label, count]) => `<button type="button" class="ff-analysis-secondary${shipmentStatusFilter === status ? " active" : ""}" data-action="shipment-status-filter" data-shipment-status="${status}" aria-pressed="${shipmentStatusFilter === status}">${label} ${formatNumber(count)}</button>`).join("");
+  const historyOptions = shipmentStatusFilter === "archive"
+    ? { supplies: visibleSupplies, archived: true, title: "Архив отменённых", kicker: "АРХИВ" }
+    : shipmentStatusFilter === "received"
+      ? { supplies: visibleSupplies, title: "Принятые поставки", kicker: "ИСТОРИЯ" }
+      : { supplies: visibleSupplies, title: "Активные отгрузки", kicker: "В РАБОТЕ" };
+  return `<section class="ff-analysis-root" aria-label="Отгрузки">
+    <header class="ff-analysis-controls">
+      <div class="ff-analysis-title"><span class="ff-analysis-kicker">ПЛАНЫ И ИСТОРИЯ</span><h1>Отгрузки</h1></div>
+      <span data-role="updated-at" role="status">Активных: ${formatNumber(groups.active.length)} · принятых: ${formatNumber(groups.received.length)}</span>
+    </header>
+    <section class="ff-analysis-method" role="note"><strong>Все планы сохранены.</strong><span>Черновик можно править и пересохранять. Когда состав груза точно готов — отправьте его в путь, и редактирование закроется.</span></section>
+    <section class="ff-analysis-method" data-ff-shipment-filters aria-label="Фильтры отгрузок">
+      <label><span>Фулфилмент</span><select data-role="shipment-warehouse-filter" aria-label="Фулфилмент">${options}</select></label>
+      <div class="ff-analysis-periods" role="tablist" aria-label="Статус поставки">${tabs}</div>
+    </section>
+    ${renderSupplyHistory(model, historyOptions)}
+  </section>`;
+}
+__FF_SHIPMENT_FILTERS_END__*/ }
+
+function shipmentFiltersSource() {
+  const source = shipmentFiltersTemplate.toString();
+  return source.slice(
+    source.indexOf("/*__FF_SHIPMENT_FILTERS_START__") + "/*__FF_SHIPMENT_FILTERS_START__".length,
+    source.indexOf("__FF_SHIPMENT_FILTERS_END__*/"),
+  ).trim();
+}
+
+function upgradeShipmentFilters(input) {
+  let source = String(input ?? "");
+  if (source.includes(FILTER_MARKER)) return source;
+  source = replaceRequired(
+    source,
+    /export function renderShipmentsMarkup\(model\) \{[\s\S]*?\n\}\n\nexport function renderFfWorkspaceMarkup/,
+    `${shipmentFiltersSource()}\n\nexport function renderFfWorkspaceMarkup`,
+    "фильтры статусов и ФФ",
+  );
+  const gridModel = "const model = Object.assign(stateModel(state), shipmentGridViewModel(state));";
+  const filteredGridModel = `const model = Object.assign(stateModel(state), shipmentGridViewModel(state), {
+    shipmentStatusFilter: root.dataset.ffShipmentStatusFilter || "active",
+    shipmentWarehouseFilter: root.dataset.ffShipmentWarehouseFilter || "",
+  });`;
+  if (source.includes(gridModel)) {
+    source = source.replace(gridModel, filteredGridModel);
+  } else {
+    source = source.replace(
+      "root.innerHTML = renderFfWorkspaceMarkup(stateModel(state), view);",
+      `const model = Object.assign(stateModel(state), {
+    shipmentStatusFilter: root.dataset.ffShipmentStatusFilter || "active",
+    shipmentWarehouseFilter: root.dataset.ffShipmentWarehouseFilter || "",
+  });
+  root.innerHTML = renderFfWorkspaceMarkup(model, view);`,
+    );
+  }
+  if (!source.includes("shipmentStatusFilter: root.dataset.ffShipmentStatusFilter")) {
+    throw new Error("Фрагмент «состояние фильтров отгрузок» не найден в клиентском бандле");
+  }
+  source = source.replace(
+    `if (event.type === "change") {
+      if (target.dataset.role === "ff-select") {`,
+    `if (event.type === "change") {
+      if (target.dataset.role === "shipment-warehouse-filter") {
+        root.dataset.ffShipmentWarehouseFilter = target.value;
+        renderState(root, state);
+      } else if (target.dataset.role === "ff-select") {`,
+  );
+  source = source.replace(
+    `if (action === "refresh") void refreshAnalysis(root, state);`,
+    `if (action === "shipment-status-filter") {
+      root.dataset.ffShipmentStatusFilter = target.dataset.shipmentStatus || "active";
+      renderState(root, state);
+    } else if (action === "refresh") void refreshAnalysis(root, state);`,
+  );
+  return source;
+}
+
 export function patchFfShipmentsTab(input) {
   let source = String(input ?? "");
   source = source
     .replace(LEGACY_SHIPMENT_INDEX, RESILIENT_SHIPMENT_INDEX)
     .replace(LEGACY_SHIPMENT_SUPPLIES, RESILIENT_SHIPMENT_SUPPLIES);
-  if (source.includes(MARKER)) return source;
+  if (source.includes(MARKER)) return upgradeShipmentFilters(source);
 
   source = replaceRequired(
     source,
@@ -308,7 +427,7 @@ let activeShell`,
     "навигация анализа и отгрузок",
   );
 
-  return source;
+  return upgradeShipmentFilters(source);
 }
 
 async function main() {
