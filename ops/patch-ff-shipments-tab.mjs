@@ -2,6 +2,7 @@ import { readFile, writeFile } from "node:fs/promises";
 
 const MARKER = "data-ff-shipments-nav";
 const FILTER_MARKER = "data-ff-shipment-filters";
+const EXPORT_MARKER = 'data-action="download-unified-shipments"';
 const LEGACY_SHIPMENT_INDEX = `  const visibleWarehouseIds = new Set(warehouses.map((warehouse) => warehouse.id));
   const warehouseById = new Map(allWarehouses.map((warehouse) => [warehouse.id, warehouse]));`;
 const RESILIENT_SHIPMENT_INDEX = `  const warehouseById = new Map(allWarehouses.map((warehouse) => [warehouse.id, warehouse]));`;
@@ -33,6 +34,128 @@ function removeRequired(source, fragment, label) {
 }
 
 function shipmentFiltersTemplate() { /*__FF_SHIPMENT_FILTERS_START__
+export function buildUnifiedShipmentWorkbookData(model) {
+  const warehouses = Array.isArray(model?.warehouses) ? model.warehouses : [];
+  const warehouseById = new Map(warehouses.map((warehouse) => [String(warehouse?.id || ""), warehouse]));
+  const currentSupplies = Array.isArray(model?.shipmentSupplies) ? model.shipmentSupplies : [];
+  const archivedSupplies = Array.isArray(model?.archivedSupplies) ? model.archivedSupplies : [];
+  const suppliesById = new Map();
+  for (const [index, supply] of [...currentSupplies, ...archivedSupplies].entries()) {
+    const key = String(supply?.id || `${supply?.warehouseId || "ff"}-${index}`);
+    if (!suppliesById.has(key)) suppliesById.set(key, supply);
+  }
+  const activeSupplies = [...suppliesById.values()].filter((supply) => supply?.status === "draft" || supply?.status === "in_transit");
+  const totals = new Map();
+  const cityRows = new Map();
+  const fulfillmentRows = new Map();
+  const cities = new Set();
+  const collator = new Intl.Collator("ru", { numeric: true, sensitivity: "base" });
+
+  for (const supply of activeSupplies) {
+    const warehouseId = String(supply?.warehouseId || "");
+    const warehouse = warehouseById.get(warehouseId);
+    const fallbackLabel = String(supply?.warehouseLabel || warehouseId || "ФФ").trim() || "ФФ";
+    const fallbackCity = fallbackLabel.split(/\s+[\u2014-]\s+/)[0]?.trim();
+    const city = String(warehouse?.city || fallbackCity || "Без города").trim() || "Без города";
+    const fulfillment = warehouse
+      ? `${city} — ${String(warehouse?.name || warehouseId || "ФФ").trim()}`
+      : fallbackLabel;
+    cities.add(city);
+
+    for (const item of Array.isArray(supply?.items) ? supply.items : []) {
+      const article = String(item?.sku || item?.article || item?.vendorCode || item?.nmId || item?.productKey || item?.id || "").trim();
+      const quantity = Number(item?.quantity ?? item?.plannedQuantity ?? item?.actualQuantity ?? 0);
+      if (!article || !Number.isFinite(quantity) || quantity <= 0) continue;
+      const name = String(item?.name || item?.title || item?.productName || article).trim() || article;
+
+      const total = totals.get(article) || { article, name, quantity: 0 };
+      total.quantity += quantity;
+      if (!total.name || total.name === total.article) total.name = name;
+      totals.set(article, total);
+
+      const cityRow = cityRows.get(article) || { article, name, quantities: {}, total: 0 };
+      cityRow.quantities[city] = Number(cityRow.quantities[city] || 0) + quantity;
+      cityRow.total += quantity;
+      if (!cityRow.name || cityRow.name === cityRow.article) cityRow.name = name;
+      cityRows.set(article, cityRow);
+
+      const fulfillmentKey = `${fulfillment}\u0000${article}`;
+      const fulfillmentRow = fulfillmentRows.get(fulfillmentKey) || { city, fulfillment, article, name, quantity: 0 };
+      fulfillmentRow.quantity += quantity;
+      if (!fulfillmentRow.name || fulfillmentRow.name === fulfillmentRow.article) fulfillmentRow.name = name;
+      fulfillmentRows.set(fulfillmentKey, fulfillmentRow);
+    }
+  }
+
+  const sortByArticle = (left, right) => collator.compare(left.article, right.article);
+  return {
+    activeSupplyCount: activeSupplies.length,
+    cities: [...cities].sort(collator.compare),
+    totals: [...totals.values()].sort(sortByArticle),
+    byCity: [...cityRows.values()].sort(sortByArticle),
+    byFulfillment: [...fulfillmentRows.values()].sort((left, right) => collator.compare(left.city, right.city)
+      || collator.compare(left.fulfillment, right.fulfillment)
+      || collator.compare(left.article, right.article)),
+  };
+}
+
+let unifiedShipmentXlsxPromise = null;
+
+function loadUnifiedShipmentXlsx() {
+  if (globalThis.XLSX) return Promise.resolve(globalThis.XLSX);
+  if (unifiedShipmentXlsxPromise) return unifiedShipmentXlsxPromise;
+  unifiedShipmentXlsxPromise = new Promise((resolve, reject) => {
+    const script = document.createElement("script");
+    script.src = "/assets/xlsx.full.min.js";
+    script.async = true;
+    script.onload = () => globalThis.XLSX
+      ? resolve(globalThis.XLSX)
+      : reject(new Error("Библиотека Excel не загрузилась"));
+    script.onerror = () => reject(new Error("Не удалось загрузить модуль Excel"));
+    document.head.append(script);
+  }).catch((error) => {
+    unifiedShipmentXlsxPromise = null;
+    throw error;
+  });
+  return unifiedShipmentXlsxPromise;
+}
+
+async function downloadUnifiedShipmentWorkbook(model) {
+  const data = buildUnifiedShipmentWorkbookData(model);
+  if (!data.totals.length) throw new Error("Нет активных черновиков или отгрузок в пути");
+  const XLSX = await loadUnifiedShipmentXlsx();
+  const workbook = XLSX.utils.book_new();
+  const totalsSheet = XLSX.utils.json_to_sheet(data.totals.map((row) => ({
+    "Артикул": row.article,
+    "Наименование": row.name,
+    "Количество": row.quantity,
+  })));
+  totalsSheet["!cols"] = [{ wch: 28 }, { wch: 52 }, { wch: 14 }];
+  XLSX.utils.book_append_sheet(workbook, totalsSheet, "Итого");
+
+  const citySheet = XLSX.utils.json_to_sheet(data.byCity.map((row) => {
+    const result = { "Артикул": row.article, "Наименование": row.name };
+    for (const city of data.cities) result[city] = Number(row.quantities[city] || 0);
+    result["Итого"] = row.total;
+    return result;
+  }));
+  citySheet["!cols"] = [{ wch: 28 }, { wch: 52 }, ...data.cities.map(() => ({ wch: 16 })), { wch: 14 }];
+  XLSX.utils.book_append_sheet(workbook, citySheet, "По городам");
+
+  const fulfillmentSheet = XLSX.utils.json_to_sheet(data.byFulfillment.map((row) => ({
+    "Город": row.city,
+    "Фулфилмент": row.fulfillment,
+    "Артикул": row.article,
+    "Наименование": row.name,
+    "Количество": row.quantity,
+  })));
+  fulfillmentSheet["!cols"] = [{ wch: 20 }, { wch: 44 }, { wch: 28 }, { wch: 52 }, { wch: 14 }];
+  XLSX.utils.book_append_sheet(workbook, fulfillmentSheet, "По ФФ");
+
+  const date = new Date().toISOString().slice(0, 10);
+  XLSX.writeFile(workbook, `otgruzki-vse-ff-${date}.xlsx`);
+}
+
 export function renderShipmentsMarkup(model) {
   const shipmentStatusFilter = ["active", "received", "archive"].includes(model.shipmentStatusFilter)
     ? model.shipmentStatusFilter
@@ -82,7 +205,7 @@ export function renderShipmentsMarkup(model) {
   return `<section class="ff-analysis-root" aria-label="Отгрузки">
     <header class="ff-analysis-controls">
       <div class="ff-analysis-title"><span class="ff-analysis-kicker">ПЛАНЫ И ИСТОРИЯ</span><h1>Отгрузки</h1></div>
-      <span data-role="updated-at" role="status">Активных: ${formatNumber(groups.active.length)} · принятых: ${formatNumber(groups.received.length)}</span>
+      <div class="ff-analysis-periods"><span data-role="updated-at" role="status">Активных: ${formatNumber(groups.active.length)} · принятых: ${formatNumber(groups.received.length)}</span><button type="button" class="ff-analysis-secondary" data-action="download-unified-shipments">Скачать единый Excel</button></div>
     </header>
     <section class="ff-analysis-method" role="note"><strong>Все планы сохранены.</strong><span>Черновик можно править и пересохранять. Когда состав груза точно готов — отправьте его в путь, и редактирование закроется.</span></section>
     <section class="ff-analysis-method" data-ff-shipment-filters aria-label="Фильтры отгрузок">
@@ -104,49 +227,79 @@ function shipmentFiltersSource() {
 
 function upgradeShipmentFilters(input) {
   let source = String(input ?? "");
-  if (source.includes(FILTER_MARKER)) return source;
+  if (source.includes(EXPORT_MARKER)) return source;
+  const alreadyFiltered = source.includes(FILTER_MARKER);
   source = replaceRequired(
     source,
     /export function renderShipmentsMarkup\(model\) \{[\s\S]*?\n\}\n\nexport function renderFfWorkspaceMarkup/,
     `${shipmentFiltersSource()}\n\nexport function renderFfWorkspaceMarkup`,
     "фильтры статусов и ФФ",
   );
-  const gridModel = "const model = Object.assign(stateModel(state), shipmentGridViewModel(state));";
-  const filteredGridModel = `const model = Object.assign(stateModel(state), shipmentGridViewModel(state), {
+  if (!alreadyFiltered) {
+    const gridModel = "const model = Object.assign(stateModel(state), shipmentGridViewModel(state));";
+    const filteredGridModel = `const model = Object.assign(stateModel(state), shipmentGridViewModel(state), {
     shipmentStatusFilter: root.dataset.ffShipmentStatusFilter || "active",
     shipmentWarehouseFilter: root.dataset.ffShipmentWarehouseFilter || "",
   });`;
-  if (source.includes(gridModel)) {
-    source = source.replace(gridModel, filteredGridModel);
-  } else {
-    source = source.replace(
-      "root.innerHTML = renderFfWorkspaceMarkup(stateModel(state), view);",
-      `const model = Object.assign(stateModel(state), {
+    if (source.includes(gridModel)) {
+      source = source.replace(gridModel, filteredGridModel);
+    } else {
+      source = source.replace(
+        "root.innerHTML = renderFfWorkspaceMarkup(stateModel(state), view);",
+        `const model = Object.assign(stateModel(state), {
     shipmentStatusFilter: root.dataset.ffShipmentStatusFilter || "active",
     shipmentWarehouseFilter: root.dataset.ffShipmentWarehouseFilter || "",
   });
   root.innerHTML = renderFfWorkspaceMarkup(model, view);`,
-    );
-  }
-  if (!source.includes("shipmentStatusFilter: root.dataset.ffShipmentStatusFilter")) {
-    throw new Error("Фрагмент «состояние фильтров отгрузок» не найден в клиентском бандле");
-  }
-  source = source.replace(
-    `if (event.type === "change") {
+      );
+    }
+    if (!source.includes("shipmentStatusFilter: root.dataset.ffShipmentStatusFilter")) {
+      throw new Error("Фрагмент «состояние фильтров отгрузок» не найден в клиентском бандле");
+    }
+    source = source.replace(
+      `if (event.type === "change") {
       if (target.dataset.role === "ff-select") {`,
-    `if (event.type === "change") {
+      `if (event.type === "change") {
       if (target.dataset.role === "shipment-warehouse-filter") {
         root.dataset.ffShipmentWarehouseFilter = target.value;
         renderState(root, state);
       } else if (target.dataset.role === "ff-select") {`,
-  );
-  source = source.replace(
-    `if (action === "refresh") void refreshAnalysis(root, state);`,
-    `if (action === "shipment-status-filter") {
+    );
+    source = source.replace(
+      `if (action === "refresh") void refreshAnalysis(root, state);`,
+      `if (action === "shipment-status-filter") {
       root.dataset.ffShipmentStatusFilter = target.dataset.shipmentStatus || "active";
       renderState(root, state);
     } else if (action === "refresh") void refreshAnalysis(root, state);`,
-  );
+    );
+  }
+  const exportHandler = `if (action === "download-unified-shipments") {
+      target.disabled = true;
+      const exportModel = typeof shipmentGridViewModel === "function"
+        ? Object.assign(stateModel(state), shipmentGridViewModel(state))
+        : stateModel(state);
+      void downloadUnifiedShipmentWorkbook(exportModel)
+        .catch((error) => globalThis.alert?.(error?.message || "Не удалось скачать Excel"))
+        .finally(() => { target.disabled = false; });
+    } else if (action === "shipment-status-filter") {`;
+  if (source.includes(`if (action === "shipment-status-filter") {`)) {
+    source = source.replace(`if (action === "shipment-status-filter") {`, exportHandler);
+  } else if (source.includes(`if (action === "refresh")`)) {
+    source = source.replace(
+      `if (action === "refresh")`,
+      `if (action === "download-unified-shipments") {
+      target.disabled = true;
+      const exportModel = typeof shipmentGridViewModel === "function"
+        ? Object.assign(stateModel(state), shipmentGridViewModel(state))
+        : stateModel(state);
+      void downloadUnifiedShipmentWorkbook(exportModel)
+        .catch((error) => globalThis.alert?.(error?.message || "Не удалось скачать Excel"))
+        .finally(() => { target.disabled = false; });
+    } else if (action === "refresh")`,
+    );
+  } else {
+    throw new Error("Фрагмент «скачивание единого Excel» не найден в клиентском бандле");
+  }
   return source;
 }
 
