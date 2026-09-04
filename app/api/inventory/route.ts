@@ -6,6 +6,7 @@ import { replaceFfDailyMetricsRange } from "@/db/ff-planning";
 import { cabinetSummary, cabinetToken, getAdminCabinet, type CabinetId, type CabinetSummary } from "@/lib/admin-auth";
 import { resolveInventoryPlannerGeneration } from "@/lib/ff-planning";
 import { aggregateWbPlanningMetrics, paginateWbPlanningOrders } from "@/lib/ff-planning-source";
+import { isCurrentWbSellableSnapshot, isSellableWbProduct, sellableWbProductIds, sellableWbProductIdsFromSnapshot, selectSellableWbCards, WB_SELLABLE_FILTER, WB_SELLABLE_TAG, type WbSellableFilter } from "@/lib/wb-sellable-products";
 
 export const dynamic = "force-dynamic";
 
@@ -15,6 +16,7 @@ type WbCard = {
   vendorCode?: string;
   title?: string;
   subjectName?: string;
+  tags?: Array<{ id?: number; name?: string; color?: string }>;
   sizes?: Array<{ chrtID?: number; chrtId?: number }>;
 };
 
@@ -73,6 +75,7 @@ const emptyHandoverTiming = (): HandoverMetrics => ({ overall: { sampleSize: 0, 
 type DashboardPayload = {
   configured: true;
   cabinet: CabinetSummary;
+  productFilter: WbSellableFilter;
   rows: DashboardRow[];
   warehouseNames: string[];
   manualWarehouses: ManualWarehouse[];
@@ -304,20 +307,25 @@ async function getPlanningOrders(token: string, from: string, to: string): Promi
 }
 
 export async function refreshWbFfPlanningMetrics(input: { cabinetId: CabinetId; token: string; from: string; to: string }) {
-  const [{ orders, statuses }, warehouses] = await Promise.all([
+  const [{ orders, statuses }, warehousesRaw, cards] = await Promise.all([
     getPlanningOrders(input.token, input.from, input.to),
     listFfWarehouses(input.cabinetId),
+    getCards(input.token),
   ]);
+  const warehouses = warehousesRaw as ManualWarehouse[];
+  const sellableNmIds = sellableWbProductIds(cards);
+  const sellableOrders = orders.filter((order: WbOrder) => isSellableWbProduct(sellableNmIds, order.nmId));
   const warehouseMappings = warehouses.map((warehouse) => ({
     warehouseId: warehouse.wbWarehouseId,
     warehouseName: warehouse.wbWarehouseName,
     ffWarehouseId: warehouse.id,
   }));
   const { daily, warnings } = aggregateWbPlanningMetrics({
-    orders,
+    orders: sellableOrders,
     statuses: [...statuses.values()],
     warehouseMappings,
   });
+  if (!sellableNmIds.size) warnings.push(`В кабинете WB нет карточек с ярлыком «${WB_SELLABLE_TAG}»`);
   const updatedAt = await replaceFfDailyMetricsRange({ cabinetId: input.cabinetId, from: input.from, to: input.to, metrics: daily });
   return { daily, warnings, updatedAt };
 }
@@ -513,7 +521,8 @@ export async function GET(request: Request) {
   const cached = memoryCache.get(cabinetId);
   const persisted = await loadInventorySnapshot<DashboardPayload>(cabinetId).catch(() => null);
   const durableSnapshot = persisted && Array.isArray(persisted.rows) ? persisted : null;
-  const lastKnown = cached?.payload ?? durableSnapshot;
+  const rawLastKnown = cached?.payload ?? durableSnapshot;
+  const lastKnown = isCurrentWbSellableSnapshot(rawLastKnown) ? rawLastKnown : null;
   const currentCooldownUntil = await getInventoryRefreshCooldown(cabinetId).catch(() => null);
 
   // Opening the dashboard never calls Wildberries when a shared snapshot is
@@ -581,7 +590,11 @@ export async function GET(request: Request) {
   const warnings: string[] = [];
   const rowMap = new Map<string, DashboardRow>();
 
-  const cards = cardsResult.status === "fulfilled" ? cardsResult.value : [];
+  const allCards = cardsResult.status === "fulfilled" ? cardsResult.value : [];
+  const cards = selectSellableWbCards(allCards);
+  const sellableNmIds = cardsResult.status === "fulfilled"
+    ? sellableWbProductIds(cards)
+    : sellableWbProductIdsFromSnapshot(lastKnown);
   const sellerWarehouses = sellerWarehousesResult.status === "fulfilled" ? sellerWarehousesResult.value : [];
   if (cardsResult.status === "rejected") warnings.push(`${warningFor("Карточки товаров", cardsResult.reason)}${lastKnown ? " — показаны последние корректные данные" : ""}`);
   if (sellerWarehousesResult.status === "rejected") warnings.push(`${warningFor("Склады FBS продавца", sellerWarehousesResult.reason)}${lastKnown ? " — показаны последние корректные данные" : ""}`);
@@ -638,6 +651,7 @@ export async function GET(request: Request) {
 
   if (wbStocksResult.status === "fulfilled") {
     for (const stock of wbStocksResult.value) {
+      if (!isSellableWbProduct(sellableNmIds, stock.nmId)) continue;
       const row = getOrCreateRow(rowMap, {
         nmId: stock.nmId,
       });
@@ -665,6 +679,7 @@ export async function GET(request: Request) {
     const canceled = new Set(["canceled", "canceled_by_client", "declined_by_client", "defect"]);
     try {
       const observedOrders = ordersResult.value.orders.flatMap((order) => {
+        if (!isSellableWbProduct(sellableNmIds, order.nmId)) return [];
         const status = ordersResult.value.statuses.get(order.id);
         const isBeforeHandover = status?.supplierStatus === "new" || status?.supplierStatus === "confirm";
         const isHandedOver = status?.supplierStatus === "complete" && ["waiting", "sorted", "ready_for_pickup"].includes(status.wbStatus ?? "");
@@ -682,6 +697,7 @@ export async function GET(request: Request) {
       warnings.push(warningFor("Скорость передачи FBS", error));
     }
     for (const order of ordersResult.value.orders) {
+      if (!isSellableWbProduct(sellableNmIds, order.nmId)) continue;
       const status = ordersResult.value.statuses.get(order.id);
       if (!status) continue;
       const row = getOrCreateRow(rowMap, { nmId: order.nmId, sku: order.article, name: order.article });
@@ -743,7 +759,11 @@ export async function GET(request: Request) {
     .filter((seconds) => seconds > 0);
   const retryAt = rateLimitDelays.length ? new Date(now + Math.max(...rateLimitDelays) * 1000).toISOString() : null;
 
-  if (!rows.length && warnings.length) {
+  if (cardsResult.status === "fulfilled" && !cards.length) {
+    warnings.push(`В кабинете WB нет карточек с ярлыком «${WB_SELLABLE_TAG}»`);
+  }
+
+  if (!rows.length && warnings.length && cardsResult.status === "rejected") {
     return NextResponse.json(
       {
         configured: true,
@@ -782,7 +802,7 @@ export async function GET(request: Request) {
     ...fallbackFbsWarehouseIds,
   ])];
   const plannerGeneration = resolveInventoryPlannerGeneration({ requestedGeneration: requestedPlannerGeneration, snapshotIsComplete });
-  const payload: DashboardPayload = { configured: true, cabinet, rows, warehouseNames, manualWarehouses: [], fbsStockSyncedWarehouseIds, totals, warnings, retryAt, updatedAt, plannerGeneration, handoverTiming };
+  const payload: DashboardPayload = { configured: true, cabinet, productFilter: WB_SELLABLE_FILTER, rows, warehouseNames, manualWarehouses: [], fbsStockSyncedWarehouseIds, totals, warnings, retryAt, updatedAt, plannerGeneration, handoverTiming };
   memoryCache.set(cabinetId, { payload });
   if (snapshotIsComplete) {
     await saveInventorySnapshot(cabinetId, payload, updatedAt).catch(() => undefined);

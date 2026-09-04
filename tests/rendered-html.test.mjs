@@ -148,6 +148,26 @@ test("новые FBS остаются на ФФ, но не входят в св�
   assert.match(page, /Фактически на ФФ \{formatNumber\.format\(ffPhysicalTotal\)\}/);
 });
 
+test("главная не показывает общий расчёт скорости передачи FBS", async () => {
+  const page = await readFile(new URL("app/page.tsx", root), "utf8");
+
+  assert.doesNotMatch(page, /aria-label="Качество доставки FBS"/);
+  assert.doesNotMatch(page, /Наблюдаем переходы new → complete/);
+  assert.doesNotMatch(page, /Среднее до передачи \{marketplaceCode\} · все ФФ/);
+});
+
+test("таблица остатков показывает один ФФ или сравнивает не больше трёх", async () => {
+  const page = await readFile(new URL("app/page.tsx", root), "utf8");
+
+  assert.match(page, /Склад ФФ:/);
+  assert.match(page, /Все ФФ/);
+  assert.match(page, /Сравнить ФФ/);
+  assert.match(page, /Выберите до 3 складов/);
+  assert.match(page, /stockFfCompareIds\.length >= 3/);
+  assert.match(page, /stock-overview-table/);
+  assert.doesNotMatch(page, /visibleManualWarehouses\.map\(\(item\) => <th className="ff-column-head"/);
+});
+
 test("Яндекс Маркет имеет изолированный кабинет с FBS, FBY и остатками ФФ", async () => {
   const [page, auth, inventory, analytics] = await Promise.all([
     readFile(new URL("app/page.tsx", root), "utf8"),
@@ -235,6 +255,16 @@ test("FF warehouse route accepts planning metadata fields", async () => {
   assert.match(route, /planningTargetDays\?: unknown/);
   assert.match(route, /openedAt,/);
   assert.match(route, /planningTargetDays[ },]/);
+});
+
+test("KazanTeam remains the built-in Kazan fulfillment name after a fresh deployment", async () => {
+  const [page, stocks] = await Promise.all([
+    readFile(new URL("app/page.tsx", root), "utf8"),
+    readFile(new URL("db/ff-stocks.ts", root), "utf8"),
+  ]);
+
+  assert.match(page, /id: "kazan", city: "Казань", name: "KazanTeam"/);
+  assert.match(stocks, /id: "kazan", city: "Казань", name: "KazanTeam"/);
 });
 
 test("multi-FF supply planner is connected to navigation, owner settings, FF detail, and responsive layout", async () => {

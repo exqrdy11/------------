@@ -37,7 +37,7 @@ type FfBatchRow = {
 };
 
 const defaultWarehouses: ManualWarehouse[] = [
-  { id: "kazan", city: "Казань", name: "Наш склад", position: 10, wbWarehouseId: 1692397, wbWarehouseName: null, serviceRateKopecks: 0, isHidden: false, openedAt: null, planningTargetDays: 14 },
+  { id: "kazan", city: "Казань", name: "KazanTeam", position: 10, wbWarehouseId: 1692397, wbWarehouseName: null, serviceRateKopecks: 0, isHidden: false, openedAt: null, planningTargetDays: 14 },
   { id: "moscow", city: "Москва", name: "БИК ФФ", position: 20, wbWarehouseId: null, wbWarehouseName: null, serviceRateKopecks: 0, isHidden: false, openedAt: null, planningTargetDays: 14 },
   { id: "spb", city: "Питер", name: "Rus ФФ", position: 30, wbWarehouseId: null, wbWarehouseName: null, serviceRateKopecks: 0, isHidden: false, openedAt: null, planningTargetDays: 14 },
 ];

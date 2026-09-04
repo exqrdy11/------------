@@ -5,9 +5,10 @@ import * as CFB from "cfb";
 import * as XLSX from "xlsx";
 import { summarizeActiveFbsLocations } from "@/lib/fbs-summary";
 import { calculateFfPlan, effectivePeriod, type FfPlan } from "@/lib/ff-planning";
+import RnpDashboard from "./rnp-control/RnpDashboard";
 
 type StockStatus = "В норме" | "Мало" | "Заканчивается";
-type View = "overview" | "stock" | "fbs" | "sales" | "analytics" | "pricing" | "payments" | "reports" | "fulfillment" | "manual" | "cabinets";
+type View = "overview" | "stock" | "fbs" | "sales" | "analytics" | "rnp" | "pricing" | "payments" | "reports" | "fulfillment" | "manual" | "cabinets";
 type FulfillmentList = "physical" | "available" | "reserved" | "receiving" | "toSale";
 type AnalyticsChannel = "all" | "fbs" | "fbo";
 type PricingFilter = "all" | "lower" | "raise" | "review" | "hold";
@@ -41,6 +42,7 @@ type ManualWarehouse = {
   openedAt: string | null;
   planningTargetDays: number;
 };
+type StockFfColumn = { id: string; city: string; name: string; warehouse: ManualWarehouse | null };
 
 type StockRow = {
   key: string;
@@ -259,7 +261,7 @@ export function FfPlannerMarketplaceUnavailable({ marketplaceName }: { marketpla
 }
 
 const defaultManualWarehouses: ManualWarehouse[] = [
-  { id: "kazan", city: "Казань", name: "Наш склад", position: 10, wbWarehouseId: 1692397, wbWarehouseName: null, serviceRateKopecks: 0, isHidden: false, openedAt: null, planningTargetDays: 14 },
+  { id: "kazan", city: "Казань", name: "KazanTeam", position: 10, wbWarehouseId: 1692397, wbWarehouseName: null, serviceRateKopecks: 0, isHidden: false, openedAt: null, planningTargetDays: 14 },
   { id: "moscow", city: "Москва", name: "БИК ФФ", position: 20, wbWarehouseId: null, wbWarehouseName: null, serviceRateKopecks: 0, isHidden: false, openedAt: null, planningTargetDays: 14 },
   { id: "spb", city: "Питер", name: "Rus ФФ", position: 30, wbWarehouseId: null, wbWarehouseName: null, serviceRateKopecks: 0, isHidden: false, openedAt: null, planningTargetDays: 14 },
 ];
@@ -287,6 +289,7 @@ const viewTitles: Record<View, { eyebrow: string; title: string }> = {
   fbs: { eyebrow: "FBS · ПОСЛЕДНИЕ 30 ДНЕЙ", title: "Отгрузки и приёмка" },
   sales: { eyebrow: "ФФ · СПРОС И ОСТАТКИ", title: "План поставок" },
   analytics: { eyebrow: "АНАЛИТИКА · РУКОВОДИТЕЛЮ", title: "Продажи FBS и FBO" },
+  rnp: { eyebrow: "OZON · РЕКЛАМА", title: "РНП — контроль рекламы" },
   pricing: { eyebrow: "ЦЕНЫ · РЫНОК WB", title: "Таргет цен" },
   payments: { eyebrow: "БУХГАЛТЕРИЯ · ФФ", title: "Калькулятор оплат ФФ" },
   reports: { eyebrow: "ВЫГРУЗКИ · CSV", title: "Отчёты по кабинету" },
@@ -308,6 +311,13 @@ function availableFfStock(row: StockRow, warehouseId: string) {
 
 function physicalFfStock(row: StockRow, warehouseId: string) {
   return row.ffStock[warehouseId] ?? 0;
+}
+
+function hasFfWarehouseActivity(row: StockRow, warehouseId: string) {
+  return (row.ffStock[warehouseId] ?? 0) > 0
+    || (row.fbsByLocation[warehouseId] ?? 0) > 0
+    || (row.receivingByLocation[warehouseId] ?? 0) > 0
+    || (row.toSaleByLocation[warehouseId] ?? 0) > 0;
 }
 
 function hasFbsMovement(row: StockRow) {
@@ -626,17 +636,57 @@ export function togglePlannerWarehouse(selectedWarehouseIds: string[], warehouse
     : selectedWarehouseIds.filter((id) => id !== warehouseId);
 }
 
+export function toggleAllPlannerWarehouses(
+  selectedWarehouseIds: string[],
+  warehouses: Array<Pick<ManualWarehouse, "id" | "isHidden">>,
+) {
+  const visibleWarehouseIds = warehouses.filter((warehouse) => !warehouse.isHidden).map((warehouse) => warehouse.id);
+  const visibleWarehouseIdSet = new Set(visibleWarehouseIds);
+  const allVisibleSelected = visibleWarehouseIds.length > 0
+    && visibleWarehouseIds.every((warehouseId) => selectedWarehouseIds.includes(warehouseId));
+  return allVisibleSelected
+    ? selectedWarehouseIds.filter((warehouseId) => !visibleWarehouseIdSet.has(warehouseId))
+    : [...new Set([...selectedWarehouseIds, ...visibleWarehouseIds])];
+}
+
+export function mergePlannerWarehouseMetadata<T extends { id: string }>(snapshotWarehouses: T[], liveWarehouses: T[]) {
+  if (!snapshotWarehouses.length) return liveWarehouses;
+  const liveById = new Map(liveWarehouses.map((warehouse) => [warehouse.id, warehouse]));
+  const snapshotIds = new Set(snapshotWarehouses.map((warehouse) => warehouse.id));
+  return [
+    ...snapshotWarehouses.map((warehouse) => liveById.get(warehouse.id) ?? warehouse),
+    ...liveWarehouses.filter((warehouse) => !snapshotIds.has(warehouse.id)),
+  ];
+}
+
+export function plannerWarehouseDefaultRange(
+  warehouse: Pick<ManualWarehouse, "openedAt" | "planningTargetDays">,
+  initialRange: Pick<PlannerRange, "from" | "to">,
+  minimumFrom?: string,
+): PlannerRange {
+  let from = initialRange.from;
+  if (warehouse.openedAt && warehouse.openedAt <= initialRange.to) {
+    from = minimumFrom && warehouse.openedAt < minimumFrom ? minimumFrom : warehouse.openedAt;
+  }
+  return { from, to: initialRange.to, targetDays: warehouse.planningTargetDays || 14 };
+}
+
 export function syncPlannerWarehouseRanges(
   current: Record<string, PlannerRange>,
-  warehouses: Array<Pick<ManualWarehouse, "id" | "planningTargetDays">>,
+  warehouses: Array<Pick<ManualWarehouse, "id" | "planningTargetDays" | "openedAt">>,
   initialRange: Pick<PlannerRange, "from" | "to">,
   targetOverrideIds: ReadonlySet<string>,
+  periodOverrideIds: ReadonlySet<string> = new Set(),
+  minimumFrom?: string,
 ) {
   return Object.fromEntries(warehouses.map((warehouse) => {
     const existing = current[warehouse.id];
-    const savedDefault = warehouse.planningTargetDays || 14;
-    const targetDays = existing && targetOverrideIds.has(warehouse.id) ? existing.targetDays : savedDefault;
-    return [warehouse.id, { ...(existing ?? initialRange), targetDays }];
+    const savedDefault = plannerWarehouseDefaultRange(warehouse, initialRange, minimumFrom);
+    const period = existing && periodOverrideIds.has(warehouse.id)
+      ? { from: existing.from, to: existing.to }
+      : { from: savedDefault.from, to: savedDefault.to };
+    const targetDays = existing && targetOverrideIds.has(warehouse.id) ? existing.targetDays : savedDefault.targetDays;
+    return [warehouse.id, { ...period, targetDays }];
   }));
 }
 
@@ -695,6 +745,10 @@ export function FfSupplyPlanner({
   dataAvailable,
   selectedWarehouseIds,
   onSelectedWarehouseIdsChange,
+  canEditWarehouseSettings = false,
+  warehouseOpeningSavingId = null,
+  onWarehouseOpenedAtChange,
+  warehouseSettingsError = null,
   onRefresh,
   loading,
   refreshing,
@@ -711,6 +765,10 @@ export function FfSupplyPlanner({
   dataAvailable: boolean;
   selectedWarehouseIds: string[];
   onSelectedWarehouseIdsChange: (ids: string[]) => void;
+  canEditWarehouseSettings?: boolean;
+  warehouseOpeningSavingId?: string | null;
+  onWarehouseOpenedAtChange?: (warehouse: ManualWarehouse, openedAt: string) => void;
+  warehouseSettingsError?: string | null;
   onRefresh: () => void;
   loading: boolean;
   refreshing: boolean;
@@ -725,18 +783,20 @@ export function FfSupplyPlanner({
   const [commonPreset, setCommonPreset] = useState<"7d" | "14d" | "30d" | "custom">("7d");
   const [commonRange, setCommonRange] = useState(initialRange);
   const [commonTargetDays, setCommonTargetDays] = useState(14);
-  const [warehouseRanges, setWarehouseRanges] = useState<Record<string, PlannerRange>>(() => Object.fromEntries(warehouses.map((warehouse) => [warehouse.id, { ...initialRange, targetDays: warehouse.planningTargetDays || 14 }])));
+  const [warehouseRanges, setWarehouseRanges] = useState<Record<string, PlannerRange>>(() => Object.fromEntries(warehouses.map((warehouse) => [warehouse.id, plannerWarehouseDefaultRange(warehouse, initialRange, snapshotFrom)])));
   const [plannerQuery, setPlannerQuery] = useState("");
   const targetOverrideIdsRef = useRef(new Set<string>());
+  const periodOverrideIdsRef = useRef(new Set<string>());
 
   useEffect(() => {
     const timer = window.setTimeout(() => {
-      setWarehouseRanges((current) => syncPlannerWarehouseRanges(current, warehouses, initialRange, targetOverrideIdsRef.current));
+      setWarehouseRanges((current) => syncPlannerWarehouseRanges(current, warehouses, initialRange, targetOverrideIdsRef.current, periodOverrideIdsRef.current, snapshotFrom));
       const warehouseIds = new Set(warehouses.map((warehouse) => warehouse.id));
       targetOverrideIdsRef.current = new Set([...targetOverrideIdsRef.current].filter((warehouseId) => warehouseIds.has(warehouseId)));
+      periodOverrideIdsRef.current = new Set([...periodOverrideIdsRef.current].filter((warehouseId) => warehouseIds.has(warehouseId)));
     }, 0);
     return () => window.clearTimeout(timer);
-  }, [initialRange, warehouses]);
+  }, [initialRange, snapshotFrom, warehouses]);
 
   const chooseCommonPreset = (preset: "7d" | "14d" | "30d" | "custom") => {
     setCommonPreset(preset);
@@ -747,17 +807,25 @@ export function FfSupplyPlanner({
 
   const updateWarehouseRange = (warehouseId: string, change: Partial<PlannerRange>) => {
     if (change.targetDays !== undefined) targetOverrideIdsRef.current.add(warehouseId);
+    if (change.from !== undefined || change.to !== undefined) periodOverrideIdsRef.current.add(warehouseId);
     setWarehouseRanges((current) => updatePlannerWarehouseRange(current, warehouseId, { ...initialRange, targetDays: 14 }, change));
   };
 
   const applyCommonRange = () => {
-    for (const warehouseId of selectedWarehouseIds) targetOverrideIdsRef.current.add(warehouseId);
+    for (const warehouseId of selectedWarehouseIds) {
+      targetOverrideIdsRef.current.add(warehouseId);
+      periodOverrideIdsRef.current.add(warehouseId);
+    }
     setWarehouseRanges((current) => applyPlannerRangeToSelected(current, selectedWarehouseIds, commonRange, commonTargetDays));
   };
 
   const toggleWarehouse = (warehouseId: string, checked: boolean) => {
     onSelectedWarehouseIdsChange(togglePlannerWarehouse(selectedWarehouseIds, warehouseId, checked));
   };
+
+  const visibleWarehouseIds = warehouses.filter((warehouse) => !warehouse.isHidden).map((warehouse) => warehouse.id);
+  const allVisibleWarehousesSelected = visibleWarehouseIds.length > 0
+    && visibleWarehouseIds.every((warehouseId) => selectedWarehouseIds.includes(warehouseId));
 
   const selectedWarehouses = useMemo(() => warehouses.filter((warehouse) => !warehouse.isHidden && selectedWarehouseIds.includes(warehouse.id)), [selectedWarehouseIds, warehouses]);
   const products = useMemo(() => {
@@ -791,7 +859,7 @@ export function FfSupplyPlanner({
     const plans: PlannerPlan[] = [];
     const invalidWarehouseIds = new Set<string>();
     for (const warehouse of selectedWarehouses) {
-      const range = warehouseRanges[warehouse.id] ?? { ...initialRange, targetDays: warehouse.planningTargetDays || 14 };
+      const range = warehouseRanges[warehouse.id] ?? plannerWarehouseDefaultRange(warehouse, initialRange, snapshotFrom);
       let period: ReturnType<typeof effectivePeriod>;
       try {
         period = effectivePeriod({ from: range.from, to: range.to, openedAt: warehouse.openedAt });
@@ -821,7 +889,7 @@ export function FfSupplyPlanner({
       }
     }
     return { plans, invalidWarehouseIds };
-  }, [dailyByWarehouseProduct, initialRange, inventoryByKey, products, selectedWarehouses, warehouseRanges]);
+  }, [dailyByWarehouseProduct, initialRange, inventoryByKey, products, selectedWarehouses, snapshotFrom, warehouseRanges]);
 
   const plannerGroups = useMemo(() => {
     const groups = new Map<string, { product: PlannerProduct; plans: PlannerPlan[] }>();
@@ -888,24 +956,31 @@ export function FfSupplyPlanner({
       <div className="planner-period-presets"><span>Общий период</span><div role="group" aria-label="Общий период">{([['7d', '7 дней'], ['14d', '14 дней'], ['30d', '30 дней'], ['custom', 'Свой период']] as const).map(([value, label]) => <button type="button" className={commonPreset === value ? "active" : ""} key={value} onClick={() => chooseCommonPreset(value)}>{label}</button>)}</div></div>
       {commonPreset === "custom" && <div className="planner-common-dates"><label><span>С</span><input type="date" min={snapshotFrom} max={commonRange.to} value={commonRange.from} onChange={(event) => setCommonRange((current) => ({ ...current, from: event.target.value }))} /></label><label><span>По</span><input type="date" min={commonRange.from} max={today} value={commonRange.to} onChange={(event) => setCommonRange((current) => ({ ...current, to: event.target.value }))} /></label></div>}
       <label className="planner-target-control"><span>Целевой запас</span><input type="number" min="1" max="365" value={commonTargetDays} onChange={(event) => setCommonTargetDays(Math.max(1, Math.min(365, Number(event.target.value) || 1)))} /><small>дн.</small></label>
-      <button className="primary-btn planner-apply-btn" type="button" onClick={applyCommonRange} disabled={!selectedWarehouseIds.length}>Применить выбранным</button>
+      <div className="planner-bulk-actions">
+        <button className="planner-select-all-btn" type="button" onClick={() => onSelectedWarehouseIdsChange(toggleAllPlannerWarehouses(selectedWarehouseIds, warehouses))} disabled={!visibleWarehouseIds.length}>{allVisibleWarehousesSelected ? "Снять все" : "Выбрать все"}</button>
+        <button className="primary-btn planner-apply-btn" type="button" onClick={applyCommonRange} disabled={!selectedWarehouseIds.length}>Применить выбранным</button>
+      </div>
     </section>
 
     <div className="planner-ff-grid">{warehouses.filter((warehouse) => !warehouse.isHidden).map((warehouse) => {
       const selected = selectedWarehouseIds.includes(warehouse.id);
-      const range = warehouseRanges[warehouse.id] ?? { ...initialRange, targetDays: warehouse.planningTargetDays || 14 };
+      const range = warehouseRanges[warehouse.id] ?? plannerWarehouseDefaultRange(warehouse, initialRange, snapshotFrom);
       let periodLabel = "Проверьте даты";
       try {
         const period = effectivePeriod({ from: range.from, to: range.to, openedAt: warehouse.openedAt });
         periodLabel = period.days ? `${compactPlanningDate(period.from)}–${compactPlanningDate(period.to)} · ${period.days} дн.` : "Склад ещё не работал в этот период";
       } catch {}
+      const savingOpeningDate = warehouseOpeningSavingId === warehouse.id;
       return <article className={`planner-ff-card ${selected ? "selected" : ""}`} key={warehouse.id}>
         <label className="planner-ff-select"><input type="checkbox" checked={selected} onChange={(event) => toggleWarehouse(warehouse.id, event.target.checked)} /><span><strong>{formatManualWarehouse(warehouse)}</strong><small>{warehouse.openedAt ? `Работает с ${shortDate(warehouse.openedAt)}` : "Дата открытия не указана"}</small></span></label>
+        {canEditWarehouseSettings && onWarehouseOpenedAtChange && <label className="planner-ff-opening"><span>Дата открытия ФФ</span><input aria-label={`Дата открытия ${formatManualWarehouse(warehouse)}`} type="date" max={today} value={warehouse.openedAt ?? ""} disabled={savingOpeningDate} onChange={(event) => onWarehouseOpenedAtChange(warehouse, event.target.value)} /><small>{savingOpeningDate ? "Сохраняем…" : warehouse.openedAt ? "Начало периода подставляется автоматически" : "Укажите один раз — сохраним в настройках"}</small></label>}
         <div className="planner-ff-period"><span>Период этого ФФ</span><div><label><small>С</small><input type="date" min={snapshotFrom} max={range.to} value={range.from} disabled={!selected} onChange={(event) => updateWarehouseRange(warehouse.id, { from: event.target.value })} /></label><label><small>По</small><input type="date" min={range.from} max={today} value={range.to} disabled={!selected} onChange={(event) => updateWarehouseRange(warehouse.id, { to: event.target.value })} /></label></div></div>
         <label className="planner-ff-target"><span>Целевой запас этого ФФ</span><span><input type="number" min="1" max="365" value={range.targetDays} disabled={!selected} onChange={(event) => updateWarehouseRange(warehouse.id, { targetDays: Math.max(1, Math.min(365, Number(event.target.value) || 1)) })} /><small>дн.</small></span></label>
         <p>{periodLabel}</p>
       </article>;
     })}</div>
+
+    {warehouseSettingsError && <div className="planner-notice error" role="alert">{warehouseSettingsError}</div>}
 
     {!dataAvailable ? <div className={loading ? "loading-state planner-snapshot-state" : "empty-state planner-snapshot-state"} role={loading ? "status" : "alert"}>{loading ? <><span className="loader"/><strong>Загружаем общий снимок</strong><small>{source.demand.label} и {source.sold.label} будут показаны только вместе с остатками</small></> : <><strong>План поставок пока недоступен</strong><span>{error || `Не удалось согласованно загрузить ${source.demand.label.toLocaleLowerCase("ru-RU")} и остатки.`}</span><small>Частичные данные не подменяются нулями. Обновите снимок ещё раз.</small></>}</div> : <>
     {error && <div className="planner-notice error" role="alert">{error}</div>}
@@ -997,6 +1072,9 @@ export default function Home() {
   const [handoverTiming, setHandoverTiming] = useState<HandoverMetrics>(emptyHandoverMetrics);
   const [query, setQuery] = useState("");
   const [warehouse, setWarehouse] = useState("Все склады");
+  const [stockFfWarehouseId, setStockFfWarehouseId] = useState("all");
+  const [stockFfCompareIds, setStockFfCompareIds] = useState<string[]>([]);
+  const [stockFfCompareOpen, setStockFfCompareOpen] = useState(false);
   const [pricingQuery, setPricingQuery] = useState("");
   const [pricingFilter, setPricingFilter] = useState<PricingFilter>("all");
   const [pricingSort, setPricingSort] = useState<PricingSort>("priority");
@@ -1051,6 +1129,7 @@ export default function Home() {
   const [warehouseError, setWarehouseError] = useState<string | null>(null);
   const [warehouseLinkDrafts, setWarehouseLinkDrafts] = useState<Record<string, { wbWarehouseId: string; wbWarehouseName: string; serviceRate: string; openedAt: string; planningTargetDays: string }>>({});
   const [warehouseLinkSavingId, setWarehouseLinkSavingId] = useState<string | null>(null);
+  const [plannerWarehouseSettingsError, setPlannerWarehouseSettingsError] = useState<string | null>(null);
   const [settlementWarehouseId, setSettlementWarehouseId] = useState("");
   const [settlementRange, setSettlementRange] = useState({ from: currentMonthStart(), to: isoDate(0) });
   const [settlement, setSettlement] = useState<FfSettlement | null>(null);
@@ -1464,7 +1543,34 @@ export default function Home() {
   }, [plannerRetryAt]);
 
   const visibleManualWarehouses = useMemo(() => manualWarehouses.filter((warehouse) => !warehouse.isHidden), [manualWarehouses]);
-  const plannerWarehouses = plannerSnapshot?.warehouses ?? manualWarehouses;
+  const plannerWarehouses = useMemo(
+    () => mergePlannerWarehouseMetadata(plannerSnapshot?.warehouses ?? [], manualWarehouses),
+    [manualWarehouses, plannerSnapshot?.warehouses],
+  );
+
+  useEffect(() => {
+    const visibleIds = new Set(visibleManualWarehouses.map((warehouse) => warehouse.id));
+    if (stockFfWarehouseId !== "all" && !visibleIds.has(stockFfWarehouseId)) setStockFfWarehouseId("all");
+    setStockFfCompareIds((current) => current.filter((id) => visibleIds.has(id)).slice(0, 3));
+  }, [stockFfWarehouseId, visibleManualWarehouses]);
+
+  const stockFfColumns = useMemo<StockFfColumn[]>(() => {
+    const compared = stockFfCompareIds.flatMap((id) => {
+      const warehouse = visibleManualWarehouses.find((item) => item.id === id);
+      return warehouse ? [{ id: warehouse.id, city: warehouse.city, name: warehouse.name, warehouse }] : [];
+    });
+    if (compared.length) return compared;
+    const selectedWarehouse = visibleManualWarehouses.find((item) => item.id === stockFfWarehouseId);
+    if (selectedWarehouse) return [{ id: selectedWarehouse.id, city: selectedWarehouse.city, name: selectedWarehouse.name, warehouse: selectedWarehouse }];
+    return [{ id: "all", city: "Все ФФ", name: `${visibleManualWarehouses.length} складов`, warehouse: null }];
+  }, [stockFfCompareIds, stockFfWarehouseId, visibleManualWarehouses]);
+
+  const stockFfScopeIds = useMemo(() => stockFfCompareIds.length
+    ? stockFfCompareIds
+    : stockFfWarehouseId === "all" ? [] : [stockFfWarehouseId], [stockFfCompareIds, stockFfWarehouseId]);
+  const stockScopedRows = useMemo(() => stockFfScopeIds.length
+    ? rows.filter((row) => stockFfScopeIds.some((warehouseId) => hasFfWarehouseActivity(row, warehouseId)))
+    : rows, [rows, stockFfScopeIds]);
 
   useEffect(() => {
     const visibleIds = plannerWarehouses.filter((warehouse) => !warehouse.isHidden).map((warehouse) => warehouse.id);
@@ -1578,21 +1684,21 @@ export default function Home() {
 
   const filteredRows = useMemo(() => {
     const term = query.trim().toLowerCase();
-    return rows.filter((row) => {
+    return stockScopedRows.filter((row) => {
       const matchesQuery = !term || row.name.toLowerCase().includes(term) || row.sku.toLowerCase().includes(term) || String(row.nmId ?? "").includes(term);
       const matchesFilter = filter === "Все" || (filter === "Дефицит" && row.status !== "В норме") || (filter === "Активные FBS" && hasActiveFbsMovement(row));
       const matchesWarehouse = warehouse === "Все склады" || (row.warehouses[warehouse] ?? 0) > 0;
       const matchesView = activeView === "fbs" ? hasFbsMovement(row) : true;
       return matchesQuery && matchesFilter && matchesWarehouse && matchesView;
     });
-  }, [rows, query, filter, warehouse, activeView]);
+  }, [stockScopedRows, query, filter, warehouse, activeView]);
 
   const counts = useMemo(() => ({
-    all: rows.length,
-    risk: rows.filter((row) => row.status !== "В норме").length,
-    transit: rows.filter(hasActiveFbsMovement).length,
-  }), [rows]);
-  const viewTotal = activeView === "fbs" ? rows.filter(hasFbsMovement).length : rows.length;
+    all: stockScopedRows.length,
+    risk: stockScopedRows.filter((row) => row.status !== "В норме").length,
+    transit: stockScopedRows.filter(hasActiveFbsMovement).length,
+  }), [stockScopedRows]);
+  const viewTotal = activeView === "fbs" ? stockScopedRows.filter(hasFbsMovement).length : stockScopedRows.length;
   const stockTitle = activeView === "fbs" ? "Артикулы в FBS-движении" : `Все товары ${marketplaceName}`;
   const currentViewTitle = useMemo(() => {
     const base = viewTitles[activeView];
@@ -1762,6 +1868,45 @@ export default function Home() {
       await loadData();
     } catch (saveError) {
       setWarehouseError(saveError instanceof Error ? saveError.message : "Не удалось сохранить привязку к WB");
+    } finally {
+      setWarehouseLinkSavingId(null);
+    }
+  };
+
+  const savePlannerWarehouseOpenedAt = async (warehouseToUpdate: ManualWarehouse, openedAt: string) => {
+    setWarehouseLinkSavingId(warehouseToUpdate.id);
+    setPlannerWarehouseSettingsError(null);
+    try {
+      const response = await fetch("/api/ff-warehouses", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          id: warehouseToUpdate.id,
+          city: warehouseToUpdate.city,
+          name: warehouseToUpdate.name,
+          position: warehouseToUpdate.position,
+          wbWarehouseId: warehouseToUpdate.wbWarehouseId,
+          wbWarehouseName: warehouseToUpdate.wbWarehouseName,
+          serviceRateKopecks: warehouseToUpdate.serviceRateKopecks,
+          isHidden: warehouseToUpdate.isHidden,
+          openedAt: openedAt || null,
+          planningTargetDays: warehouseToUpdate.planningTargetDays,
+        }),
+      });
+      const data = await response.json() as { warehouse?: ManualWarehouse; error?: string };
+      if (response.status === 401) {
+        setAuthState("unauthenticated");
+        return;
+      }
+      if (!response.ok || !data.warehouse) throw new Error(data.error || "Не удалось сохранить дату открытия ФФ");
+      const savedWarehouse = data.warehouse;
+      setManualWarehouses((current) => current.map((item) => item.id === savedWarehouse.id ? savedWarehouse : item));
+      setWarehouseLinkDrafts((current) => {
+        const draft = current[savedWarehouse.id];
+        return draft ? { ...current, [savedWarehouse.id]: { ...draft, openedAt: savedWarehouse.openedAt ?? "" } } : current;
+      });
+    } catch (saveError) {
+      setPlannerWarehouseSettingsError(saveError instanceof Error ? saveError.message : "Не удалось сохранить дату открытия ФФ");
     } finally {
       setWarehouseLinkSavingId(null);
     }
@@ -1980,6 +2125,7 @@ export default function Home() {
           <button type="button" className={`nav-item ${activeView === "fbs" ? "active" : ""}`} onClick={() => navigateTo("fbs")}><span className="nav-symbol">→</span>FBS-отгрузки<span className="nav-badge">{activeFbsTotal}</span></button>
           <button type="button" className={`nav-item ${activeView === "sales" ? "active" : ""}`} onClick={() => navigateTo("sales")}><span className="nav-symbol">↗</span>План поставок</button>
           <button type="button" className={`nav-item ${activeView === "analytics" ? "active" : ""}`} onClick={() => navigateTo("analytics")}><span className="nav-symbol">⌁</span>Анализ</button>
+          <button type="button" className={`nav-item ${activeView === "rnp" ? "active" : ""}`} onClick={() => navigateTo("rnp")}><span className="nav-symbol">◎</span>РНП Ozon</button>
           <button type="button" className={`nav-item ${activeView === "pricing" ? "active" : ""}`} onClick={() => navigateTo("pricing")}><span className="nav-symbol">₽</span>Таргет цен</button>
           <button type="button" className={`nav-item ${activeView === "fulfillment" || activeView === "manual" ? "active" : ""}`} onClick={() => navigateTo("fulfillment")}><span className="nav-symbol">▤</span>ФФ</button>
           <button type="button" className={`nav-item ${activeView === "payments" ? "active" : ""}`} onClick={() => navigateTo("payments")}><span className="nav-symbol">₽</span>Оплаты ФФ</button>
@@ -2024,6 +2170,8 @@ export default function Home() {
               </div>
               <p className="cabinet-manager-note">Каждый маркетплейс получит отдельный контур: свои товары, склады, остатки, заказы и будущие таргет-цены. Данные между площадками не смешиваются.</p>
             </section>
+          ) : activeView === "rnp" ? (
+            <RnpDashboard />
           ) : activeView === "pricing" ? (
             <section className="pricing-panel">
               <div className="section-heading pricing-heading">
@@ -2241,6 +2389,10 @@ export default function Home() {
               dataAvailable={Boolean(plannerSnapshot)}
               selectedWarehouseIds={plannerSelectedWarehouseIds}
               onSelectedWarehouseIdsChange={setPlannerSelectedWarehouseIds}
+              canEditWarehouseSettings={canManage}
+              warehouseOpeningSavingId={warehouseLinkSavingId}
+              onWarehouseOpenedAtChange={(warehouse, openedAt) => void savePlannerWarehouseOpenedAt(warehouse, openedAt)}
+              warehouseSettingsError={plannerWarehouseSettingsError}
               onRefresh={() => void refreshFfPlanning()}
               loading={plannerLoading}
               refreshing={plannerRefreshing}
@@ -2260,15 +2412,152 @@ export default function Home() {
               <article className="metric-card"><div className="metric-icon amber">◷</div><div className="metric-label">Продано</div><strong className="metric-value">{loading ? "—" : formatNumber.format(totals.toSale)} <small>шт.</small></strong><p>Факт выкупа · без отмен</p></article>
             </section>
 
-            <section className={`delivery-overview ${activeView !== "overview" ? "view-hidden" : ""}`} aria-label="Качество доставки FBS">
-              <div className="delivery-overview-heading"><span className="section-kicker">FBS · СКОРОСТЬ ПЕРЕДАЧИ</span><h2>От заказа до {marketplaceName}</h2><p>Считаем по изменениям статусов FBS. Это время передачи {marketplaceName}, а не обещанный срок для покупателя.</p></div>
-              <article className="delivery-kpi"><strong>{formatNumber.format(handoverTiming.overall.sampleSize)}</strong><span>заказов в выборке</span><p>{handoverTiming.trackingStartedAt ? "Наблюдаем переходы new → complete" : "Начнём собирать историю после обновления"}</p></article>
-              <article className="delivery-kpi delivery-time"><strong>{formatHandoverTime(handoverTiming.overall.averageHours)}</strong><div><i /></div><p>Среднее до передачи {marketplaceCode} · все ФФ</p></article>
-            </section>
-
             <section className={`movement-card ${activeView !== "overview" && activeView !== "fbs" ? "view-hidden" : ""}`} id="movement"><div className="section-heading"><div><span className="section-kicker">ОСТАТКИ {marketplaceCode}, ФФ И ДВИЖЕНИЕ FBS</span><h2>Фактические и свободные остатки отдельно</h2></div><span className="period-pill">Актуальные заказы за 30 дней</span></div><div className="movement-grid"><article className="wb-stock-fact"><span className="wb-stock-mark">{marketplaceCode}</span><div><small>ФАКТИЧЕСКИЙ ОСТАТОК НА {marketplaceCode}</small><strong>{formatNumber.format(totals.available)} <em>шт.</em></strong><p>Уже находится на складах {marketplaceName} и не является доступным запасом для FBS.</p></div></article><div className="fbs-overview"><div className="movement-subhead"><span>ОСТАТКИ ФФ · {marketplaceCode} API</span>{canManage && <button className="text-action" type="button" onClick={() => navigateTo("manual")}>Настроить склады</button>}</div><div className="fbs-location-grid manual-location-grid dynamic-locations">{visibleManualWarehouses.map((item) => { const physical = totals.ffStock[item.id] ?? 0; const reserved = totals.fbsByLocation[item.id] ?? 0; const free = Math.max(0, physical - reserved); return <article className="fbs-location-card manual" key={item.id}><span>{item.city}</span><strong>{formatNumber.format(physical)}</strong><small>{item.name} · свободно {free} · новые FBS {reserved}</small></article>; })}</div><div className="movement-subhead orders"><span>FBS-ЗАКАЗЫ ПО ЭТАПАМ</span><small>По данным {marketplaceCode} API</small></div><div className="fbs-location-grid order-location-grid">{fbsLocations.map((location) => <article className="fbs-location-card" key={location.id}><span>{location.city}</span><strong>{formatNumber.format(activeFbsByLocation[location.id] ?? 0)}</strong><small>{location.label}</small></article>)}</div><div className="fbs-stage-strip"><span><b>{totals.fbs}</b> новые · ещё на ФФ</span><i>→</i><span><b>{totals.receiving}</b> переданы {marketplaceCode}</span><i>→</i><span className="sale-stage"><b>{totals.toSale}</b> продано</span></div></div></div></section>
 
-            <section className={`stock-card ${activeView === "reports" ? "view-hidden" : ""}`} id="stock"><div className="stock-header"><div><span className="section-kicker">ОСТАТКИ ПО АРТИКУЛАМ</span><h2>{stockTitle}</h2></div><div className="stock-tools"><label className="search-field"><span>⌕</span><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Артикул или название" aria-label="Поиск по товарам"/></label><label className="select-wrap"><span>Склад:</span><select value={warehouse} onChange={(event) => setWarehouse(event.target.value)} aria-label="Выбрать склад"><option>Все склады</option>{warehouseNames.map((item) => <option key={item}>{item}</option>)}</select></label></div></div><div className="filter-row"><div className="filter-tabs" role="tablist" aria-label="Фильтр остатков">{[{ name: "Все", count: counts.all }, { name: "Дефицит", count: counts.risk }, { name: "Активные FBS", count: counts.transit }].map((item) => <button type="button" key={item.name} className={filter === item.name ? "active" : ""} onClick={() => setFilter(item.name)}>{item.name}<span>{item.count}</span></button>)}</div><span className="result-count">Показано {filteredRows.length} из {viewTotal} артикулов</span></div><div className="table-wrap"><table><thead><tr><th>Товар / артикул</th><th>{warehouse === "Все склады" ? `Остаток ${marketplaceCode}` : `Выбранный склад ${marketplaceCode}`}</th>{visibleManualWarehouses.map((item) => <th className="ff-column-head" key={item.id}><span>{item.city}</span><small>{item.name}</small></th>)}<th>Активные FBS</th><th>Продано</th><th>Статус</th><th /></tr></thead><tbody>{filteredRows.map((row) => <tr key={row.key} onClick={() => openProduct(row)} tabIndex={0} onKeyDown={(event) => { if (event.key === "Enter") openProduct(row); }}><td><div className="product-cell"><span className="product-swatch" style={{ background: row.color }}>{row.name.charAt(0).toUpperCase()}</span><span><strong>{row.name}</strong><small>{row.sku}{row.nmId ? ` · ${marketplaceCode} ${row.nmId}` : ""} · {row.category}</small></span></div></td><td><b>{formatNumber.format(warehouse === "Все склады" ? stockTotal(row) : row.warehouses[warehouse] ?? 0)}</b><small> шт.</small></td>{visibleManualWarehouses.map((item) => { const free = availableFfStock(row, item.id); return <td key={item.id}><span className={`manual-stock-value ${free === 0 ? "zero" : ""}`} title={`Свободно к продаже на ФФ: ${formatManualWarehouse(item)}`}>{formatNumber.format(free)}<small> шт.</small></span></td>; })}<td><span className="number-pill blue-pill">{row.fbs + row.receiving}</span></td><td><span className="number-pill green-pill">{row.toSale}</span></td><td><span className={`status ${row.status === "В норме" ? "ok" : row.status === "Мало" ? "low" : "critical"}`}><i />{row.status}</span></td><td><button type="button" className="row-action" aria-label={`Открыть ${row.name}`}>›</button></td></tr>)}</tbody></table>{loading && <div className="loading-state"><span className="loader"/><strong>Загружаем данные из {marketplaceName}</strong><small>Остатки и статусы FBS собираются в единый отчёт</small></div>}{!loading && !filteredRows.length && <div className="empty-state"><strong>{error ? "Данные пока не загружены" : "Ничего не найдено"}</strong><span>{error ? `Проверьте подключение ${marketplaceCode} API.` : "Попробуйте изменить поиск или фильтры."}</span></div>}</div><footer className="table-footer"><span><i className={error ? "live-dot offline" : "live-dot"} />{updatedAt ? `Остатки обновлены в ${formatSyncTime(updatedAt)} МСК` : "Ожидаем синхронизацию"}</span><button type="button" onClick={() => { setQuery(""); setFilter("Все"); setWarehouse("Все склады"); }}>Сбросить фильтры</button></footer></section>
+            <section className={`stock-card ${activeView === "reports" ? "view-hidden" : ""}`} id="stock">
+              <div className="stock-header stock-overview-header">
+                <div>
+                  <span className="section-kicker">ОСТАТКИ ПО АРТИКУЛАМ</span>
+                  <h2>{stockTitle}</h2>
+                </div>
+                <div className="stock-tools stock-overview-tools">
+                  <label className="search-field">
+                    <span>⌕</span>
+                    <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Артикул или название" aria-label="Поиск по товарам" />
+                  </label>
+                  <label className="select-wrap stock-warehouse-select">
+                    <span>Склад WB:</span>
+                    <select value={warehouse} onChange={(event) => setWarehouse(event.target.value)} aria-label="Выбрать склад маркетплейса">
+                      <option>Все склады</option>
+                      {warehouseNames.map((item) => <option key={item}>{item}</option>)}
+                    </select>
+                  </label>
+                  <label className="select-wrap stock-ff-select">
+                    <span>Склад ФФ:</span>
+                    <select
+                      value={stockFfCompareIds.length ? "compare" : stockFfWarehouseId}
+                      onChange={(event) => {
+                        setStockFfWarehouseId(event.target.value);
+                        setStockFfCompareIds([]);
+                      }}
+                      aria-label="Выбрать склад ФФ"
+                    >
+                      {stockFfCompareIds.length > 0 && <option value="compare">Сравнение: {stockFfCompareIds.length}</option>}
+                      <option value="all">Все ФФ</option>
+                      {visibleManualWarehouses.map((item) => <option value={item.id} key={item.id}>{item.city} — {item.name}</option>)}
+                    </select>
+                  </label>
+                  <div className="ff-compare-control">
+                    <button
+                      className={`ff-compare-btn ${stockFfCompareIds.length ? "active" : ""}`}
+                      type="button"
+                      onClick={() => setStockFfCompareOpen((current) => !current)}
+                      aria-expanded={stockFfCompareOpen}
+                    >
+                      {stockFfCompareIds.length ? `Сравниваем: ${stockFfCompareIds.length}` : "Сравнить ФФ"}
+                    </button>
+                    {stockFfCompareOpen && (
+                      <div className="ff-compare-popover">
+                        <div className="ff-compare-heading">
+                          <strong>Выберите до 3 складов</strong>
+                          <small>Они появятся рядом отдельными колонками</small>
+                        </div>
+                        <div className="ff-compare-options">
+                          {visibleManualWarehouses.map((item) => {
+                            const selected = stockFfCompareIds.includes(item.id);
+                            const disabled = !selected && stockFfCompareIds.length >= 3;
+                            return (
+                              <label className={disabled ? "disabled" : ""} key={item.id} title={formatManualWarehouse(item)}>
+                                <input
+                                  type="checkbox"
+                                  checked={selected}
+                                  disabled={disabled}
+                                  onChange={() => setStockFfCompareIds((current) => selected
+                                    ? current.filter((id) => id !== item.id)
+                                    : current.length >= 3 ? current : [...current, item.id])}
+                                />
+                                <span><strong>{item.city}</strong><small>{item.name}</small></span>
+                              </label>
+                            );
+                          })}
+                        </div>
+                        <footer>
+                          <button type="button" onClick={() => setStockFfCompareIds([])}>Сбросить</button>
+                          <button type="button" onClick={() => setStockFfCompareOpen(false)}>Готово</button>
+                        </footer>
+                      </div>
+                    )}
+                  </div>
+                </div>
+              </div>
+              <div className="filter-row">
+                <div className="filter-tabs" role="tablist" aria-label="Фильтр остатков">
+                  {[{ name: "Все", count: counts.all }, { name: "Дефицит", count: counts.risk }, { name: "Активные FBS", count: counts.transit }].map((item) => (
+                    <button type="button" key={item.name} className={filter === item.name ? "active" : ""} onClick={() => setFilter(item.name)}>{item.name}<span>{item.count}</span></button>
+                  ))}
+                </div>
+                <span className="result-count">Показано {filteredRows.length} из {viewTotal} артикулов</span>
+              </div>
+              <div className="table-wrap compact-stock-table-wrap">
+                <table className={`stock-overview-table ff-column-count-${stockFfColumns.length}`}>
+                  <thead>
+                    <tr>
+                      <th>Товар / артикул</th>
+                      <th>{warehouse === "Все склады" ? `Остаток ${marketplaceCode}` : `Выбранный склад ${marketplaceCode}`}</th>
+                      {stockFfColumns.map((column) => (
+                        <th
+                          className="ff-column-head"
+                          key={column.id}
+                          title={column.warehouse ? formatManualWarehouse(column.warehouse) : "Свободный остаток по всем ФФ"}
+                        >
+                          <span>{column.city}</span>
+                          <small>{column.name}</small>
+                        </th>
+                      ))}
+                      <th>Активные FBS</th>
+                      <th>Продано</th>
+                      <th>Статус</th>
+                      <th />
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {filteredRows.map((row) => (
+                      <tr key={row.key} onClick={() => openProduct(row)} tabIndex={0} onKeyDown={(event) => { if (event.key === "Enter") openProduct(row); }}>
+                        <td>
+                          <div className="product-cell">
+                            <span className="product-swatch" style={{ background: row.color }}>{row.name.charAt(0).toUpperCase()}</span>
+                            <span><strong>{row.name}</strong><small>{row.sku}{row.nmId ? ` · ${marketplaceCode} ${row.nmId}` : ""} · {row.category}</small></span>
+                          </div>
+                        </td>
+                        <td><b>{formatNumber.format(warehouse === "Все склады" ? stockTotal(row) : row.warehouses[warehouse] ?? 0)}</b><small> шт.</small></td>
+                        {stockFfColumns.map((column) => {
+                          const free = column.warehouse
+                            ? availableFfStock(row, column.id)
+                            : visibleManualWarehouses.reduce((sum, item) => sum + availableFfStock(row, item.id), 0);
+                          return (
+                            <td key={column.id}>
+                              <span className={`manual-stock-value ${free === 0 ? "zero" : ""}`} title={column.warehouse ? `Свободно к продаже: ${formatManualWarehouse(column.warehouse)}` : "Свободно к продаже на всех ФФ"}>
+                                {formatNumber.format(free)}<small> шт.</small>
+                              </span>
+                            </td>
+                          );
+                        })}
+                        <td><span className="number-pill blue-pill">{row.fbs + row.receiving}</span></td>
+                        <td><span className="number-pill green-pill">{row.toSale}</span></td>
+                        <td><span className={`status ${row.status === "В норме" ? "ok" : row.status === "Мало" ? "low" : "critical"}`}><i />{row.status}</span></td>
+                        <td><button type="button" className="row-action" aria-label={`Открыть ${row.name}`}>›</button></td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+                {loading && <div className="loading-state"><span className="loader" /><strong>Загружаем данные из {marketplaceName}</strong><small>Остатки и статусы FBS собираются в единый отчёт</small></div>}
+                {!loading && !filteredRows.length && <div className="empty-state"><strong>{error ? "Данные пока не загружены" : "Ничего не найдено"}</strong><span>{error ? `Проверьте подключение ${marketplaceCode} API.` : "Попробуйте изменить поиск или фильтры."}</span></div>}
+              </div>
+              <footer className="table-footer">
+                <span><i className={error ? "live-dot offline" : "live-dot"} />{updatedAt ? `Остатки обновлены в ${formatSyncTime(updatedAt)} МСК` : "Ожидаем синхронизацию"}</span>
+                <button type="button" onClick={() => { setQuery(""); setFilter("Все"); setWarehouse("Все склады"); setStockFfWarehouseId("all"); setStockFfCompareIds([]); setStockFfCompareOpen(false); }}>Сбросить фильтры</button>
+              </footer>
+            </section>
 
             {activeView === "reports" && <section className="reports-panel" id="reports"><div className="section-heading"><div><span className="section-kicker">ГОТОВЫЕ ВЫГРУЗКИ</span><h2>Скачать данные из кабинета</h2></div><span className="period-pill">CSV · Excel</span></div><div className="reports-grid"><article className="report-card"><span className="report-symbol blue">□</span><div><strong>Все остатки</strong><p>Артикулы и количество по каждому складу</p><small>{rows.length} артикулов · {warehouseNames.length} складов {marketplaceCode}</small></div><button type="button" onClick={() => downloadCsv(rows, `vse-ostatki-${isOzon ? "ozon" : "wb"}`)} disabled={!rows.length}>Скачать ↓</button></article><article className="report-card"><span className="report-symbol amber">→</span><div><strong>FBS-движение</strong><p>Новые, переданные {marketplaceCode} и завершённые товары</p><small>{counts.transit} артикулов · {activeFbsTotal} активных единиц</small></div><button type="button" onClick={() => downloadCsv(rows.filter(hasFbsMovement), `fbs-${isOzon ? "ozon" : "wb"}`)} disabled={!counts.transit}>Скачать ↓</button></article><article className="report-card"><span className="report-symbol green">▤</span><div><strong>Остатки ФФ из {marketplaceCode} API</strong><p>Видимые FBS-склады и остатки по артикулам</p><small>{visibleManualWarehouses.length} складов ФФ</small></div><button type="button" onClick={() => downloadCsv(rows, "ostatki-ff")} disabled={!rows.length}>Скачать ↓</button></article></div></section>}
           </>}

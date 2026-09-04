@@ -97,7 +97,7 @@ let activeShell = null;
 
 function evaluatePatched(source) {
   const executable = source.replaceAll("export function", "function");
-  return new Function(`${executable}\nreturn { deriveAnalysisModel, renderShipmentsMarkup, renderFfWorkspaceMarkup, ffCustomViewFromHash, prepareDraftForEditing };`)();
+  return new Function(`${executable}\nreturn { buildUnifiedShipmentWorkbookData, deriveAnalysisModel, renderShipmentsMarkup, renderFfWorkspaceMarkup, ffCustomViewFromHash, prepareDraftForEditing };`)();
 }
 
 test("shipments tab shows every active FF and uses a human-readable title instead of UUID", () => {
@@ -197,4 +197,67 @@ test("shipments are split into active, received and archive tabs and can be filt
   assert.match(filteredHtml, /Активные[^<]*1/);
   assert.match(filteredHtml, /volgograd-draft/);
   assert.doesNotMatch(filteredHtml, /Москва — Top-Full · 2026-09-02/);
+});
+
+test("unified Excel aggregates active shipments by article, city and fulfillment", () => {
+  const { buildUnifiedShipmentWorkbookData, renderShipmentsMarkup } = evaluatePatched(
+    patchFfShipmentsTab(productionShape),
+  );
+  const model = {
+    warehouses: [
+      { id: "volgograd", city: "Волгоград", name: "Upakovka" },
+      { id: "top-full", city: "Москва", name: "Top-Full" },
+    ],
+    shipmentSupplies: [
+      {
+        id: "draft",
+        warehouseId: "volgograd",
+        status: "draft",
+        items: [
+          { sku: "A", name: "Товар A", quantity: 10 },
+          { sku: "B", name: "Товар B", quantity: 2 },
+        ],
+      },
+      {
+        id: "transit",
+        warehouseId: "top-full",
+        status: "in_transit",
+        items: [
+          { sku: "A", name: "Товар A", quantity: 7 },
+          { sku: "B", name: "Товар B", quantity: 3 },
+        ],
+      },
+      {
+        id: "received",
+        warehouseId: "volgograd",
+        status: "received",
+        items: [{ sku: "A", name: "Товар A", quantity: 99 }],
+      },
+      {
+        id: "cancelled",
+        warehouseId: "top-full",
+        status: "cancelled",
+        items: [{ sku: "A", name: "Товар A", quantity: 99 }],
+      },
+    ],
+    archivedSupplies: [],
+  };
+
+  const data = buildUnifiedShipmentWorkbookData(model);
+  assert.equal(data.activeSupplyCount, 2);
+  assert.deepEqual(
+    data.totals.map(({ article, quantity }) => ({ article, quantity })),
+    [
+      { article: "A", quantity: 17 },
+      { article: "B", quantity: 5 },
+    ],
+  );
+  const articleA = data.byCity.find((row) => row.article === "A");
+  assert.equal(articleA.quantities["Волгоград"], 10);
+  assert.equal(articleA.quantities["Москва"], 7);
+  assert.equal(data.byFulfillment.length, 4);
+
+  const html = renderShipmentsMarkup(model);
+  assert.match(html, /data-action="download-unified-shipments"/);
+  assert.match(html, /Скачать единый Excel/);
 });

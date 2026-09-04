@@ -41,6 +41,9 @@ test("planner renders multi-FF controls and keeps demand, confirmed sold, and pe
     dataAvailable: true,
     selectedWarehouseIds: ["alpha", "beta"],
     onSelectedWarehouseIdsChange: () => undefined,
+    canEditWarehouseSettings: true,
+    warehouseOpeningSavingId: null,
+    onWarehouseOpenedAtChange: () => undefined,
     onRefresh: () => undefined,
     loading: false,
     refreshing: false,
@@ -58,8 +61,11 @@ test("planner renders multi-FF controls and keeps demand, confirmed sold, and pe
   assert.match(html, /aria-label="План поставок"/);
   assert.match(html, /type="checkbox"/);
   assert.match(text, /7 дней.*14 дней.*30 дней.*Свой период/);
-  assert.match(text, /Целевой запас.*Применить выбранным/);
+  assert.match(text, /Целевой запас.*Снять все.*Применить выбранным/);
   assert.match(text, /Период этого ФФ.*Целевой запас этого ФФ/);
+  assert.match(html, /aria-label="Дата открытия Казань — Альфа ФФ"[^>]*value=""/, "an owner must be able to set a missing opening date directly in the planner");
+  assert.match(html, /aria-label="Дата открытия Москва — Бета ФФ"[^>]*value="2026-08-24"/, "the planner opening-date control must show the saved date");
+  assert.match(html, /type="date"[^>]*value="2026-08-24"/, "the visible start input must use the FF opening date automatically");
   assert.match(text, /Обновить данные/);
 
   assert.match(text, /Спрос · созданные FBS/);
@@ -239,11 +245,28 @@ test("planner state transitions apply bulk values, preserve overrides, and hydra
   assert.equal(typeof exported.applyPlannerRangeToSelected, "function");
   assert.equal(typeof exported.updatePlannerWarehouseRange, "function");
   assert.equal(typeof exported.togglePlannerWarehouse, "function");
+  assert.equal(typeof exported.toggleAllPlannerWarehouses, "function");
   assert.equal(typeof exported.syncPlannerWarehouseRanges, "function");
+  assert.equal(typeof exported.mergePlannerWarehouseMetadata, "function");
   const applyBulk = exported.applyPlannerRangeToSelected as (current: Record<string, unknown>, ids: string[], range: { from: string; to: string }, targetDays: number) => Record<string, { from: string; to: string; targetDays: number }>;
   const updateOverride = exported.updatePlannerWarehouseRange as (current: Record<string, unknown>, id: string, fallback: { from: string; to: string; targetDays: number }, change: Partial<{ from: string; to: string; targetDays: number }>) => Record<string, { from: string; to: string; targetDays: number }>;
   const toggle = exported.togglePlannerWarehouse as (ids: string[], id: string, checked: boolean) => string[];
-  const syncDefaults = exported.syncPlannerWarehouseRanges as (current: Record<string, { from: string; to: string; targetDays: number }>, warehouses: Array<{ id: string; planningTargetDays: number }>, initialRange: { from: string; to: string }, targetOverrideIds: ReadonlySet<string>) => Record<string, { from: string; to: string; targetDays: number }>;
+  const toggleAll = exported.toggleAllPlannerWarehouses as (ids: string[], warehouses: Array<{ id: string; isHidden: boolean }>) => string[];
+  const syncDefaults = exported.syncPlannerWarehouseRanges as (current: Record<string, { from: string; to: string; targetDays: number }>, warehouses: Array<{ id: string; planningTargetDays: number; openedAt: string | null }>, initialRange: { from: string; to: string }, targetOverrideIds: ReadonlySet<string>, periodOverrideIds: ReadonlySet<string>, minimumFrom?: string) => Record<string, { from: string; to: string; targetDays: number }>;
+  const mergeMetadata = exported.mergePlannerWarehouseMetadata as <T extends { id: string }>(snapshot: T[], live: T[]) => T[];
+
+  const merged = mergeMetadata([
+    { id: "alpha", openedAt: null, planningTargetDays: 14 },
+    { id: "snapshot-only", openedAt: null, planningTargetDays: 14 },
+  ], [
+    { id: "alpha", openedAt: "2026-08-10", planningTargetDays: 21 },
+    { id: "live-only", openedAt: "2026-08-20", planningTargetDays: 30 },
+  ]);
+  assert.deepEqual(merged, [
+    { id: "alpha", openedAt: "2026-08-10", planningTargetDays: 21 },
+    { id: "snapshot-only", openedAt: null, planningTargetDays: 14 },
+    { id: "live-only", openedAt: "2026-08-20", planningTargetDays: 30 },
+  ], "fresh FF settings must immediately replace stale planner metadata without dropping warehouses");
 
   const base = {
     alpha: { from: "2026-08-21", to: "2026-08-27", targetDays: 14 },
@@ -256,19 +279,35 @@ test("planner state transitions apply bulk values, preserve overrides, and hydra
   assert.deepEqual(overridden.beta, { from: "2026-08-24", to: "2026-08-27", targetDays: 10 });
   assert.deepEqual(toggle(["alpha"], "beta", true), ["alpha", "beta"]);
   assert.deepEqual(toggle(["alpha", "beta"], "alpha", false), ["beta"]);
+  assert.deepEqual(toggleAll(["alpha"], [
+    { id: "alpha", isHidden: false },
+    { id: "beta", isHidden: false },
+    { id: "hidden", isHidden: true },
+  ]), ["alpha", "beta"], "select all must include every visible FF and exclude hidden FFs");
+  assert.deepEqual(toggleAll(["alpha", "beta"], [
+    { id: "alpha", isHidden: false },
+    { id: "beta", isHidden: false },
+  ]), [], "the same control must clear the selection when every visible FF is already selected");
 
   const hydrated = syncDefaults(base, [
-    { id: "alpha", planningTargetDays: 45 },
-    { id: "beta", planningTargetDays: 60 },
-  ], { from: "2026-08-21", to: "2026-08-27" }, new Set(["beta"]));
+    { id: "alpha", planningTargetDays: 45, openedAt: "2026-08-10" },
+    { id: "beta", planningTargetDays: 60, openedAt: "2026-08-24" },
+  ], { from: "2026-08-21", to: "2026-08-27" }, new Set(["beta"]), new Set(["beta"]), "2026-06-01");
   assert.equal(hydrated.alpha.targetDays, 45, "an untouched built-in default must adopt the owner-saved value");
   assert.equal(hydrated.beta.targetDays, 21, "a user override must survive warehouse metadata hydration");
+  assert.equal(hydrated.alpha.from, "2026-08-10", "an untouched FF period must start on its saved opening date");
+  assert.equal(hydrated.beta.from, "2026-08-14", "a manually overridden FF period must survive warehouse metadata hydration");
 
   const explicitSameValue = syncDefaults(base, [
-    { id: "alpha", planningTargetDays: 45 },
-    { id: "beta", planningTargetDays: 60 },
-  ], { from: "2026-08-21", to: "2026-08-27" }, new Set(["alpha", "beta"]));
+    { id: "alpha", planningTargetDays: 45, openedAt: null },
+    { id: "beta", planningTargetDays: 60, openedAt: null },
+  ], { from: "2026-08-21", to: "2026-08-27" }, new Set(["alpha", "beta"]), new Set());
   assert.equal(explicitSameValue.alpha.targetDays, 14, "an explicit override equal to the old default must still survive hydration");
+
+  const clampedOpening = syncDefaults({}, [
+    { id: "alpha", planningTargetDays: 14, openedAt: "2026-01-01" },
+  ], { from: "2026-08-21", to: "2026-08-27" }, new Set(), new Set(), "2026-05-30");
+  assert.equal(clampedOpening.alpha.from, "2026-05-30", "the automatic start must not predate the available 90-day snapshot");
 });
 
 test("unassigned demand follows the union of applied selected FF periods, not the common draft", () => {

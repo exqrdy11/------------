@@ -9,12 +9,13 @@
     "dev": "vinext dev",
     "build": "vinext build",
     "start": "vinext start",
-    "test": "npm run build && node --test tests/rendered-html.test.mjs && tsx --test tests/ff-planner-ui.test.ts && node --experimental-strip-types --test tests/fbs-summary.test.ts tests/ff-planning.test.ts tests/ff-planning-source.test.ts tests/ff-planning-db-shape.test.ts tests/ff-planning-api-behavior.test.ts",
+    "test": "npm run build && node --test tests/rendered-html.test.mjs && tsx --test tests/ff-planner-ui.test.ts tests/wb-sellable-products.test.ts && node --experimental-strip-types --test tests/fbs-summary.test.ts tests/ff-planning.test.ts tests/ff-planning-source.test.ts tests/ff-planning-db-shape.test.ts tests/ff-planning-api-behavior.test.ts",
     "lint": "eslint . --ignore-pattern dist --ignore-pattern .next",
     "db:generate": "drizzle-kit generate"
   },
   "dependencies": {
     "drizzle-orm": "0.45.2",
+    "fflate": "0.7.4",
     "next": "16.2.6",
     "react": "19.2.6",
     "react-dom": "19.2.6",

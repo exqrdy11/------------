@@ -1,7 +1,9 @@
 import { NextResponse } from "next/server";
 import { listFfWarehouses } from "@/db/ff-stocks";
+import { loadInventorySnapshot } from "@/db/inventory-snapshots";
 import { cabinetToken, getAdminCabinet } from "@/lib/admin-auth";
 import { ozonFetch, type OzonApiError } from "@/lib/ozon-api";
+import { isCurrentWbSellableSnapshot, isSellableWbProduct, sellableWbProductIdsFromSnapshot } from "@/lib/wb-sellable-products";
 import { yandexMarketFetch, type YandexMarketApiError } from "@/lib/yandex-market-api";
 
 export const dynamic = "force-dynamic";
@@ -192,12 +194,23 @@ export async function GET(request: Request) {
   if (!token) return NextResponse.json({ error: "Сначала добавьте токен Wildberries для кабинета" }, { status: 409 });
 
   try {
-    const { orders, statuses } = await getRecentOrders(token);
+    const [inventorySnapshot, { orders, statuses }] = await Promise.all([
+      loadInventorySnapshot(cabinetId).catch(() => null),
+      getRecentOrders(token),
+    ]);
+    if (!isCurrentWbSellableSnapshot(inventorySnapshot)) {
+      return NextResponse.json(
+        { error: "Сначала обновите остатки WB: список товаров с ярлыком «продаем» ещё не сформирован." },
+        { status: 409, headers: { "Cache-Control": "no-store" } },
+      );
+    }
+    const sellableNmIds = sellableWbProductIdsFromSnapshot(inventorySnapshot);
     const activeOrders = orders.filter((order) => {
       const status = statuses.get(order.id);
       const supplierStatus = status?.supplierStatus;
       const terminal = ["sold", "canceled", "canceled_by_client", "declined_by_client", "defect"];
-      return order.warehouseId === warehouse.wbWarehouseId
+      return isSellableWbProduct(sellableNmIds, order.nmId)
+        && order.warehouseId === warehouse.wbWarehouseId
         && (supplierStatus === "confirm" || supplierStatus === "complete")
         && !terminal.includes(status?.wbStatus ?? "");
     });

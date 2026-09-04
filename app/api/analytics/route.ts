@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { listFfWarehouses, type ManualWarehouse } from "@/db/ff-stocks";
 import { cabinetToken, getAdminCabinet } from "@/lib/admin-auth";
 import { loadInventorySnapshot } from "@/db/inventory-snapshots";
+import { isCurrentWbSellableSnapshot, isSellableWbProduct, sellableWbProductIdsFromSnapshot } from "@/lib/wb-sellable-products";
 
 export const dynamic = "force-dynamic";
 
@@ -10,6 +11,7 @@ const DAY_MS = 24 * 60 * 60 * 1000;
 const CACHE_MS = 2 * 60 * 1000;
 
 type WbSale = {
+  nmId?: number;
   date?: string;
   warehouseName?: string;
   warehouseType?: string;
@@ -169,16 +171,31 @@ export async function GET(request: Request) {
   const cached = cache.get(key);
   if (!refresh && cached && cached.expiresAt > Date.now()) return NextResponse.json(cached.payload, { headers: { "Cache-Control": "private, max-age=0" } });
 
-  const [manualWarehouses, salesResult] = await Promise.all([listFfWarehouses(cabinetId), wbFetch<WbSale[]>(token, `${WB_STATISTICS}/api/v1/supplier/sales?${new URLSearchParams({ dateFrom: `${period.from}T00:00:00`, flag: "0" })}`).then((items) => ({ ok: true as const, items })).catch((error) => ({ ok: false as const, error }))]);
+  const [manualWarehousesRaw, inventorySnapshot, salesResult] = await Promise.all([
+    listFfWarehouses(cabinetId),
+    loadInventorySnapshot(cabinetId).catch(() => null),
+    wbFetch<WbSale[]>(token, `${WB_STATISTICS}/api/v1/supplier/sales?${new URLSearchParams({ dateFrom: `${period.from}T00:00:00`, flag: "0" })}`)
+      .then((items) => ({ ok: true as const, items }))
+      .catch((error) => ({ ok: false as const, error })),
+  ]);
+  const manualWarehouses = manualWarehousesRaw as ManualWarehouse[];
+  if (!isCurrentWbSellableSnapshot(inventorySnapshot)) {
+    return NextResponse.json(
+      { error: "Сначала обновите остатки WB: список товаров с ярлыком «продаем» ещё не сформирован." },
+      { status: 409, headers: { "Cache-Control": "no-store" } },
+    );
+  }
+  const sellableNmIds = sellableWbProductIdsFromSnapshot(inventorySnapshot);
   const daily = new Map(daysBetween(period.from, period.to).map((date) => [date, { date, fbs: 0, fbo: 0 }]));
   const fbsWarehouseValues = initialWarehouseValues(manualWarehouses);
-  const warehouseByName = new Map(manualWarehouses.filter((warehouse) => warehouse.wbWarehouseName).map((warehouse) => [warehouse.wbWarehouseName!.trim().toLocaleLowerCase("ru-RU"), warehouse.id]));
+  const warehouseByName = new Map<string, string>(manualWarehouses.filter((warehouse) => warehouse.wbWarehouseName).map((warehouse) => [warehouse.wbWarehouseName!.trim().toLocaleLowerCase("ru-RU"), warehouse.id]));
   let unassigned = 0;
   const warnings: string[] = [];
   let source: AnalyticsPayload["source"] = { factAvailable: true, retryAt: null, retryExact: true };
 
   if (salesResult.ok) {
     for (const sale of salesResult.items) {
+      if (!isSellableWbProduct(sellableNmIds, sale.nmId)) continue;
       if (!isSale(sale)) continue;
       const day = dateKey(sale.date);
       if (!day || day < period.from || day > period.to) continue;
