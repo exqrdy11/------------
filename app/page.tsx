@@ -289,7 +289,7 @@ const viewTitles: Record<View, { eyebrow: string; title: string }> = {
   fbs: { eyebrow: "FBS · ПОСЛЕДНИЕ 30 ДНЕЙ", title: "Отгрузки и приёмка" },
   sales: { eyebrow: "ФФ · СПРОС И ОСТАТКИ", title: "План поставок" },
   analytics: { eyebrow: "АНАЛИТИКА · РУКОВОДИТЕЛЮ", title: "Продажи FBS и FBO" },
-  rnp: { eyebrow: "OZON · РЕКЛАМА", title: "РНП — контроль рекламы" },
+  rnp: { eyebrow: "OZON · МЕДИЙНАЯ РЕКЛАМА", title: "Медийная реклама" },
   pricing: { eyebrow: "ЦЕНЫ · РЫНОК WB", title: "Таргет цен" },
   payments: { eyebrow: "БУХГАЛТЕРИЯ · ФФ", title: "Калькулятор оплат ФФ" },
   reports: { eyebrow: "ВЫГРУЗКИ · CSV", title: "Отчёты по кабинету" },
@@ -2125,7 +2125,7 @@ export default function Home() {
           <button type="button" className={`nav-item ${activeView === "fbs" ? "active" : ""}`} onClick={() => navigateTo("fbs")}><span className="nav-symbol">→</span>FBS-отгрузки<span className="nav-badge">{activeFbsTotal}</span></button>
           <button type="button" className={`nav-item ${activeView === "sales" ? "active" : ""}`} onClick={() => navigateTo("sales")}><span className="nav-symbol">↗</span>План поставок</button>
           <button type="button" className={`nav-item ${activeView === "analytics" ? "active" : ""}`} onClick={() => navigateTo("analytics")}><span className="nav-symbol">⌁</span>Анализ</button>
-          <button type="button" className={`nav-item ${activeView === "rnp" ? "active" : ""}`} onClick={() => navigateTo("rnp")}><span className="nav-symbol">◎</span>РНП Ozon</button>
+          <button type="button" className={`nav-item ${activeView === "rnp" ? "active" : ""}`} onClick={() => navigateTo("rnp")}><span className="nav-symbol">◎</span>Медийная реклама</button>
           <button type="button" className={`nav-item ${activeView === "pricing" ? "active" : ""}`} onClick={() => navigateTo("pricing")}><span className="nav-symbol">₽</span>Таргет цен</button>
           <button type="button" className={`nav-item ${activeView === "fulfillment" || activeView === "manual" ? "active" : ""}`} onClick={() => navigateTo("fulfillment")}><span className="nav-symbol">▤</span>ФФ</button>
           <button type="button" className={`nav-item ${activeView === "payments" ? "active" : ""}`} onClick={() => navigateTo("payments")}><span className="nav-symbol">₽</span>Оплаты ФФ</button>

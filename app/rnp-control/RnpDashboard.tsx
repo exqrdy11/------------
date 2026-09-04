@@ -671,8 +671,8 @@ export default function Dashboard() {
         <div className="brand">
           <span className="brand-mark">Р</span>
           <div>
-            <strong>РНП Реклама</strong>
-            <span>Ozon performance control</span>
+            <strong>Медийная реклама</strong>
+            <span>Управление рекламой Ozon</span>
           </div>
         </div>
         <nav className="main-nav" aria-label="Основная навигация">
@@ -1178,4 +1178,3 @@ function SecretField({ label, name }: { label: string; name: string }) {
     </div>
   );
 }
-
