@@ -622,7 +622,7 @@ select:focus {
   color: var(--green);
 }
 
-.report-card,
+.media-report-card,
 .query-card {
   overflow: hidden;
   background: #fff;

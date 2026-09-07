@@ -782,7 +782,7 @@ export default function Dashboard() {
               />
             )}
 
-            <section className="report-card">
+            <section className="media-report-card">
               <div className="report-toolbar">
                 <div>
                   <h2>Детализация по РК</h2>
