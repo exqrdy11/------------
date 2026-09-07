@@ -6,7 +6,7 @@ export const cabinetIds = ["metanutrix", "ozon", "yandex"] as const;
 export type CabinetId = typeof cabinetIds[number];
 export type MarketplaceKind = "wb" | "ozon" | "yandex";
 export type CabinetSummary = { id: CabinetId; name: string; configured: boolean; marketplace: MarketplaceKind };
-export type UserRole = "owner" | "viewer";
+export type UserRole = "owner" | "viewer" | "media";
 export type AdminSession = { ownerId: CabinetId; cabinetId: CabinetId; role: UserRole };
 
 function constantTimeEqual(left: string, right: string) {
@@ -72,6 +72,12 @@ function viewerCredentials() {
   };
 }
 
+function mediaCredentials() {
+  const login = process.env.MEDIA_LOGIN?.trim();
+  const password = process.env.MEDIA_PASSWORD;
+  return login && password ? { login, password } : null;
+}
+
 export function sessionForCredentials(login: string, password: string): AdminSession | null {
   const owner = ownerCredentials();
   if (constantTimeEqual(login, owner.login) && constantTimeEqual(password, owner.password)) {
@@ -81,10 +87,14 @@ export function sessionForCredentials(login: string, password: string): AdminSes
   if (constantTimeEqual(login, viewer.login) && constantTimeEqual(password, viewer.password)) {
     return { ownerId: "metanutrix", cabinetId: "metanutrix", role: "viewer" };
   }
+  const media = mediaCredentials();
+  if (media && constantTimeEqual(login, media.login) && constantTimeEqual(password, media.password)) {
+    return { ownerId: "metanutrix", cabinetId: "metanutrix", role: "media" };
+  }
   return null;
 }
 
-function cabinetsForOwner(ownerId: CabinetId) {
+function cabinetsForOwner(ownerId: CabinetId): readonly CabinetId[] {
   // One login manages all of the seller's marketplace cabinets. Each cabinet
   // still has a separate D1 namespace and can never see another cabinet's data.
   return ownerId === "metanutrix" ? cabinetIds : [];
@@ -144,7 +154,7 @@ export async function createAdminSession(ownerId: CabinetId, cabinetId: CabinetI
   return `${payload}.${toBase64Url(new Uint8Array(signature))}`;
 }
 
-export async function getAdminSession(request: Request): Promise<AdminSession | null> {
+export async function getAuthenticatedSession(request: Request): Promise<AdminSession | null> {
   const token = readCookie(request, SESSION_COOKIE);
   if (!token) return null;
   const values = token.split(".");
@@ -156,7 +166,7 @@ export async function getAdminSession(request: Request): Promise<AdminSession | 
   const roleValue = values[3];
   const expiresAtValue = values[4];
   const signatureValue = values[5];
-  if (!ownerValue || !cabinetValue || !roleValue || !expiresAtValue || !signatureValue || !cabinetIds.includes(ownerValue as CabinetId) || !cabinetIds.includes(cabinetValue as CabinetId) || !["owner", "viewer"].includes(roleValue)) return null;
+  if (!ownerValue || !cabinetValue || !roleValue || !expiresAtValue || !signatureValue || !cabinetIds.includes(ownerValue as CabinetId) || !cabinetIds.includes(cabinetValue as CabinetId) || !["owner", "viewer", "media"].includes(roleValue)) return null;
   const ownerId = ownerValue as CabinetId;
   const cabinetId = cabinetValue as CabinetId;
   const role = roleValue as UserRole;
@@ -175,6 +185,15 @@ export async function getAdminSession(request: Request): Promise<AdminSession | 
   } catch {
     return null;
   }
+}
+
+export async function getAdminSession(request: Request): Promise<AdminSession | null> {
+  const session = await getAuthenticatedSession(request);
+  return session?.role === "media" ? null : session;
+}
+
+export async function getMediaSession(request: Request): Promise<AdminSession | null> {
+  return getAuthenticatedSession(request);
 }
 
 export async function getAdminCabinet(request: Request): Promise<CabinetId | null> {

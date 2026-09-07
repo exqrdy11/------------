@@ -1,4 +1,5 @@
 import { env } from "cloudflare:workers";
+import { getMediaSession } from "@/lib/admin-auth";
 
 type SellerSecrets = {
   OZON_SELLER_CLIENT_ID?: string;
@@ -20,7 +21,8 @@ async function sellerJson(path: string, body: unknown, secrets: Required<SellerS
   return payload;
 }
 
-export async function GET() {
+export async function GET(request: Request) {
+  if (!await getMediaSession(request)) return Response.json({ error: "Требуется вход" }, { status: 401 });
   try {
     const runtime = env as unknown as SellerSecrets;
     const clientId = runtime.OZON_SELLER_CLIENT_ID ?? runtime.OZON_CLIENT_ID;

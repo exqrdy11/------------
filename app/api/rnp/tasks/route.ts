@@ -1,4 +1,5 @@
 import { env } from "cloudflare:workers";
+import { getMediaSession } from "@/lib/admin-auth";
 
 type TaskRow = {
   id: number;
@@ -46,7 +47,8 @@ function present(row: TaskRow) {
   };
 }
 
-export async function GET() {
+export async function GET(request: Request) {
+  if (!await getMediaSession(request)) return Response.json({ error: "Требуется вход" }, { status: 401 });
   try {
     const db = database();
     await ensureSchema(db);
@@ -60,6 +62,7 @@ export async function GET() {
 }
 
 export async function POST(request: Request) {
+  if (!await getMediaSession(request)) return Response.json({ error: "Требуется вход" }, { status: 401 });
   try {
     const payload = (await request.json()) as {
       article?: string;
@@ -90,6 +93,7 @@ export async function POST(request: Request) {
 }
 
 export async function PATCH(request: Request) {
+  if (!await getMediaSession(request)) return Response.json({ error: "Требуется вход" }, { status: 401 });
   try {
     const payload = (await request.json()) as {
       id?: number;
@@ -123,6 +127,7 @@ export async function PATCH(request: Request) {
 }
 
 export async function DELETE(request: Request) {
+  if (!await getMediaSession(request)) return Response.json({ error: "Требуется вход" }, { status: 401 });
   try {
     const id = Number(new URL(request.url).searchParams.get("id"));
     if (!Number.isInteger(id) || id < 1) return Response.json({ error: "Укажите запись для удаления" }, { status: 400 });
@@ -134,4 +139,3 @@ export async function DELETE(request: Request) {
     return Response.json({ error: error instanceof Error ? error.message : "Не удалось удалить запись" }, { status: 500 });
   }
 }
-

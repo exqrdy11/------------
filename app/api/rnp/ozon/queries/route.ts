@@ -1,4 +1,5 @@
 import { env, waitUntil } from "cloudflare:workers";
+import { getMediaSession } from "@/lib/admin-auth";
 import {
   acquireOzonRefresh,
   cacheAgeMs,
@@ -200,6 +201,7 @@ async function refreshAndSave(
 }
 
 export async function GET(request: Request) {
+  if (!await getMediaSession(request)) return Response.json({ error: "Требуется вход" }, { status: 401 });
   const url = new URL(request.url);
   const dateFrom = validDate(url.searchParams.get("dateFrom"));
   const dateTo = validDate(url.searchParams.get("dateTo"));

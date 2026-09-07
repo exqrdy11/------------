@@ -19,7 +19,7 @@ type FfExpiry = Record<string, string | null>;
 type FfBatch = { location: string; batchCode: string; expiresAt: string | null; quantity: number };
 type FfBatches = Record<string, FfBatch[]>;
 type CabinetSummary = { id: "metanutrix" | "ozon" | "yandex"; name: string; configured: boolean; marketplace: "wb" | "ozon" | "yandex" };
-type UserRole = "owner" | "viewer";
+type UserRole = "owner" | "viewer" | "media";
 type MarketplaceConnection = {
   platform: "yandex" | "ozon";
   configured: boolean;
@@ -1142,6 +1142,7 @@ export default function Home() {
   const [importMessage, setImportMessage] = useState<string | null>(null);
   const [importError, setImportError] = useState<string | null>(null);
   const canManage = role === "owner";
+  const mediaOnly = role === "media";
   const isOzon = cabinet?.marketplace === "ozon";
   const isYandex = cabinet?.marketplace === "yandex";
   const marketplaceName = isOzon ? "Ozon" : isYandex ? "Яндекс Маркет" : "Wildberries";
@@ -1465,7 +1466,9 @@ export default function Home() {
         const response = await fetch("/api/auth/session", { cache: "no-store" });
         const data = await response.json() as { authenticated?: boolean; role?: UserRole | null; cabinet?: CabinetSummary | null; cabinets?: CabinetSummary[] };
         setAuthState(data.authenticated ? "authenticated" : "unauthenticated");
-        setRole(data.role ?? null);
+        const nextRole = data.role ?? null;
+        setRole(nextRole);
+        if (nextRole === "media") setActiveView("rnp");
         setCabinet(data.cabinet ?? null);
         setAvailableCabinets(data.cabinets ?? []);
       } catch {
@@ -1475,14 +1478,18 @@ export default function Home() {
   }, []);
 
   useEffect(() => {
-    if (authState === "authenticated") {
+    if (authState === "authenticated" && role !== "media") {
       const timer = window.setTimeout(() => {
         void loadData();
         void loadManualWarehouses();
       }, 0);
       return () => window.clearTimeout(timer);
     }
-  }, [authState, loadData, loadManualWarehouses]);
+  }, [authState, loadData, loadManualWarehouses, role]);
+
+  useEffect(() => {
+    if (mediaOnly && activeView !== "rnp") setActiveView("rnp");
+  }, [activeView, mediaOnly]);
 
   useEffect(() => {
     if (authState === "authenticated" && activeView === "cabinets") void loadMarketplaceConnections();
@@ -1754,7 +1761,8 @@ export default function Home() {
   };
 
   const navigateTo = (view: View) => {
-    setActiveView(view);
+    const nextView = mediaOnly ? "rnp" : view;
+    setActiveView(nextView);
     setFilter("Все");
     setQuery("");
     setSelected(null);
@@ -1997,7 +2005,9 @@ export default function Home() {
       const data = await response.json() as { authenticated?: boolean; role?: UserRole; cabinet?: CabinetSummary; cabinets?: CabinetSummary[]; error?: string };
       if (!response.ok || !data.authenticated) throw new Error(data.error || "Не удалось выполнить вход");
       setAdminPassword("");
-      setRole(data.role ?? null);
+      const nextRole = data.role ?? null;
+      setRole(nextRole);
+      if (nextRole === "media") setActiveView("rnp");
       setCabinet(data.cabinet ?? null);
       setAvailableCabinets(data.cabinets ?? []);
       setAuthState("authenticated");
@@ -2120,6 +2130,9 @@ export default function Home() {
       <aside className="sidebar">
         <div className="brand"><span className="brand-mark">С</span><span>СКЛАДНО</span></div>
         <nav className="nav-list" aria-label="Основная навигация">
+          {mediaOnly ? (
+            <button type="button" className="nav-item active" onClick={() => navigateTo("rnp")}><span className="nav-symbol">◎</span>Медийная реклама</button>
+          ) : <>
           <button type="button" className={`nav-item ${activeView === "overview" ? "active" : ""}`} onClick={() => navigateTo("overview")}><span className="nav-symbol">▦</span>Обзор</button>
           <button type="button" className={`nav-item ${activeView === "stock" ? "active" : ""}`} onClick={() => navigateTo("stock")}><span className="nav-symbol">□</span>Остатки</button>
           <button type="button" className={`nav-item ${activeView === "fbs" ? "active" : ""}`} onClick={() => navigateTo("fbs")}><span className="nav-symbol">→</span>FBS-отгрузки<span className="nav-badge">{activeFbsTotal}</span></button>
@@ -2130,24 +2143,27 @@ export default function Home() {
           <button type="button" className={`nav-item ${activeView === "fulfillment" || activeView === "manual" ? "active" : ""}`} onClick={() => navigateTo("fulfillment")}><span className="nav-symbol">▤</span>ФФ</button>
           <button type="button" className={`nav-item ${activeView === "payments" ? "active" : ""}`} onClick={() => navigateTo("payments")}><span className="nav-symbol">₽</span>Оплаты ФФ</button>
           <button type="button" className={`nav-item ${activeView === "reports" ? "active" : ""}`} onClick={() => navigateTo("reports")}><span className="nav-symbol">≡</span>Отчёты</button>
+          </>}
         </nav>
-        <div className="sidebar-bottom"><div className="connection"><span className={error ? "live-dot offline" : "live-dot"} />{error ? "Нужна проверка подключения" : `Подключено к API ${marketplaceName}`}</div><button type="button" className="profile" onClick={() => navigateTo("cabinets")}><span className="avatar">{marketplaceCode}</span><span><strong>{cabinet?.name ?? marketplaceName}</strong><small>{role === "viewer" ? "Гость · просмотр и обновление" : configured ? "Владелец · кабинеты и ключи" : "Владелец · ключ не добавлен"}</small></span><span className="chevron">›</span></button></div>
+        {mediaOnly ? <div className="sidebar-bottom"><div className="connection"><span className="live-dot" />Доступ к медийному блоку</div><div className="profile"><span className="avatar">М</span><span><strong>Медиа</strong><small>Только медийная реклама</small></span></div></div> : <div className="sidebar-bottom"><div className="connection"><span className={error ? "live-dot offline" : "live-dot"} />{error ? "Нужна проверка подключения" : `Подключено к API ${marketplaceName}`}</div><button type="button" className="profile" onClick={() => navigateTo("cabinets")}><span className="avatar">{marketplaceCode}</span><span><strong>{cabinet?.name ?? marketplaceName}</strong><small>{role === "viewer" ? "Гость · просмотр и обновление" : configured ? "Владелец · кабинеты и ключи" : "Владелец · ключ не добавлен"}</small></span><span className="chevron">›</span></button></div>}
       </aside>
 
       <section className="workspace">
-        <header className="topbar"><div><p className="eyebrow">{currentViewTitle.eyebrow}</p><h1>{currentViewTitle.title}</h1></div><div className="header-actions"><span className="refresh-guidance">Можно обновить вручную · рекомендуем раз в 2 мин</span><div className="sync-state"><span className={error ? "live-dot offline" : "live-dot"} /><span>Последнее обновление<br/><strong>{formatSyncTime(updatedAt)} МСК</strong></span></div><button className="logout-btn" type="button" onClick={() => void logoutAdmin()}>Выйти</button><button className="secondary-btn" type="button" onClick={() => void (plannerViewActive ? refreshFfPlanning() : loadData(true))} disabled={loading || Boolean(inventoryRetrySeconds) || (plannerViewActive && (plannerLoading || plannerRefreshing || Boolean(plannerRetrySeconds)))} title={inventoryRetrySeconds ? `Общий запрос к ${marketplaceName} уже выполняется` : plannerViewActive && plannerRetrySeconds ? "Обновление плана временно ограничено" : loading || (plannerViewActive && (plannerLoading || plannerRefreshing)) ? "Обновление займёт не больше 25 секунд" : "Можно обновить вручную в любой момент. Рекомендованный интервал — 2 минуты."}><span className={loading || (plannerViewActive && (plannerLoading || plannerRefreshing)) ? "spin" : ""}>↻</span>{loading || (plannerViewActive && (plannerLoading || plannerRefreshing)) ? "Обновляем…" : inventoryRetrySeconds ? `Через ${formatCountdown(inventoryRetrySeconds)}` : plannerViewActive && plannerRetrySeconds ? `Через ${formatCountdown(plannerRetrySeconds)}` : "Обновить"}</button><button className="primary-btn" type="button" onClick={() => downloadCsv(filteredRows, `ostatki-${isOzon ? "ozon" : isYandex ? "yandex" : "wb"}`)} disabled={!rows.length}>Экспорт<span>↓</span></button></div></header>
+        <header className="topbar"><div><p className="eyebrow">{currentViewTitle.eyebrow}</p><h1>{currentViewTitle.title}</h1></div><div className="header-actions">{mediaOnly ? <button className="logout-btn" type="button" onClick={() => void logoutAdmin()}>Выйти</button> : <><span className="refresh-guidance">Можно обновить вручную · рекомендуем раз в 2 мин</span><div className="sync-state"><span className={error ? "live-dot offline" : "live-dot"} /><span>Последнее обновление<br/><strong>{formatSyncTime(updatedAt)} МСК</strong></span></div><button className="logout-btn" type="button" onClick={() => void logoutAdmin()}>Выйти</button><button className="secondary-btn" type="button" onClick={() => void (plannerViewActive ? refreshFfPlanning() : loadData(true))} disabled={loading || Boolean(inventoryRetrySeconds) || (plannerViewActive && (plannerLoading || plannerRefreshing || Boolean(plannerRetrySeconds)))} title={inventoryRetrySeconds ? `Общий запрос к ${marketplaceName} уже выполняется` : plannerViewActive && plannerRetrySeconds ? "Обновление плана временно ограничено" : loading || (plannerViewActive && (plannerLoading || plannerRefreshing)) ? "Обновление займёт не больше 25 секунд" : "Можно обновить вручную в любой момент. Рекомендованный интервал — 2 минуты."}><span className={loading || (plannerViewActive && (plannerLoading || plannerRefreshing)) ? "spin" : ""}>↻</span>{loading || (plannerViewActive && (plannerLoading || plannerRefreshing)) ? "Обновляем…" : inventoryRetrySeconds ? `Через ${formatCountdown(inventoryRetrySeconds)}` : plannerViewActive && plannerRetrySeconds ? `Через ${formatCountdown(plannerRetrySeconds)}` : "Обновить"}</button><button className="primary-btn" type="button" onClick={() => downloadCsv(filteredRows, `ostatki-${isOzon ? "ozon" : isYandex ? "yandex" : "wb"}`)} disabled={!rows.length}>Экспорт<span>↓</span></button></>}</div></header>
 
         <div className="content" id="overview">
-          {cabinet && <section className={`cabinet-strip ${cabinet.configured ? "ready" : "waiting"}`}>
+          {!mediaOnly && cabinet && <section className={`cabinet-strip ${cabinet.configured ? "ready" : "waiting"}`}>
             <div><span className="cabinet-strip-mark">{marketplaceCode}</span><span><small>ТЕКУЩАЯ КАМПАНИЯ</small><strong>{cabinet.name}</strong></span></div>
             <p>{cabinet.configured ? "Свои товары, ФФ-склады и сроки годности. Переключение кабинетов не требует нового входа." : `Ожидает ключ API ${marketplaceName}. Вход и отдельные склады уже готовы.`}</p>
             <button type="button" onClick={() => navigateTo("cabinets")}>Сменить кампанию</button>
           </section>}
-          {error && <section className="api-notice" role="alert"><span className="api-notice-icon">!</span><div><strong>{error}</strong><p>{configured ? isOzon ? "Проверьте права ключа Ozon на товары, остатки и FBS-заказы." : isYandex ? "Проверьте права ключа Яндекс Маркета на товары, остатки и FBS-заказы." : "Для полной загрузки токену нужны категории: Контент, Маркетплейс и Аналитика." : "Безопасный ключ хранится только на сервере и не передаётся в браузер."}</p></div><button type="button" onClick={() => void loadData(true)}>Проверить снова</button></section>}
-          {!error && warnings.length > 0 && <section className="warning-strip"><span>!</span><p>{warnings.join(" · ")}</p></section>}
-          {inventoryRetrySeconds !== null && inventoryRetrySeconds > 0 && <section className="inventory-retry-timer" role="status"><span>↻</span><div><strong>Текущий запрос к {marketplaceName} ещё выполняется: {formatCountdown(inventoryRetrySeconds)}</strong><p>После завершения можно обновить снова. Рекомендованный интервал — раз в 2 минуты.</p></div></section>}
+          {!mediaOnly && error && <section className="api-notice" role="alert"><span className="api-notice-icon">!</span><div><strong>{error}</strong><p>{configured ? isOzon ? "Проверьте права ключа Ozon на товары, остатки и FBS-заказы." : isYandex ? "Проверьте права ключа Яндекс Маркета на товары, остатки и FBS-заказы." : "Для полной загрузки токену нужны категории: Контент, Маркетплейс и Аналитика." : "Безопасный ключ хранится только на сервере и не передаётся в браузер."}</p></div><button type="button" onClick={() => void loadData(true)}>Проверить снова</button></section>}
+          {!mediaOnly && !error && warnings.length > 0 && <section className="warning-strip"><span>!</span><p>{warnings.join(" · ")}</p></section>}
+          {!mediaOnly && inventoryRetrySeconds !== null && inventoryRetrySeconds > 0 && <section className="inventory-retry-timer" role="status"><span>↻</span><div><strong>Текущий запрос к {marketplaceName} ещё выполняется: {formatCountdown(inventoryRetrySeconds)}</strong><p>После завершения можно обновить снова. Рекомендованный интервал — раз в 2 минуты.</p></div></section>}
 
-          {activeView === "cabinets" ? (
+          {mediaOnly ? (
+            <RnpDashboard />
+          ) : activeView === "cabinets" ? (
             <section className="cabinet-manager">
               <div className="section-heading cabinet-manager-heading">
                 <div><span className="section-kicker">МАРКЕТПЛЕЙС → КАМПАНИЯ → СВОИ ФФ</span><h2>Один вход — все ваши кампании</h2><p className="section-note">Внутри одного доступа выберите нужную кампанию. У каждой свои товары, ФФ-склады, остатки, заказы, поставки и продажи — данные не смешиваются.</p></div>

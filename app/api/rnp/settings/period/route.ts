@@ -1,4 +1,5 @@
 import { env } from "cloudflare:workers";
+import { getMediaSession } from "@/lib/admin-auth";
 
 type PeriodRow = {
   date_from: string;
@@ -32,7 +33,8 @@ function present(row: PeriodRow) {
   return { dateFrom: row.date_from, dateTo: row.date_to, preset: row.preset };
 }
 
-export async function GET() {
+export async function GET(request: Request) {
+  if (!await getMediaSession(request)) return Response.json({ error: "Требуется вход" }, { status: 401 });
   try {
     const db = database();
     await ensureSchema(db);
@@ -46,6 +48,7 @@ export async function GET() {
 }
 
 export async function PUT(request: Request) {
+  if (!await getMediaSession(request)) return Response.json({ error: "Требуется вход" }, { status: 401 });
   try {
     const payload = await request.json() as { dateFrom?: string; dateTo?: string; preset?: string };
     const dateFrom = payload.dateFrom;
@@ -69,4 +72,3 @@ export async function PUT(request: Request) {
     return Response.json({ error: error instanceof Error ? error.message : "Не удалось сохранить общий период" }, { status: 500 });
   }
 }
-

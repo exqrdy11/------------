@@ -1,5 +1,6 @@
 import { env } from "cloudflare:workers";
 import { aggregateCampaignRows, buildCampaignReport } from "../../../../lib/report-domain.mjs";
+import { getMediaSession } from "@/lib/admin-auth";
 
 type IncomingRow = {
   campaignId?: unknown;
@@ -97,6 +98,7 @@ function storedRow(row: StoredRow) {
 }
 
 export async function GET(request: Request) {
+  if (!await getMediaSession(request)) return Response.json({ error: "Требуется вход" }, { status: 401 });
   try {
     const url = new URL(request.url);
     const dateFrom = url.searchParams.get("dateFrom");
@@ -117,6 +119,7 @@ export async function GET(request: Request) {
 }
 
 export async function POST(request: Request) {
+  if (!await getMediaSession(request)) return Response.json({ error: "Требуется вход" }, { status: 401 });
   try {
     const payload = await request.json() as { dateFrom?: unknown; dateTo?: unknown; rows?: unknown };
     if (!validDate(payload.dateFrom) || !validDate(payload.dateTo) || payload.dateFrom > payload.dateTo) {
@@ -175,6 +178,7 @@ export async function POST(request: Request) {
 }
 
 export async function PATCH(request: Request) {
+  if (!await getMediaSession(request)) return Response.json({ error: "Требуется вход" }, { status: 401 });
   try {
     const payload = await request.json() as { campaignId?: unknown; product?: { sku?: unknown; offerId?: unknown; name?: unknown } };
     const campaignId = textValue(payload.campaignId, 100);
@@ -192,4 +196,3 @@ export async function PATCH(request: Request) {
     return Response.json({ error: error instanceof Error ? error.message : "Не удалось сопоставить кампанию" }, { status: 500 });
   }
 }
-

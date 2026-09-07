@@ -1,4 +1,5 @@
 import { env } from "cloudflare:workers";
+import { getMediaSession } from "@/lib/admin-auth";
 
 type NoteRow = {
   article: string;
@@ -25,6 +26,7 @@ async function ensureSchema(db: D1Database) {
 }
 
 export async function GET(request: Request) {
+  if (!await getMediaSession(request)) return Response.json({ error: "Требуется вход" }, { status: 401 });
   try {
     const url = new URL(request.url);
     const dateFrom = url.searchParams.get("dateFrom");
@@ -44,6 +46,7 @@ export async function GET(request: Request) {
 }
 
 export async function PUT(request: Request) {
+  if (!await getMediaSession(request)) return Response.json({ error: "Требуется вход" }, { status: 401 });
   try {
     const payload = await request.json() as { article?: string; noteDate?: string; note?: string };
     const article = payload.article?.trim() ?? "";
@@ -65,4 +68,3 @@ export async function PUT(request: Request) {
     return Response.json({ error: error instanceof Error ? error.message : "Не удалось сохранить заметку" }, { status: 500 });
   }
 }
-

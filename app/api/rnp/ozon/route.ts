@@ -1,4 +1,5 @@
 import { env, waitUntil } from "cloudflare:workers";
+import { getMediaSession } from "@/lib/admin-auth";
 import {
   acquireOzonRefresh,
   cacheAgeMs,
@@ -489,10 +490,11 @@ async function handleReport(request: Request, force: boolean) {
 }
 
 export async function GET(request: Request) {
+  if (!await getMediaSession(request)) return Response.json({ error: "Требуется вход" }, { status: 401 });
   return handleReport(request, false);
 }
 
 export async function POST(request: Request) {
+  if (!await getMediaSession(request)) return Response.json({ error: "Требуется вход" }, { status: 401 });
   return handleReport(request, true);
 }
-

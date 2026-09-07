@@ -1,4 +1,5 @@
 import { env } from "cloudflare:workers";
+import { getMediaSession } from "@/lib/admin-auth";
 
 type StoredRow = {
   campaign_id: string;
@@ -51,6 +52,7 @@ async function ensureSchema(db: D1Database) {
 }
 
 export async function GET(request: Request) {
+  if (!await getMediaSession(request)) return Response.json({ error: "Требуется вход" }, { status: 401 });
   try {
     const url = new URL(request.url);
     const dateFrom = url.searchParams.get("dateFrom");
@@ -85,6 +87,7 @@ export async function GET(request: Request) {
 }
 
 export async function POST(request: Request) {
+  if (!await getMediaSession(request)) return Response.json({ error: "Требуется вход" }, { status: 401 });
   try {
     const payload = await request.json() as { dateFrom?: unknown; dateTo?: unknown; rows?: unknown; replaceCampaigns?: unknown };
     if (!validDate(payload.dateFrom) || !validDate(payload.dateTo) || payload.dateFrom > payload.dateTo) {
@@ -178,4 +181,3 @@ export async function POST(request: Request) {
     return Response.json({ error: error instanceof Error ? error.message : "Не удалось импортировать отчёт" }, { status: 500 });
   }
 }
-
