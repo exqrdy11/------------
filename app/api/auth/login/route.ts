@@ -11,7 +11,7 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: "Неверный логин или пароль" }, { status: 401, headers: { "Cache-Control": "no-store" } });
     }
     const token = await createAdminSession(session.ownerId, session.cabinetId, session.role);
-    return NextResponse.json({ authenticated: true, role: session.role, cabinet: cabinetSummary(session.cabinetId), cabinets: session.role === "media" ? [] : availableCabinets(session.ownerId) }, {
+    return NextResponse.json({ authenticated: true, role: session.role, cabinet: cabinetSummary(session.cabinetId), cabinets: session.role === "media" ? [] : availableCabinets(session.ownerId, session.role) }, {
       headers: { "Cache-Control": "no-store", "Set-Cookie": adminSessionCookie(token) },
     });
   } catch {

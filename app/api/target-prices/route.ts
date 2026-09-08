@@ -127,7 +127,7 @@ export async function POST(request: Request) {
   if (!session) return NextResponse.json({ error: "Требуется вход администратора" }, { status: 401, headers: { "Cache-Control": "no-store" } });
   const body = await request.json().catch(() => null) as { action?: unknown; sku?: unknown; nmId?: unknown; competitorNmId?: unknown; competitorUrl?: unknown; competitorPrice?: unknown } | null;
   if (body?.action === "add-competitor" || body?.action === "remove-competitor" || body?.action === "set-competitor-price" || body?.action === "refresh-competitor") {
-    if (session.role !== "owner") return NextResponse.json({ error: "Менять список конкурентов может только владелец кабинета" }, { status: 403, headers: { "Cache-Control": "no-store" } });
+    if (session.role !== "owner" && !(session.role === "yandex-manager" && session.cabinetId === "yandex")) return NextResponse.json({ error: "Нет доступа к изменению конкурентов этого кабинета" }, { status: 403, headers: { "Cache-Control": "no-store" } });
     const rows = await listTargetPrices(session.cabinetId);
     const row = findTargetPriceRow(rows, body.sku, body.nmId);
     if (!row) return NextResponse.json({ error: "Товар для изменения конкурентов не найден" }, { status: 404, headers: { "Cache-Control": "no-store" } });

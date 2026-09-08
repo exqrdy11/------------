@@ -1143,6 +1143,8 @@ export default function Home() {
   const [importError, setImportError] = useState<string | null>(null);
   const canManage = role === "owner";
   const mediaOnly = role === "media";
+  const yandexOnly = role === "yandex-manager";
+  const canManagePricing = canManage || (yandexOnly && cabinet?.id === "yandex");
   const isOzon = cabinet?.marketplace === "ozon";
   const isYandex = cabinet?.marketplace === "yandex";
   const marketplaceName = isOzon ? "Ozon" : isYandex ? "Яндекс Маркет" : "Wildberries";
@@ -1469,6 +1471,7 @@ export default function Home() {
         const nextRole = data.role ?? null;
         setRole(nextRole);
         if (nextRole === "media") setActiveView("rnp");
+        if (nextRole === "yandex-manager") setActiveView("pricing");
         setCabinet(data.cabinet ?? null);
         setAvailableCabinets(data.cabinets ?? []);
       } catch {
@@ -1489,7 +1492,8 @@ export default function Home() {
 
   useEffect(() => {
     if (mediaOnly && activeView !== "rnp") setActiveView("rnp");
-  }, [activeView, mediaOnly]);
+    if (yandexOnly && (activeView === "rnp" || activeView === "cabinets")) setActiveView("pricing");
+  }, [activeView, mediaOnly, yandexOnly]);
 
   useEffect(() => {
     if (authState === "authenticated" && activeView === "cabinets") void loadMarketplaceConnections();
@@ -1761,7 +1765,7 @@ export default function Home() {
   };
 
   const navigateTo = (view: View) => {
-    const nextView = mediaOnly ? "rnp" : view;
+    const nextView = mediaOnly ? "rnp" : yandexOnly && (view === "rnp" || view === "cabinets") ? "pricing" : view;
     setActiveView(nextView);
     setFilter("Все");
     setQuery("");
@@ -2008,6 +2012,7 @@ export default function Home() {
       const nextRole = data.role ?? null;
       setRole(nextRole);
       if (nextRole === "media") setActiveView("rnp");
+      if (nextRole === "yandex-manager") setActiveView("pricing");
       setCabinet(data.cabinet ?? null);
       setAvailableCabinets(data.cabinets ?? []);
       setAuthState("authenticated");
@@ -2138,14 +2143,14 @@ export default function Home() {
           <button type="button" className={`nav-item ${activeView === "fbs" ? "active" : ""}`} onClick={() => navigateTo("fbs")}><span className="nav-symbol">→</span>FBS-отгрузки<span className="nav-badge">{activeFbsTotal}</span></button>
           <button type="button" className={`nav-item ${activeView === "sales" ? "active" : ""}`} onClick={() => navigateTo("sales")}><span className="nav-symbol">↗</span>План поставок</button>
           <button type="button" className={`nav-item ${activeView === "analytics" ? "active" : ""}`} onClick={() => navigateTo("analytics")}><span className="nav-symbol">⌁</span>Анализ</button>
-          <button type="button" className={`nav-item ${activeView === "rnp" ? "active" : ""}`} onClick={() => navigateTo("rnp")}><span className="nav-symbol">◎</span>Медийная реклама</button>
+          {!yandexOnly && <button type="button" className={`nav-item ${activeView === "rnp" ? "active" : ""}`} onClick={() => navigateTo("rnp")}><span className="nav-symbol">◎</span>Медийная реклама</button>}
           <button type="button" className={`nav-item ${activeView === "pricing" ? "active" : ""}`} onClick={() => navigateTo("pricing")}><span className="nav-symbol">₽</span>Таргет цен</button>
           <button type="button" className={`nav-item ${activeView === "fulfillment" || activeView === "manual" ? "active" : ""}`} onClick={() => navigateTo("fulfillment")}><span className="nav-symbol">▤</span>ФФ</button>
           <button type="button" className={`nav-item ${activeView === "payments" ? "active" : ""}`} onClick={() => navigateTo("payments")}><span className="nav-symbol">₽</span>Оплаты ФФ</button>
           <button type="button" className={`nav-item ${activeView === "reports" ? "active" : ""}`} onClick={() => navigateTo("reports")}><span className="nav-symbol">≡</span>Отчёты</button>
           </>}
         </nav>
-        {mediaOnly ? <div className="sidebar-bottom"><div className="connection"><span className="live-dot" />Доступ к медийному блоку</div><div className="profile"><span className="avatar">М</span><span><strong>Медиа</strong><small>Только медийная реклама</small></span></div></div> : <div className="sidebar-bottom"><div className="connection"><span className={error ? "live-dot offline" : "live-dot"} />{error ? "Нужна проверка подключения" : `Подключено к API ${marketplaceName}`}</div><button type="button" className="profile" onClick={() => navigateTo("cabinets")}><span className="avatar">{marketplaceCode}</span><span><strong>{cabinet?.name ?? marketplaceName}</strong><small>{role === "viewer" ? "Гость · просмотр и обновление" : configured ? "Владелец · кабинеты и ключи" : "Владелец · ключ не добавлен"}</small></span><span className="chevron">›</span></button></div>}
+        {mediaOnly ? <div className="sidebar-bottom"><div className="connection"><span className="live-dot" />Доступ к медийному блоку</div><div className="profile"><span className="avatar">М</span><span><strong>Медиа</strong><small>Только медийная реклама</small></span></div></div> : <div className="sidebar-bottom"><div className="connection"><span className={error ? "live-dot offline" : "live-dot"} />{error ? "Нужна проверка подключения" : `Подключено к API ${marketplaceName}`}</div><button type="button" className="profile" disabled={yandexOnly} onClick={() => navigateTo("cabinets")}><span className="avatar">{marketplaceCode}</span><span><strong>{cabinet?.name ?? marketplaceName}</strong><small>{yandexOnly ? "Менеджер ЯМ" : role === "viewer" ? "Гость · просмотр и обновление" : configured ? "Владелец · кабинеты и ключи" : "Владелец · ключ не добавлен"}</small></span><span className="chevron">›</span></button></div>}
       </aside>
 
       <section className="workspace">
@@ -2155,7 +2160,7 @@ export default function Home() {
           {!mediaOnly && cabinet && <section className={`cabinet-strip ${cabinet.configured ? "ready" : "waiting"}`}>
             <div><span className="cabinet-strip-mark">{marketplaceCode}</span><span><small>ТЕКУЩАЯ КАМПАНИЯ</small><strong>{cabinet.name}</strong></span></div>
             <p>{cabinet.configured ? "Свои товары, ФФ-склады и сроки годности. Переключение кабинетов не требует нового входа." : `Ожидает ключ API ${marketplaceName}. Вход и отдельные склады уже готовы.`}</p>
-            <button type="button" onClick={() => navigateTo("cabinets")}>Сменить кампанию</button>
+            {!yandexOnly && <button type="button" onClick={() => navigateTo("cabinets")}>Сменить кампанию</button>}
           </section>}
           {!mediaOnly && error && <section className="api-notice" role="alert"><span className="api-notice-icon">!</span><div><strong>{error}</strong><p>{configured ? isOzon ? "Проверьте права ключа Ozon на товары, остатки и FBS-заказы." : isYandex ? "Проверьте права ключа Яндекс Маркета на товары, остатки и FBS-заказы." : "Для полной загрузки токену нужны категории: Контент, Маркетплейс и Аналитика." : "Безопасный ключ хранится только на сервере и не передаётся в браузер."}</p></div><button type="button" onClick={() => void loadData(true)}>Проверить снова</button></section>}
           {!mediaOnly && !error && warnings.length > 0 && <section className="warning-strip"><span>!</span><p>{warnings.join(" · ")}</p></section>}
@@ -2244,8 +2249,8 @@ export default function Home() {
                   <span className="section-kicker">КАРТОЧКА РЫНКА</span><h3>{selectedPricingRow.sku}</h3><p>{selectedPricingRow.searchQuery || "Поисковый запрос не указан"}{selectedPricingRow.nmId ? ` · ваша карточка ${marketplaceCode} ${selectedPricingRow.nmId}` : ""}</p>
                   {selectedPricingRow.nmId && !isYandex && <a className="pricing-own-link" href={isOzon ? `https://www.ozon.ru/product/${selectedPricingRow.nmId}` : `https://www.wildberries.ru/catalog/${selectedPricingRow.nmId}/detail.aspx`} target="_blank" rel="noreferrer">{isOzon ? "Открыть свою карточку на Ozon ↗" : "Открыть свою карточку на WB ↗"}</a>}
                   <div className="pricing-modal-summary"><span>Цена на витрине {marketplaceName} <b>{selectedPricingRow.currentPrice ? formatMoney.format(selectedPricingRow.currentPrice) : "—"}</b></span><span>Таргет <b>{recommendation.target ? formatMoney.format(recommendation.target) : "—"}</b></span><span>Решение <b>{recommendation.label}</b></span></div>
-                  <div className="pricing-competitor-list"><h4>В сравнении</h4>{selectedPricingRow.competitors.map((competitor) => <article key={competitor.nmId}><div><strong>{competitor.name || `Карточка ${marketplaceCode} ${competitor.nmId}`}</strong><small>{competitor.source || "добавлен в мониторинг"}{competitor.updatedAt ? ` · ${formatDateTime(competitor.updatedAt)}` : ""}</small>{competitor.error && <em>{competitor.error}</em>}</div><div className="pricing-competitor-actions">{isOzon && canManage && <label className="pricing-competitor-price"><span>Цена, ₽</span><input value={competitorPriceDrafts[competitor.nmId] ?? ""} onChange={(event) => setCompetitorPriceDrafts((current) => ({ ...current, [competitor.nmId]: event.target.value.replace(/[^0-9,.]/g, "") }))} inputMode="decimal" placeholder="0" /></label>}{!isYandex && <a href={isOzon ? competitor.url || `https://www.ozon.ru/product/${competitor.nmId}` : `https://www.wildberries.ru/catalog/${competitor.nmId}/detail.aspx`} target="_blank" rel="noreferrer">{competitor.price ? formatMoney.format(competitor.price) : "Нет цены"} ↗</a>}{isYandex && competitor.url && <a href={competitor.url} target="_blank" rel="noreferrer">{competitor.price ? formatMoney.format(competitor.price) : "Нет цены"} ↗</a>}{isYandex && !competitor.url && <span>{competitor.price ? formatMoney.format(competitor.price) : "Нет цены"}</span>}{(isOzon || isYandex) && canManage && <button type="button" className="pricing-competitor-refresh" onClick={() => void updatePricingCompetitor(selectedRow, competitor.nmId, "refresh-competitor")} disabled={pricingCandidateUpdatingId === competitor.nmId}>{pricingCandidateUpdatingId === competitor.nmId ? "…" : "Обновить цену"}</button>}{isOzon && canManage && <button type="button" className="pricing-competitor-save" onClick={() => void updatePricingCompetitor(selectedRow, competitor.nmId, "set-competitor-price", competitorPriceDrafts[competitor.nmId])} disabled={!competitorPriceDrafts[competitor.nmId] || pricingCandidateUpdatingId === competitor.nmId}>{pricingCandidateUpdatingId === competitor.nmId ? "…" : "Сохранить"}</button>}{canManage && <button type="button" className="pricing-competitor-remove" onClick={() => void updatePricingCompetitor(selectedRow, competitor.nmId, "remove-competitor")} disabled={pricingCandidateUpdatingId === competitor.nmId}>{pricingCandidateUpdatingId === competitor.nmId ? "…" : "Убрать"}</button>}</div></article>)}{!selectedPricingRow.competitors.length && <p>Для этой карточки пока не назначены конкуренты.</p>}</div>
-                  {canManage && <section className="pricing-candidate-picker"><div className="pricing-candidate-heading"><div><span className="section-kicker">КОНКУРЕНТЫ</span><h4>Добавить вручную</h4><p>{isOzon ? "Вставь полную ссылку карточки Ozon. При обычном обновлении сервис попробует подтянуть её цену и сохранит последнюю удачную." : isYandex ? "Вставь полную ссылку карточки Яндекс Маркета. При обычном обновлении сервис попробует подтянуть её цену и сохранит последнюю удачную." : "Вставь артикул WB нужной карточки. Цена конкурента появится после отдельного обновления цен."}</p></div></div>
+                  <div className="pricing-competitor-list"><h4>В сравнении</h4>{selectedPricingRow.competitors.map((competitor) => <article key={competitor.nmId}><div><strong>{competitor.name || `Карточка ${marketplaceCode} ${competitor.nmId}`}</strong><small>{competitor.source || "добавлен в мониторинг"}{competitor.updatedAt ? ` · ${formatDateTime(competitor.updatedAt)}` : ""}</small>{competitor.error && <em>{competitor.error}</em>}</div><div className="pricing-competitor-actions">{isOzon && canManagePricing && <label className="pricing-competitor-price"><span>Цена, ₽</span><input value={competitorPriceDrafts[competitor.nmId] ?? ""} onChange={(event) => setCompetitorPriceDrafts((current) => ({ ...current, [competitor.nmId]: event.target.value.replace(/[^0-9,.]/g, "") }))} inputMode="decimal" placeholder="0" /></label>}{!isYandex && <a href={isOzon ? competitor.url || `https://www.ozon.ru/product/${competitor.nmId}` : `https://www.wildberries.ru/catalog/${competitor.nmId}/detail.aspx`} target="_blank" rel="noreferrer">{competitor.price ? formatMoney.format(competitor.price) : "Нет цены"} ↗</a>}{isYandex && competitor.url && <a href={competitor.url} target="_blank" rel="noreferrer">{competitor.price ? formatMoney.format(competitor.price) : "Нет цены"} ↗</a>}{isYandex && !competitor.url && <span>{competitor.price ? formatMoney.format(competitor.price) : "Нет цены"}</span>}{(isOzon || isYandex) && canManagePricing && <button type="button" className="pricing-competitor-refresh" onClick={() => void updatePricingCompetitor(selectedRow, competitor.nmId, "refresh-competitor")} disabled={pricingCandidateUpdatingId === competitor.nmId}>{pricingCandidateUpdatingId === competitor.nmId ? "…" : "Обновить цену"}</button>}{isOzon && canManagePricing && <button type="button" className="pricing-competitor-save" onClick={() => void updatePricingCompetitor(selectedRow, competitor.nmId, "set-competitor-price", competitorPriceDrafts[competitor.nmId])} disabled={!competitorPriceDrafts[competitor.nmId] || pricingCandidateUpdatingId === competitor.nmId}>{pricingCandidateUpdatingId === competitor.nmId ? "…" : "Сохранить"}</button>}{canManagePricing && <button type="button" className="pricing-competitor-remove" onClick={() => void updatePricingCompetitor(selectedRow, competitor.nmId, "remove-competitor")} disabled={pricingCandidateUpdatingId === competitor.nmId}>{pricingCandidateUpdatingId === competitor.nmId ? "…" : "Убрать"}</button>}</div></article>)}{!selectedPricingRow.competitors.length && <p>Для этой карточки пока не назначены конкуренты.</p>}</div>
+                  {canManagePricing && <section className="pricing-candidate-picker"><div className="pricing-candidate-heading"><div><span className="section-kicker">КОНКУРЕНТЫ</span><h4>Добавить вручную</h4><p>{isOzon ? "Вставь полную ссылку карточки Ozon. При обычном обновлении сервис попробует подтянуть её цену и сохранит последнюю удачную." : isYandex ? "Вставь полную ссылку карточки Яндекс Маркета. При обычном обновлении сервис попробует подтянуть её цену и сохранит последнюю удачную." : "Вставь артикул WB нужной карточки. Цена конкурента появится после отдельного обновления цен."}</p></div></div>
                     <form className="pricing-manual-candidate" onSubmit={(event) => { event.preventDefault(); const nmId = Number(manualCompetitorNmId); if (isOzon || isYandex ? manualCompetitorNmId.trim() : Number.isInteger(nmId) && nmId > 0) void updatePricingCompetitor(selectedRow, nmId, "add-competitor", undefined, isOzon || isYandex ? manualCompetitorNmId : undefined); }}><label><span>{isOzon ? "Ссылка конкурента Ozon" : isYandex ? "Ссылка конкурента Яндекс Маркета" : "Артикул WB конкурента"}</span><input value={manualCompetitorNmId} onChange={(event) => setManualCompetitorNmId(isOzon || isYandex ? event.target.value : event.target.value.replace(/\D/g, ""))} inputMode={isOzon || isYandex ? "url" : "numeric"} placeholder={isOzon ? "https://www.ozon.ru/product/..." : isYandex ? "https://market.yandex.ru/product--.../..." : "Например, 123456789"} /></label><button className="primary-btn" type="submit" disabled={!manualCompetitorNmId || pricingCandidateUpdatingId !== null}>{pricingCandidateUpdatingId ? "Добавляем…" : "Добавить"}</button></form>
                     {pricingCandidatesError && <p className="pricing-candidate-error">{pricingCandidatesError}</p>}</section>}
                   <footer>{recommendation.detail}{selectedPricingRow.refreshError ? ` ${selectedPricingRow.refreshError}` : ""}</footer>

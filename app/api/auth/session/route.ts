@@ -5,5 +5,5 @@ export const dynamic = "force-dynamic";
 
 export async function GET(request: Request) {
   const session = await getAuthenticatedSession(request);
-  return NextResponse.json({ authenticated: Boolean(session), role: session?.role ?? null, cabinet: session ? cabinetSummary(session.cabinetId) : null, cabinets: session && session.role !== "media" ? availableCabinets(session.ownerId) : [] }, { headers: { "Cache-Control": "no-store" } });
+  return NextResponse.json({ authenticated: Boolean(session), role: session?.role ?? null, cabinet: session ? cabinetSummary(session.cabinetId) : null, cabinets: session && session.role !== "media" ? availableCabinets(session.ownerId, session.role) : [] }, { headers: { "Cache-Control": "no-store" } });
 }

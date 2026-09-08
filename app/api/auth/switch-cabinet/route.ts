@@ -11,7 +11,7 @@ export async function POST(request: Request) {
     const payload = await request.json() as { cabinetId?: string };
     const cabinetId = payload.cabinetId;
     if (!cabinetId || !cabinetIds.includes(cabinetId as CabinetId)) return NextResponse.json({ error: "Кампания не найдена" }, { status: 400, headers: { "Cache-Control": "no-store" } });
-    const cabinets = availableCabinets(session.ownerId);
+    const cabinets = availableCabinets(session.ownerId, session.role);
     if (!cabinets.some((cabinet) => cabinet.id === cabinetId)) return NextResponse.json({ error: "Нет доступа к этой кампании" }, { status: 403, headers: { "Cache-Control": "no-store" } });
 
     const token = await createAdminSession(session.ownerId, cabinetId as CabinetId, session.role);
