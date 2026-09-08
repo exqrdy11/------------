@@ -1,6 +1,6 @@
 "use client";
 
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { strFromU8, unzipSync } from "fflate";
 import { campaignRowsFromMatrix, campaignReportImportPeriod } from "../../lib/report-domain.mjs";
 import type { CatalogProduct } from "../../lib/report-domain";
@@ -10,6 +10,8 @@ type Props = {
   sourceFiles: string[];
   dateFrom: string;
   dateTo: string;
+  reports: Array<{ dateFrom: string; dateTo: string; sourceFile: string; importedAt: string; campaigns: number }>;
+  onDeleted: () => Promise<void>;
   onImported: (dateFrom: string, dateTo: string) => Promise<void>;
 };
 
@@ -65,12 +67,32 @@ async function responseJson<T>(response: Response) {
   }
 }
 
-export default function CampaignReportUpload({ exact, sourceFiles, dateFrom, dateTo, onImported }: Props) {
+export default function CampaignReportUpload({ exact, sourceFiles, dateFrom, dateTo, reports, onDeleted, onImported }: Props) {
   const inputRef = useRef<HTMLInputElement>(null);
   const [uploading, setUploading] = useState(false);
   const [message, setMessage] = useState("");
   const [pending, setPending] = useState<{ name: string; rows: ReturnType<typeof campaignRowsFromMatrix> } | null>(null);
   const [period, setPeriod] = useState({ dateFrom, dateTo });
+  const [confirmDelete, setConfirmDelete] = useState(false);
+  useEffect(() => { setConfirmDelete(false); setMessage(""); }, [dateFrom, dateTo]);
+
+  async function deleteReport() {
+    if (uploading) return;
+    setUploading(true);
+    try {
+      const response = await fetch("/api/rnp/campaign-reports", {
+        method: "DELETE", headers: { ...API_HEADERS, "Content-Type": "application/json" },
+        body: JSON.stringify({ dateFrom, dateTo }),
+      });
+      const payload = await responseJson<{ error?: string }>(response);
+      if (!response.ok) throw new Error(payload.error || "Не удалось удалить отчёт");
+      setConfirmDelete(false);
+      await onDeleted();
+      setMessage("Отчёт убран из расчётов. Данные API и другие периоды не изменены.");
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "Не удалось удалить отчёт");
+    } finally { setUploading(false); }
+  }
 
   async function importFile(file: File | undefined) {
     if (!file) return;
@@ -141,8 +163,8 @@ export default function CampaignReportUpload({ exact, sourceFiles, dateFrom, dat
       <div className="campaign-import-copy">
         <span className="campaign-import-icon">X</span>
         <div>
-          <strong>{exact ? "Итоги сверены с XLSX Ozon" : "Загрузите контрольный отчёт Ozon"}</strong>
-          <p>{exact ? "Показатели за период берутся из «Статистики по кампаниям», а не восстанавливаются по текущему списку РК." : "Загрузите исходный XLSX «Статистика по кампаниям» из Ozon. Переименовывать файл не нужно — период можно указать перед сохранением."}</p>
+          <strong>{exact ? "Источник: загруженный Excel Ozon" : "Отчёты Excel Ozon"}</strong>
+          <p>{exact ? "Итоги взяты из файла. Это не подтверждение совпадения с API. В сводном файле нет разбивки по дням — показываем итог за весь период." : "Загрузите исходный XLSX «Статистика по кампаниям» из Ozon. Переименовывать файл не нужно — период можно указать перед сохранением."}</p>
           {sourceFiles.length > 0 && <small>{sourceFiles.join(", ")}</small>}
           {message && <small className="campaign-import-message" role="status">{message}</small>}
         </div>
@@ -151,6 +173,21 @@ export default function CampaignReportUpload({ exact, sourceFiles, dateFrom, dat
         {uploading ? "Загружаю…" : exact ? "Заменить XLSX" : "Загрузить XLSX"}
         <input ref={inputRef} type="file" accept=".xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" disabled={uploading} onChange={(event) => void importFile(event.target.files?.[0])} />
       </label>
+      {exact && <button type="button" className="campaign-upload-button report-delete-button" disabled={uploading} onClick={() => setConfirmDelete(true)}>Удалить отчёт</button>}
+      {reports.length > 0 && <label className="saved-report-picker">Сохранённые отчёты
+        <select value={exact ? dateFrom + ":" + dateTo : ""} disabled={uploading} onChange={event => {
+          const selected = reports.find(report => report.dateFrom + ":" + report.dateTo === event.target.value);
+          if (selected) void onImported(selected.dateFrom, selected.dateTo);
+        }}>
+          <option value="" disabled>Выберите отчёт</option>
+          {reports.map(report => <option key={report.dateFrom + ":" + report.dateTo} value={report.dateFrom + ":" + report.dateTo}>{report.dateFrom} — {report.dateTo} · {report.campaigns} РК · {report.sourceFile}</option>)}
+        </select>
+      </label>}
+      {confirmDelete && <div className="campaign-import-confirm" role="alert">
+        <p>Убрать отчёт за {dateFrom} — {dateTo} из расчётов? Другие периоды и API останутся без изменений.</p>
+        <button type="button" className="campaign-upload-button report-delete-button" disabled={uploading} onClick={() => void deleteReport()}>Да, удалить отчёт</button>
+        <button type="button" className="campaign-upload-button" disabled={uploading} onClick={() => setConfirmDelete(false)}>Не удалять</button>
+      </div>}
       {pending && (
         <form className="campaign-import-confirm" onSubmit={(event) => { event.preventDefault(); void saveReport(); }}>
           <div className="campaign-import-confirm-copy">

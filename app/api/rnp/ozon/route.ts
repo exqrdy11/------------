@@ -1,5 +1,6 @@
 import { env, waitUntil } from "cloudflare:workers";
 import { getMediaSession } from "@/lib/admin-auth";
+import { collectCampaignPages } from "../../../../lib/report-domain.mjs";
 import {
   acquireOzonRefresh,
   cacheAgeMs,
@@ -74,6 +75,8 @@ type ReportPayload = {
   articles: unknown[];
   lastSync: string;
   message: string;
+  campaignCatalogCount?: number;
+  postViewAvailable?: boolean;
 };
 
 const CACHE_TTL_MS = 10 * 60 * 1000;
@@ -191,7 +194,7 @@ function addRow(
     : cell;
 }
 
-async function ozonJson(url: string, token: string) {
+async function ozonJson(url: string, token: string, attempt = 0): Promise<unknown> {
   const response = await fetch(url, {
     headers: {
       Authorization: "Bearer " + token,
@@ -199,6 +202,15 @@ async function ozonJson(url: string, token: string) {
       "Content-Type": "application/json",
     },
   });
+  if (response.status === 429 && attempt < 2) {
+    const retry = Number(response.headers.get("Retry-After"));
+    const delay = Number.isFinite(retry) && retry > 0 ? retry * 1000 : 2000 * (attempt + 1);
+    if (delay <= 15000) {
+      await response.text();
+      await new Promise(resolve => setTimeout(resolve, delay));
+      return ozonJson(url, token, attempt + 1);
+    }
+  }
   const text = await response.text();
   if (!response.ok) throw new Error("Ozon API: " + response.status + " " + text.slice(0, 180));
   try {
@@ -251,11 +263,11 @@ async function fetchLiveReport(
       throw new Error(tokenPayload.error || "Ozon отклонил Client ID или Client Secret");
     }
 
-    const campaignsPayload = await ozonJson(
-      "https://api-performance.ozon.ru/api/client/campaign?page=1&pageSize=100",
-      tokenPayload.access_token,
-    );
-    const campaigns = campaignList(campaignsPayload);
+    const campaigns: OzonCampaign[] = await collectCampaignPages(async (page: number) => {
+      if (page > 1) await new Promise(resolve => setTimeout(resolve, 1100));
+      const payload = await ozonJson("https://api-performance.ozon.ru/api/client/campaign?page=" + page + "&pageSize=1000", tokenPayload.access_token!) as { total?: string };
+      return { list: campaignList(payload), total: payload.total };
+    });
     const campaignMap = new Map<string, OzonCampaign>();
     campaigns.forEach((campaign) => {
       const id = campaignId(campaign);
@@ -271,12 +283,12 @@ async function fetchLiveReport(
       };
     }
 
-    const productIds = campaigns.filter((campaign) => !isMediaCampaign(campaign)).map(campaignId).filter(Boolean);
-    const mediaIds = campaigns.filter(isMediaCampaign).map(campaignId).filter(Boolean);
-    const [productRows, mediaRows] = await Promise.all([
-      statisticsRows("product", productIds, dateFrom, dateTo, tokenPayload.access_token),
-      statisticsRows("daily", mediaIds, dateFrom, dateTo, tokenPayload.access_token),
-    ]);
+    // Without campaignIds Ozon returns the account's daily rows, including older campaigns.
+    const dailyRows = statRows(await ozonJson("https://api-performance.ozon.ru/api/client/statistics/daily/json?" + new URLSearchParams({ dateFrom, dateTo }), tokenPayload.access_token));
+    const activeIds = new Set(dailyRows.filter(row => Object.values(rowCell(row)).some(value => value > 0)).map(row => String(row.campaignId ?? row.campaign_id ?? row.id)));
+    const productIds = campaigns.filter(campaign => !isMediaCampaign(campaign) && activeIds.has(campaignId(campaign))).map(campaignId).filter(Boolean);
+    const mediaRows = dailyRows.filter(row => isMediaCampaign(campaignMap.get(String(row.campaignId ?? row.campaign_id ?? row.id)) ?? {}));
+    const productRows = await statisticsRows("product", productIds, dateFrom, dateTo, tokenPayload.access_token);
 
     const productGrouped = new Map<string, GroupedCampaigns>();
     productRows.forEach((row) => {
@@ -338,6 +350,8 @@ async function fetchLiveReport(
     return {
       mode: "live",
       articles,
+      campaignCatalogCount: campaignMap.size,
+      postViewAvailable: mediaRows.length === 0 && productRows.length > 0 && productRows.every(row => firstValue(row.modelOrders, row.postViewOrders) !== undefined && firstValue(row.modelSales, row.postViewSales) !== undefined),
       lastSync: new Date().toLocaleTimeString("ru-RU", { hour: "2-digit", minute: "2-digit" }),
       message: articles.length
         ? ""
@@ -420,7 +434,7 @@ async function handleReport(request: Request, force: boolean) {
     }, 503);
   }
   const secrets = runtime as Required<RuntimeSecrets>;
-  const cacheKey = `performance:v2:${period.dateFrom}:${period.dateTo}`;
+  const cacheKey = `performance:v3:${period.dateFrom}:${period.dateTo}`;
 
   let row: OzonCacheRow | null;
   try {

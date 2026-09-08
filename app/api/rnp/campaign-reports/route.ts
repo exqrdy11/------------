@@ -1,5 +1,6 @@
 import { env } from "cloudflare:workers";
-import { aggregateCampaignRows, buildCampaignReport } from "../../../../lib/report-domain.mjs";
+import { aggregateCampaignRows, buildCampaignReport, campaignReportImportPeriod } from "../../../../lib/report-domain.mjs";
+import { archiveCampaignReport } from "../../../../db/campaign-report-archive.mjs";
 import { getMediaSession } from "@/lib/admin-auth";
 
 type IncomingRow = {
@@ -65,6 +66,7 @@ function finiteNumber(value: unknown) {
 
 async function ensureSchema(db: D1Database) {
   await db.batch([
+    db.prepare("CREATE TABLE IF NOT EXISTS campaign_deleted_reports (date_from TEXT NOT NULL, date_to TEXT NOT NULL, deleted_at TEXT NOT NULL, PRIMARY KEY(date_from, date_to))"),
     db.prepare("CREATE TABLE IF NOT EXISTS campaign_period_stats (id INTEGER PRIMARY KEY AUTOINCREMENT, date_from TEXT NOT NULL, date_to TEXT NOT NULL, campaign_id TEXT NOT NULL, campaign_name TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'paused', format TEXT NOT NULL DEFAULT 'Медийная реклама', payment_type TEXT NOT NULL DEFAULT 'CPC', impressions INTEGER NOT NULL DEFAULT 0, clicks INTEGER NOT NULL DEFAULT 0, expense REAL NOT NULL DEFAULT 0, direct_orders INTEGER NOT NULL DEFAULT 0, post_view_orders INTEGER NOT NULL DEFAULT 0, direct_sales REAL NOT NULL DEFAULT 0, post_view_sales REAL NOT NULL DEFAULT 0, source_file TEXT NOT NULL DEFAULT '', imported_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, UNIQUE(date_from, date_to, campaign_id))"),
     db.prepare("CREATE INDEX IF NOT EXISTS idx_campaign_period_stats_period ON campaign_period_stats (date_from, date_to)"),
     db.prepare("CREATE TABLE IF NOT EXISTS campaign_article_mappings (campaign_id TEXT PRIMARY KEY, article_sku TEXT NOT NULL, article_offer_id TEXT NOT NULL, article_name TEXT NOT NULL DEFAULT '', mapping_source TEXT NOT NULL DEFAULT 'auto', updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)"),
@@ -108,11 +110,12 @@ export async function GET(request: Request) {
     }
     const db = database();
     await ensureSchema(db);
-    const result = await db.prepare("SELECT s.date_from, s.date_to, s.campaign_id, s.campaign_name, s.status, s.format, s.payment_type, s.impressions, s.clicks, s.expense, s.direct_orders, s.post_view_orders, s.direct_sales, s.post_view_sales, s.source_file, s.imported_at, m.article_sku, m.article_offer_id, m.article_name, m.mapping_source FROM campaign_period_stats s LEFT JOIN campaign_article_mappings m ON m.campaign_id = s.campaign_id WHERE (s.date_from = ? AND s.date_to = ?) OR (s.date_from = s.date_to AND s.date_from >= ? AND s.date_to <= ?) ORDER BY s.campaign_name, s.campaign_id")
+    const result = await db.prepare("SELECT s.date_from, s.date_to, s.campaign_id, s.campaign_name, s.status, s.format, s.payment_type, s.impressions, s.clicks, s.expense, s.direct_orders, s.post_view_orders, s.direct_sales, s.post_view_sales, s.source_file, s.imported_at, m.article_sku, m.article_offer_id, m.article_name, m.mapping_source FROM campaign_period_stats s LEFT JOIN campaign_article_mappings m ON m.campaign_id = s.campaign_id WHERE ((s.date_from = ? AND s.date_to = ?) OR (s.date_from = s.date_to AND s.date_from >= ? AND s.date_to <= ?)) AND NOT EXISTS (SELECT 1 FROM campaign_deleted_reports d WHERE d.date_from = s.date_from AND d.date_to = s.date_to) ORDER BY s.campaign_name, s.campaign_id")
       .bind(dateFrom, dateTo, dateFrom, dateTo)
       .all<StoredRow>();
     const report = buildCampaignReport((result.results ?? []).map(storedRow), dateFrom, dateTo);
-    return Response.json({ ...report, mode: report.articles.length ? "xlsx" : "empty" });
+    const saved = await db.prepare("SELECT s.date_from AS dateFrom, s.date_to AS dateTo, COUNT(*) AS campaigns, GROUP_CONCAT(DISTINCT s.source_file) AS sourceFile, MAX(s.imported_at) AS importedAt FROM campaign_period_stats s WHERE NOT EXISTS (SELECT 1 FROM campaign_deleted_reports d WHERE d.date_from = s.date_from AND d.date_to = s.date_to) GROUP BY s.date_from,s.date_to ORDER BY importedAt DESC").all();
+    return Response.json({ ...report, reports: saved.results ?? [], mode: report.articles.length ? "xlsx" : "empty" });
   } catch (error) {
     return Response.json({ error: error instanceof Error ? error.message : "Не удалось загрузить отчёт Ozon" }, { status: 500 });
   }
@@ -171,9 +174,26 @@ export async function POST(request: Request) {
       await db.batch(batch);
     }
     const totals = aggregateCampaignRows(rows);
+    await db.prepare("DELETE FROM campaign_deleted_reports WHERE date_from = ? AND date_to = ?").bind(payload.dateFrom, payload.dateTo).run();
     return Response.json({ ok: true, campaigns: rows.length, totals });
   } catch (error) {
     return Response.json({ error: error instanceof Error ? error.message : "Не удалось импортировать отчёт" }, { status: 500 });
+  }
+}
+
+export async function DELETE(request: Request) {
+  if (!await getMediaSession(request)) return Response.json({ error: "Требуется вход" }, { status: 401 });
+  try {
+    const payload = await request.json();
+    const period = campaignReportImportPeriod("", payload);
+    if (!period) return Response.json({ error: "Укажите точный период удаляемого отчёта" }, { status: 400 });
+    const db = database();
+    await ensureSchema(db);
+    const result = await archiveCampaignReport(db, period.dateFrom, period.dateTo);
+    if (!result.meta?.changes) return Response.json({ error: "Отчёт за этот период не найден" }, { status: 404 });
+    return Response.json({ ok: true, archived: true });
+  } catch (error) {
+    return Response.json({ error: error instanceof Error ? error.message : "Не удалось удалить отчёт" }, { status: 500 });
   }
 }
 

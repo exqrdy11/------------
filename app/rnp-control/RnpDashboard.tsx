@@ -1,7 +1,7 @@
 "use client";
 
-import { FormEvent, useCallback, useEffect, useMemo, useState } from "react";
-import { articleReferenceMatches, mergeCampaignReportArticles } from "../../lib/report-domain.mjs";
+import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { articleReferenceMatches, selectCampaignSource, compareCampaignSources } from "../../lib/report-domain.mjs";
 import CampaignReportUpload from "./CampaignReportUpload";
 import MediaQueries from "./MediaQueries";
 
@@ -93,12 +93,12 @@ const metricRows: Array<{ key: MetricKey; label: string; hint: string }> = [
   { key: "ctr", label: "CTR", hint: "%" },
   { key: "cost", label: "CPM / CPC", hint: "₽" },
   { key: "expense", label: "Расход", hint: "₽" },
-  { key: "directOrders", label: "Продажи во время РК", hint: "шт. · прямые" },
-  { key: "postViewOrders", label: "Продажи после РК", hint: "шт. · post-view" },
-  { key: "orders", label: "Продажи всего", hint: "шт. · во время + после" },
-  { key: "directSales", label: "Продажи во время РК", hint: "₽ · прямые" },
-  { key: "postViewSales", label: "Продажи после РК", hint: "₽ · post-view" },
-  { key: "sales", label: "Продажи всего", hint: "₽ · во время + после" },
+  { key: "directOrders", label: "Прямые продажи", hint: "шт." },
+  { key: "postViewOrders", label: "Продажи после просмотра", hint: "шт. · post-view" },
+  { key: "orders", label: "Продано по данным источника", hint: "шт." },
+  { key: "directSales", label: "Прямые продажи", hint: "₽" },
+  { key: "postViewSales", label: "Продажи после просмотра", hint: "₽ · post-view" },
+  { key: "sales", label: "Продажи по данным источника", hint: "₽" },
   { key: "drr", label: "ДРР", hint: "%" },
 ];
 
@@ -223,10 +223,31 @@ export default function Dashboard() {
   const [reportArticles, setReportArticles] = useState<Article[]>([]);
   const [reportExact, setReportExact] = useState(false);
   const [reportSourceFiles, setReportSourceFiles] = useState<string[]>([]);
-  const articles = useMemo(
-    () => mergeCampaignReportArticles(reportArticles, apiArticles),
-    [reportArticles, apiArticles],
-  );
+  const [dataSource, setDataSource] = useState<"api" | "xlsx">("api");
+  const [apiPeriod, setApiPeriod] = useState("");
+  const [reportPeriod, setReportPeriod] = useState("");
+  const [reportError, setReportError] = useState("");
+  const [savedReports, setSavedReports] = useState<Array<{ dateFrom: string; dateTo: string; sourceFile: string; importedAt: string; campaigns: number }>>([]);
+  const [apiPostViewAvailable, setApiPostViewAvailable] = useState(false);
+  const reportSequence = useRef(0);
+  const apiSequence = useRef(0);
+  const periodKey = dateFrom + ":" + dateTo;
+  const currentApi = useMemo(() => apiPeriod === periodKey ? apiArticles : [], [apiPeriod, periodKey, apiArticles]);
+  const currentExcel = useMemo(() => reportPeriod === periodKey ? reportArticles : [], [reportPeriod, periodKey, reportArticles]);
+  const exactExcel = reportPeriod === periodKey && reportExact;
+  const articles: Article[] = useMemo(() => selectCampaignSource(dataSource, currentApi, currentExcel), [dataSource, currentApi, currentExcel]);
+  const comparison = useMemo(() => compareCampaignSources(currentApi, currentExcel), [currentApi, currentExcel]);
+  const reportDates = dataSource === "xlsx" && exactExcel ? ["period"] : dates;
+  const sourceReady = (dataSource === "api" ? apiPeriod : reportPeriod) === periodKey;
+  const postViewAvailable = dataSource === "xlsx" || apiPostViewAvailable;
+  const reportCell = (campaign: Campaign, date: string) => date === "period" ? campaign.periodTotals : campaign.dates[date];
+  function changeSource(source: "api" | "xlsx") {
+    setDataSource(source);
+    try { localStorage.setItem("skladno-media-source", source); } catch { /* Browser storage may be unavailable. */ }
+  }
+  useEffect(() => {
+    try { if (localStorage.getItem("skladno-media-source") === "xlsx") setDataSource("xlsx"); } catch { /* Default to API. */ }
+  }, []);
   const [tab, setTab] = useState<Tab>("campaigns");
   const [expanded, setExpanded] = useState<Set<string>>(() => new Set());
   const [collapsedArticles, setCollapsedArticles] = useState<Set<string>>(() => new Set());
@@ -312,24 +333,31 @@ export default function Dashboard() {
   }, []);
 
   const loadCampaignReport = useCallback(async () => {
+    const sequence = ++reportSequence.current;
+    setReportError("");
     try {
       const response = await fetch("/api/rnp/campaign-reports?dateFrom=" + encodeURIComponent(dateFrom) + "&dateTo=" + encodeURIComponent(dateTo), { cache: "no-store", headers: API_HEADERS });
-      const payload = await response.json() as { articles?: Article[]; exact?: boolean; sourceFiles?: string[]; error?: string };
+      const payload = await response.json() as { articles?: Article[]; exact?: boolean; sourceFiles?: string[]; reports?: typeof savedReports; error?: string };
+      if (sequence !== reportSequence.current) return;
       if (!response.ok) throw new Error(payload.error || "Не удалось загрузить контрольный отчёт");
       const nextArticles = Array.isArray(payload.articles) ? payload.articles : [];
       setReportArticles(nextArticles);
       setReportExact(Boolean(payload.exact));
       setReportSourceFiles(Array.isArray(payload.sourceFiles) ? payload.sourceFiles : []);
-      if (nextArticles.length) setMode("xlsx");
+      setSavedReports(payload.reports ?? []);
+      setReportPeriod(dateFrom + ":" + dateTo);
     } catch (error) {
+      if (sequence !== reportSequence.current) return;
       setReportArticles([]);
       setReportExact(false);
       setReportSourceFiles([]);
-      setNotice(error instanceof Error ? error.message : "Не удалось загрузить контрольный отчёт");
+      setReportError(error instanceof Error ? error.message : "Не удалось загрузить контрольный отчёт");
+      setReportPeriod("");
     }
   }, [dateFrom, dateTo]);
 
   const refreshData = useCallback(async (options: { force?: boolean; silent?: boolean } = {}) => {
+    const sequence = ++apiSequence.current;
     if (!options.silent) {
       setSyncing(true);
       setNotice("");
@@ -347,10 +375,14 @@ export default function Dashboard() {
         message?: string;
         error?: string;
         refreshing?: boolean;
+        postViewAvailable?: boolean;
       };
+      if (sequence !== apiSequence.current) return;
       if (!response.ok) throw new Error(payload.error || "Не удалось получить данные Ozon");
       if (payload.mode === "live" && Array.isArray(payload.articles)) {
         setApiArticles(payload.articles);
+        setApiPeriod(dateFrom + ":" + dateTo);
+        setApiPostViewAvailable(Boolean(payload.postViewAvailable));
         setMode("live");
       } else if (payload.mode === "loading") {
         setMode((current) => current === "live" ? current : "loading");
@@ -360,6 +392,7 @@ export default function Dashboard() {
       else if (payload.lastSync) setLastSync(payload.lastSync);
       setNotice(payload.message || "");
     } catch (error) {
+      if (sequence !== apiSequence.current) return;
       setServerRefreshing(false);
       setMode((current) => current === "xlsx" ? current : "error");
       setNotice(error instanceof Error ? error.message : "Данные временно недоступны");
@@ -407,18 +440,22 @@ export default function Dashboard() {
 
   useEffect(() => {
     if (!periodReady) return;
+    let cancelled = false;
     const initialTimer = window.setTimeout(() => {
       void (async () => {
         await loadCampaignReport();
-        await refreshData();
+        if (!cancelled) await refreshData();
       })();
       void loadTasks();
       void loadCatalogProducts();
     }, 0);
     const timer = window.setInterval(() => void refreshData({ silent: true }), 60_000);
     return () => {
+      cancelled = true;
       window.clearTimeout(initialTimer);
       window.clearInterval(timer);
+      reportSequence.current++;
+      apiSequence.current++;
     };
   }, [periodReady, refreshData, loadTasks, loadCampaignReport, loadCatalogProducts]);
 
@@ -684,8 +721,8 @@ export default function Dashboard() {
         <div className="sync-status">
           <span className={"status-dot " + mode} />
           <div>
-            <strong>{mode === "live" ? "Ozon подключён" : mode === "xlsx" ? "Данные из XLSX Ozon" : mode === "loading" ? "Загружаем данные" : "Ошибка обновления"}</strong>
-            <span>Обновлено: {lastSync}</span>
+            <strong>{tab === "campaigns" && dataSource === "xlsx" ? "Источник: Excel" : mode === "live" ? "Ozon подключён" : mode === "loading" ? "Загружаем данные" : "Ошибка обновления"}</strong>
+            <span>API обновлено: {lastSync}</span>
           </div>
         </div>
       </header>
@@ -720,7 +757,7 @@ export default function Dashboard() {
                   <button type="button" className="apply-period-button" onClick={applyCustomPeriod} disabled={periodSaving}>{periodSaving ? "Сохраняю" : "Применить для всех"}</button>
                 </div>
               )}
-              <button className="primary-button" onClick={() => tab === "notes" ? void loadNotes() : tab === "queries" ? setQueryReloadToken((value) => value + 1) : void refreshData({ force: true })} disabled={syncing || catalogLoading}>
+              <button className="primary-button" onClick={() => tab === "notes" ? void loadNotes() : tab === "queries" ? setQueryReloadToken((value) => value + 1) : dataSource === "xlsx" ? void loadCampaignReport() : void refreshData({ force: true })} disabled={syncing || catalogLoading}>
                 <span className={(syncing || catalogLoading) ? "spin" : ""}>↻</span>
                 {(syncing || catalogLoading) ? "Обновляю" : "Обновить"}
               </button>
@@ -731,12 +768,23 @@ export default function Dashboard() {
 
         {tab === "campaigns" && (
           <>
+            <section className="report-source-panel">
+              <div className="report-source-switch" role="group" aria-label="Источник статистики">
+                <button type="button" aria-pressed={dataSource === "api"} className={dataSource === "api" ? "active" : ""} onClick={() => changeSource("api")}>По API</button>
+                <button type="button" aria-pressed={dataSource === "xlsx"} className={dataSource === "xlsx" ? "active" : ""} onClick={() => changeSource("xlsx")}>По Excel</button>
+              </div>
+              <p>{dataSource === "api" ? "Только данные API Ozon. Загрузка Excel не меняет этот режим." : "Только сохранённые Excel-отчёты. Данные API сюда не подмешиваются."}</p>
+            </section>
+            {dataSource === "xlsx" && <>
             <CampaignReportUpload
-              exact={reportExact}
-              sourceFiles={reportSourceFiles}
+              exact={exactExcel}
+              sourceFiles={reportPeriod === periodKey ? reportSourceFiles : []}
               dateFrom={dateFrom}
               dateTo={dateTo}
+              reports={savedReports}
+              onDeleted={loadCampaignReport}
               onImported={async (nextFrom, nextTo) => {
+                changeSource("xlsx");
                 if (nextFrom !== dateFrom || nextTo !== dateTo) {
                   await saveSharedPeriod({ dateFrom: nextFrom, dateTo: nextTo, preset: "custom" });
                 } else {
@@ -744,16 +792,29 @@ export default function Dashboard() {
                 }
               }}
             />
+            {reportError && <p className="inline-notice">{reportError}</p>}
+            {sourceReady && !currentExcel.length && <p className="inline-notice">За выбранный период Excel-отчёта нет. Выберите сохранённый отчёт или загрузите файл. API доступен отдельным переключателем.</p>}
+            </>}
+            {dataSource === "api" && !postViewAvailable && <p className="inline-notice">Дневной API не возвращает продажи после просмотра баннеров. «—» означает нет данных, а не ноль. Продажи и ДРР ниже рассчитаны только по доступным API показателям; они не равны полным итогам Excel.</p>}
+            {sourceReady && articles.length > 0 && <>
             <section className="kpi-grid" aria-label="Ключевые показатели">
               <Kpi label="Расход" value={money(totals.expense)} tone="blue" onClick={() => setActiveKpi("expense")} />
-              <Kpi label="Продажи всего · во время + после" value={money(totalSales)} tone="green" onClick={() => setActiveKpi("sales")} />
-              <Kpi label="Продано всего · во время + после" value={compact(totalOrders) + " шт."} tone="violet" onClick={() => setActiveKpi("orders")} />
-              <Kpi label="ДРР" value={totalDrr.toFixed(1).replace(".", ",") + "%"} tone={totalDrr > 15 ? "coral" : "green"} onClick={() => setActiveKpi("drr")} />
+              <Kpi label={postViewAvailable ? "Продажи · прямые + после просмотра" : "Продажи по данным API · неполные"} value={money(totalSales)} tone="green" onClick={() => setActiveKpi("sales")} />
+              <Kpi label={postViewAvailable ? "Продано · прямые + после просмотра" : "Заказано по данным API · неполные"} value={compact(totalOrders) + " шт."} tone="violet" onClick={() => setActiveKpi("orders")} />
+              <Kpi label={postViewAvailable ? "ДРР" : "ДРР по доступным данным API"} value={totalDrr.toFixed(1).replace(".", ",") + "%"} tone={totalDrr > 15 ? "coral" : "green"} onClick={() => setActiveKpi("drr")} />
               <Kpi label="CTR" value={totalCtr.toFixed(2).replace(".", ",") + "%"} tone="blue" onClick={() => setActiveKpi("ctr")} />
             </section>
+            </>}
+            {apiPeriod === periodKey && reportPeriod === periodKey && currentExcel.length > 0 && <details className="campaign-source-comparison">
+              <summary>Сверка API и Excel · {comparison.apiCount} / {comparison.xlsxCount} кампаний · расход {money(comparison.apiTotals.expense)} / {money(comparison.xlsxTotals.expense)}</summary>
+              <p>Сопоставление по ID кампании за {dateFrom} — {dateTo}. Разница = Excel − API. Отсутствующая кампания отмечена «—». Прямые продажи сравниваем отдельно, без продаж после просмотра.</p>
+              <div className="table-scroll"><table><thead><tr><th>Кампания</th><th>Расход API</th><th>Расход Excel</th><th>Разница</th><th>Прямые продажи API</th><th>Прямые продажи Excel</th></tr></thead><tbody>
+                {comparison.rows.map(row => <tr key={row.id}><td>{row.name}<small>№ {row.id}{!row.api ? " · нет в API" : !row.xlsx ? " · нет в Excel" : ""}</small></td><td>{row.api ? money(row.api.expense, 2) : "—"}</td><td>{row.xlsx ? money(row.xlsx.expense, 2) : "—"}</td><td>{money(row.expenseDelta, 2)}</td><td>{row.api ? money(row.api.directSales, 2) : "—"}</td><td>{row.xlsx ? money(row.xlsx.directSales, 2) : "—"}</td></tr>)}
+              </tbody></table></div>
+            </details>}
 
             {activeKpi && (
-              <KpiDrilldown metric={activeKpi} rows={kpiRows} onClose={() => setActiveKpi(null)} />
+              <KpiDrilldown metric={activeKpi} rows={kpiRows} postViewAvailable={postViewAvailable} onClose={() => setActiveKpi(null)} />
             )}
 
             {taskTarget && (
@@ -806,7 +867,7 @@ export default function Dashboard() {
                   </button>
                 </div>
               </div>
-              {notice && (
+              {notice && dataSource === "api" && (
                 <div className="inline-notice">
                   <span>i</span>
                   <p><strong>Сообщение Ozon</strong> {notice}</p>
@@ -818,17 +879,18 @@ export default function Dashboard() {
                   <thead>
                     <tr>
                       <th className="sticky-col">Артикул / рекламная кампания</th>
-                      {dates.map((date) => <th key={date}><strong>{shortDate(date)}</strong><span>расход</span></th>)}
+                      {reportDates.map((date) => <th key={date}><strong>{date === "period" ? shortDate(dateFrom) + " — " + shortDate(dateTo) : shortDate(date)}</strong><span>{date === "period" ? "Итого за период · Excel" : "расход"}</span></th>)}
                     </tr>
                   </thead>
                   <tbody>
+                    {!articles.length && <tr><td colSpan={reportDates.length + 1}>{!sourceReady ? "Данные выбранного периода ещё не загружены." : dataSource === "xlsx" ? "Нет Excel-отчёта за выбранный период." : "API не вернул кампаний за выбранный период."}</td></tr>}
                     {filteredArticles.map((article) => {
                       const isArticleCollapsed = collapsedArticles.has(article.sku);
                       const articleLogs = tasks.filter((task) => articleReferenceMatches(task.article, article) && task.activityDate === dateTo);
                       const articleTask = articleLogs.find((task) => task.status === "open") ?? articleLogs[0];
-                      const articleByDate = Object.fromEntries(dates.map((date) => [
+                      const articleByDate = Object.fromEntries(reportDates.map((date) => [
                         date,
-                        sumCells(article.campaigns.map((campaign) => campaign.dates[date] ?? zeroCell)),
+                        article.campaigns.some(campaign => reportCell(campaign, date)) ? sumCells(article.campaigns.map((campaign) => reportCell(campaign, date) ?? zeroCell)) : null,
                       ]));
                       return [
                         <tr className="article-row" key={"article-" + article.sku}>
@@ -852,7 +914,7 @@ export default function Dashboard() {
                               </div>
                             </div>
                           </td>
-                          {dates.map((date) => <td key={date}><strong>{money(articleByDate[date].expense)}</strong><span className="cell-sub">{articleByDate[date].clicks.toLocaleString("ru-RU")} кликов</span></td>)}
+                          {reportDates.map((date) => <td key={date}><strong>{articleByDate[date] ? money(articleByDate[date]!.expense) : "—"}</strong>{articleByDate[date] && <span className="cell-sub">{articleByDate[date]!.clicks.toLocaleString("ru-RU")} кликов</span>}</td>)}
                         </tr>,
                         ...(isArticleCollapsed ? [] : article.campaigns.flatMap((campaign) => {
                           const isOpen = expanded.has(campaign.id);
@@ -875,9 +937,9 @@ export default function Dashboard() {
                                   </label>
                                 )}
                               </td>
-                              {dates.map((date) => {
-                                const cell = campaign.dates[date] ?? zeroCell;
-                                return <td key={date}><strong>{money(cell.expense)}</strong><span className="cell-sub">ДРР {formatMetric(cell, "drr", campaign.paymentType)}</span></td>;
+                              {reportDates.map((date) => {
+                                const cell = reportCell(campaign, date);
+                                return <td key={date}><strong>{cell ? money(cell.expense) : "—"}</strong>{cell && <span className="cell-sub">ДРР {formatMetric(cell, "drr", campaign.paymentType)}</span>}</td>;
                               })}
                             </tr>,
                           ];
@@ -891,12 +953,13 @@ export default function Dashboard() {
                                     <div><strong>{metric.label}</strong><small>{metric.hint}</small></div>
                                     <em title={`Показатель за ${shortDate(dateFrom)} — ${shortDate(dateTo)}`}>
                                       <small>{metric.key === "cost" ? "Ср. CPM / CPC" : metric.key === "ctr" || metric.key === "drr" ? "За период" : "Итого"}</small>
-                                      <b>{formatMetric(periodCell, metric.key, campaign.paymentType)}</b>
+                                      <b>{!postViewAvailable && ["postViewOrders", "postViewSales"].includes(metric.key) ? "—" : formatMetric(periodCell, metric.key, campaign.paymentType)}</b>
                                     </em>
                                   </div>
                                 </td>
-                                {dates.map((date) => {
-                                  const cell = campaign.dates[date] ?? zeroCell;
+                                {reportDates.map((date) => {
+                                  const cell = reportCell(campaign, date);
+                                  if (!cell || (!postViewAvailable && ["postViewOrders", "postViewSales"].includes(metric.key))) return <td key={date}>—</td>;
                                   const value = metricNumber(cell, metric.key, campaign.paymentType);
                                   return <td key={date} className={metric.key === "drr" && value > 15 ? "bad-value" : ""}>{formatMetric(cell, metric.key, campaign.paymentType)}</td>;
                                 })}
@@ -1019,13 +1082,13 @@ function Kpi({ label, value, tone, onClick }: { label: string; value: string; to
 
 const kpiTitles: Record<KpiKey, { title: string; note: string; value: string }> = {
   expense: { title: "Кто расходует бюджет", note: "Кампании отсортированы по расходу — самые затратные сверху.", value: "Расход" },
-  sales: { title: "Что продалось с рекламой", note: "Итого в рублях: продажи во время РК + продажи после РК (post-view).", value: "Продажи" },
-  orders: { title: "Какие товары проданы", note: "Итого в штуках: продажи во время РК + продажи после РК (post-view).", value: "Штук" },
+  sales: { title: "Что продалось с рекламой", note: "Итого в рублях: прямые продажи + продажи после просмотра (post-view).", value: "Продажи" },
+  orders: { title: "Какие товары проданы", note: "Итого в штуках: прямые продажи + продажи после просмотра (post-view).", value: "Штук" },
   drr: { title: "Кто сильнее всего разгоняет ДРР", note: "Сначала кампании без продаж, затем — с самым высоким ДРР.", value: "ДРР" },
   ctr: { title: "CTR по кампаниям", note: "Кампании отсортированы по кликабельности объявлений.", value: "CTR" },
 };
 
-function KpiDrilldown({ metric, rows, onClose }: { metric: KpiKey; rows: KpiBreakdownRow[]; onClose: () => void }) {
+function KpiDrilldown({ metric, rows, postViewAvailable, onClose }: { metric: KpiKey; rows: KpiBreakdownRow[]; postViewAvailable: boolean; onClose: () => void }) {
   const meta = kpiTitles[metric];
 
   function primaryValue(row: KpiBreakdownRow) {
@@ -1038,8 +1101,8 @@ function KpiDrilldown({ metric, rows, onClose }: { metric: KpiKey; rows: KpiBrea
 
   function contextValue(row: KpiBreakdownRow) {
     if (metric === "expense") return "Продажи " + money(row.sales) + " · " + (row.drr == null ? "без продаж" : "ДРР " + row.drr.toFixed(1).replace(".", ",") + "%");
-    if (metric === "sales") return "Во время " + money(row.cell.directSales) + " · после " + money(row.cell.modelSales) + " · " + Math.round(row.orders).toLocaleString("ru-RU") + " шт.";
-    if (metric === "orders") return "Во время " + Math.round(row.cell.directOrders).toLocaleString("ru-RU") + " · после " + Math.round(row.cell.modelOrders).toLocaleString("ru-RU") + " · продажи " + money(row.sales);
+    if (metric === "sales") return "Прямые " + money(row.cell.directSales) + " · после просмотра " + (postViewAvailable ? money(row.cell.modelSales) : "нет полных данных") + " · " + Math.round(row.orders).toLocaleString("ru-RU") + " шт.";
+    if (metric === "orders") return "Прямые " + Math.round(row.cell.directOrders).toLocaleString("ru-RU") + " · после просмотра " + (postViewAvailable ? Math.round(row.cell.modelOrders).toLocaleString("ru-RU") : "нет полных данных") + " · продажи " + money(row.sales);
     if (metric === "drr") return "Расход " + money(row.cell.expense) + " · продажи " + money(row.sales);
     return row.cell.views.toLocaleString("ru-RU") + " показов · " + row.cell.clicks.toLocaleString("ru-RU") + " кликов";
   }
@@ -1048,7 +1111,7 @@ function KpiDrilldown({ metric, rows, onClose }: { metric: KpiKey; rows: KpiBrea
     <div className="drilldown-backdrop" role="button" tabIndex={0} aria-label="Закрыть детализацию" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }} onKeyDown={(event) => { if (event.key === "Escape" || (event.key === "Enter" && event.target === event.currentTarget)) onClose(); }}>
       <section className="drilldown-dialog" role="dialog" aria-modal="true" aria-labelledby="drilldown-title">
         <div className="drilldown-head">
-          <div><p className="eyebrow">Детализация показателя</p><h2 id="drilldown-title">{meta.title}</h2><span>{meta.note}</span></div>
+          <div><p className="eyebrow">Детализация показателя</p><h2 id="drilldown-title">{meta.title}</h2><span>{postViewAvailable ? meta.note : "По доступным данным API. Продажи после просмотра баннеров не включены."}</span></div>
           <button type="button" onClick={onClose} aria-label="Закрыть">×</button>
         </div>
         <div className="drilldown-scroll">
