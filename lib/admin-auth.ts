@@ -83,6 +83,11 @@ export function sessionForCredentials(login: string, password: string): AdminSes
   if (constantTimeEqual(login, owner.login) && constantTimeEqual(password, owner.password)) {
     return { ownerId: "metanutrix", cabinetId: "metanutrix", role: "owner" };
   }
+  const additionalLogin = process.env.ADDITIONAL_OWNER_LOGIN?.trim();
+  const additionalPassword = process.env.ADDITIONAL_OWNER_PASSWORD;
+  if (additionalLogin && additionalPassword && constantTimeEqual(login, additionalLogin) && constantTimeEqual(password, additionalPassword)) {
+    return { ownerId: "metanutrix", cabinetId: "metanutrix", role: "owner" };
+  }
   const viewer = viewerCredentials();
   if (constantTimeEqual(login, viewer.login) && constantTimeEqual(password, viewer.password)) {
     return { ownerId: "metanutrix", cabinetId: "metanutrix", role: "viewer" };
