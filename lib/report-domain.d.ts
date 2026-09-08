@@ -25,6 +25,7 @@ export function matchCampaignProduct(campaignName: string, products: CatalogProd
 export function aggregateCampaignRows(rows: Array<Record<string, unknown>>): Record<string, number>;
 export function aggregateMediaQueryRows<T>(rows: T[]): T[];
 export function periodFromReportFilename(filename: string): { dateFrom: string; dateTo: string } | null;
+export function campaignReportImportPeriod(filename: string, selectedPeriod?: { dateFrom: string; dateTo: string }): { dateFrom: string; dateTo: string } | null;
 export function campaignRowsFromMatrix(matrix: unknown[][], sourceFile: string, products: CatalogProduct[]): CampaignImportRow[];
 export function buildCampaignReport(rows: Array<Record<string, unknown>>, dateFrom: string, dateTo: string): {
   exact: boolean;
@@ -33,4 +34,3 @@ export function buildCampaignReport(rows: Array<Record<string, unknown>>, dateFr
   sourceFiles: string[];
 };
 export function mergeCampaignReportArticles<T>(importedArticles: T[], apiArticles: T[]): T[];
-

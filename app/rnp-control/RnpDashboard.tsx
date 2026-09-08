@@ -734,6 +734,8 @@ export default function Dashboard() {
             <CampaignReportUpload
               exact={reportExact}
               sourceFiles={reportSourceFiles}
+              dateFrom={dateFrom}
+              dateTo={dateTo}
               onImported={async (nextFrom, nextTo) => {
                 if (nextFrom !== dateFrom || nextTo !== dateTo) {
                   await saveSharedPeriod({ dateFrom: nextFrom, dateTo: nextTo, preset: "custom" });

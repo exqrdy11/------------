@@ -324,6 +324,7 @@ select:focus {
 
 .campaign-import-card {
   display: flex;
+  flex-wrap: wrap;
   min-height: 78px;
   margin-top: 22px;
   padding: 14px 16px;
@@ -386,6 +387,22 @@ select:focus {
 }
 
 .campaign-upload-button input { display: none; }
+.campaign-upload-button:disabled { opacity: .55; cursor: wait; }
+.campaign-import-copy { flex: 1 1 300px; }
+.campaign-import-confirm {
+  display: flex;
+  flex: 1 0 100%;
+  min-width: 0;
+  align-items: flex-end;
+  flex-wrap: wrap;
+  gap: 12px;
+  padding-top: 14px;
+  border-top: 1px solid #dfe5ee;
+}
+.campaign-import-confirm-copy { flex-basis: 100%; min-width: 0; font-size: 12px; overflow-wrap: anywhere; }
+.campaign-import-confirm-copy p { margin: 6px 0 0; color: var(--muted); font-size: 11px; }
+.campaign-import-confirm > label { display: grid; gap: 5px; font-size: 11px; color: var(--muted); }
+.campaign-import-confirm input { height: 36px; max-width: 100%; padding: 0 10px; border: 1px solid #cbd6e8; border-radius: 8px; background: #fff; color: var(--ink); font: inherit; }
 
 .kpi {
   position: relative;
@@ -2169,4 +2186,3 @@ select:focus {
 }
 
 }
-
