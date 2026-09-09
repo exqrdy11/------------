@@ -6,7 +6,7 @@ export const cabinetIds = ["metanutrix", "ozon", "yandex"] as const;
 export type CabinetId = typeof cabinetIds[number];
 export type MarketplaceKind = "wb" | "ozon" | "yandex";
 export type CabinetSummary = { id: CabinetId; name: string; configured: boolean; marketplace: MarketplaceKind };
-export type UserRole = "owner" | "viewer" | "media" | "yandex-manager";
+export type UserRole = "owner" | "viewer" | "media" | "yandex-manager" | "wb-manager";
 export type AdminSession = { ownerId: CabinetId; cabinetId: CabinetId; role: UserRole };
 
 function constantTimeEqual(left: string, right: string) {
@@ -101,13 +101,21 @@ export function sessionForCredentials(login: string, password: string): AdminSes
   if (managerLogin && managerPassword && constantTimeEqual(login, managerLogin) && constantTimeEqual(password, managerPassword)) {
     return { ownerId: "metanutrix", cabinetId: "yandex", role: "yandex-manager" };
   }
+  const wbLogin = process.env.WB_MANAGER_LOGIN?.trim();
+  const wbPassword = process.env.WB_MANAGER_PASSWORD;
+  if (wbLogin && wbPassword && constantTimeEqual(login, wbLogin) && constantTimeEqual(password, wbPassword)) {
+    return { ownerId: "metanutrix", cabinetId: "metanutrix", role: "wb-manager" };
+  }
   return null;
 }
 
 function cabinetsForOwner(ownerId: CabinetId, role: UserRole = "owner"): readonly CabinetId[] {
   // One login manages all of the seller's marketplace cabinets. Each cabinet
   // still has a separate D1 namespace and can never see another cabinet's data.
-  return ownerId === "metanutrix" ? role === "yandex-manager" ? ["yandex"] : cabinetIds : [];
+  if (ownerId !== "metanutrix") return [];
+  if (role === "yandex-manager") return ["yandex"];
+  if (role === "wb-manager") return ["metanutrix"];
+  return cabinetIds;
 }
 
 export function cabinetSummary(id: CabinetId): CabinetSummary {
@@ -176,7 +184,7 @@ export async function getAuthenticatedSession(request: Request): Promise<AdminSe
   const roleValue = values[3];
   const expiresAtValue = values[4];
   const signatureValue = values[5];
-  if (!ownerValue || !cabinetValue || !roleValue || !expiresAtValue || !signatureValue || !cabinetIds.includes(ownerValue as CabinetId) || !cabinetIds.includes(cabinetValue as CabinetId) || !["owner", "viewer", "media", "yandex-manager"].includes(roleValue)) return null;
+  if (!ownerValue || !cabinetValue || !roleValue || !expiresAtValue || !signatureValue || !cabinetIds.includes(ownerValue as CabinetId) || !cabinetIds.includes(cabinetValue as CabinetId) || !["owner", "viewer", "media", "yandex-manager", "wb-manager"].includes(roleValue)) return null;
   const ownerId = ownerValue as CabinetId;
   const cabinetId = cabinetValue as CabinetId;
   const role = roleValue as UserRole;
@@ -204,7 +212,7 @@ export async function getAdminSession(request: Request): Promise<AdminSession | 
 
 export async function getMediaSession(request: Request): Promise<AdminSession | null> {
   const session = await getAuthenticatedSession(request);
-  return session?.role === "yandex-manager" ? null : session;
+  return session?.role === "yandex-manager" || session?.role === "wb-manager" ? null : session;
 }
 
 export async function getAdminCabinet(request: Request): Promise<CabinetId | null> {

@@ -105,6 +105,9 @@ export async function GET(request: Request) {
   if (!session) {
     return NextResponse.json({ error: "Требуется вход администратора" }, { status: 401, headers: { "Cache-Control": "no-store" } });
   }
+  if (session.role === "wb-manager") {
+    return NextResponse.json({ connections: [] }, { headers: { "Cache-Control": "no-store" } });
+  }
   if (session.role === "yandex-manager") {
     const disabled = await isMarketplaceDisabled(session.cabinetId, "yandex");
     return NextResponse.json({ connections: [await checkYandex(disabled)] }, { headers: { "Cache-Control": "no-store" } });

@@ -19,7 +19,7 @@ type FfExpiry = Record<string, string | null>;
 type FfBatch = { location: string; batchCode: string; expiresAt: string | null; quantity: number };
 type FfBatches = Record<string, FfBatch[]>;
 type CabinetSummary = { id: "metanutrix" | "ozon" | "yandex"; name: string; configured: boolean; marketplace: "wb" | "ozon" | "yandex" };
-type UserRole = "owner" | "viewer" | "media";
+type UserRole = "owner" | "viewer" | "media" | "yandex-manager" | "wb-manager";
 type MarketplaceConnection = {
   platform: "yandex" | "ozon";
   configured: boolean;
@@ -1144,7 +1144,9 @@ export default function Home() {
   const canManage = role === "owner";
   const mediaOnly = role === "media";
   const yandexOnly = role === "yandex-manager";
-  const canManagePricing = canManage || (yandexOnly && cabinet?.id === "yandex");
+  const wbOnly = role === "wb-manager";
+  const marketplaceManager = yandexOnly || wbOnly;
+  const canManagePricing = canManage || (yandexOnly && cabinet?.id === "yandex") || (wbOnly && cabinet?.id === "metanutrix");
   const isOzon = cabinet?.marketplace === "ozon";
   const isYandex = cabinet?.marketplace === "yandex";
   const marketplaceName = isOzon ? "Ozon" : isYandex ? "Яндекс Маркет" : "Wildberries";
@@ -1471,7 +1473,7 @@ export default function Home() {
         const nextRole = data.role ?? null;
         setRole(nextRole);
         if (nextRole === "media") setActiveView("rnp");
-        if (nextRole === "yandex-manager") setActiveView("pricing");
+        if (nextRole === "yandex-manager" || nextRole === "wb-manager") setActiveView("pricing");
         setCabinet(data.cabinet ?? null);
         setAvailableCabinets(data.cabinets ?? []);
       } catch {
@@ -1492,8 +1494,8 @@ export default function Home() {
 
   useEffect(() => {
     if (mediaOnly && activeView !== "rnp") setActiveView("rnp");
-    if (yandexOnly && (activeView === "rnp" || activeView === "cabinets")) setActiveView("pricing");
-  }, [activeView, mediaOnly, yandexOnly]);
+    if (marketplaceManager && (activeView === "rnp" || activeView === "cabinets")) setActiveView("pricing");
+  }, [activeView, mediaOnly, marketplaceManager]);
 
   useEffect(() => {
     if (authState === "authenticated" && activeView === "cabinets") void loadMarketplaceConnections();
@@ -1765,7 +1767,7 @@ export default function Home() {
   };
 
   const navigateTo = (view: View) => {
-    const nextView = mediaOnly ? "rnp" : yandexOnly && (view === "rnp" || view === "cabinets") ? "pricing" : view;
+    const nextView = mediaOnly ? "rnp" : marketplaceManager && (view === "rnp" || view === "cabinets") ? "pricing" : view;
     setActiveView(nextView);
     setFilter("Все");
     setQuery("");
@@ -2012,7 +2014,7 @@ export default function Home() {
       const nextRole = data.role ?? null;
       setRole(nextRole);
       if (nextRole === "media") setActiveView("rnp");
-      if (nextRole === "yandex-manager") setActiveView("pricing");
+      if (nextRole === "yandex-manager" || nextRole === "wb-manager") setActiveView("pricing");
       setCabinet(data.cabinet ?? null);
       setAvailableCabinets(data.cabinets ?? []);
       setAuthState("authenticated");
@@ -2143,14 +2145,14 @@ export default function Home() {
           <button type="button" className={`nav-item ${activeView === "fbs" ? "active" : ""}`} onClick={() => navigateTo("fbs")}><span className="nav-symbol">→</span>FBS-отгрузки<span className="nav-badge">{activeFbsTotal}</span></button>
           <button type="button" className={`nav-item ${activeView === "sales" ? "active" : ""}`} onClick={() => navigateTo("sales")}><span className="nav-symbol">↗</span>План поставок</button>
           <button type="button" className={`nav-item ${activeView === "analytics" ? "active" : ""}`} onClick={() => navigateTo("analytics")}><span className="nav-symbol">⌁</span>Анализ</button>
-          {!yandexOnly && <button type="button" className={`nav-item ${activeView === "rnp" ? "active" : ""}`} onClick={() => navigateTo("rnp")}><span className="nav-symbol">◎</span>Медийная реклама</button>}
+          {!marketplaceManager && <button type="button" className={`nav-item ${activeView === "rnp" ? "active" : ""}`} onClick={() => navigateTo("rnp")}><span className="nav-symbol">◎</span>Медийная реклама</button>}
           <button type="button" className={`nav-item ${activeView === "pricing" ? "active" : ""}`} onClick={() => navigateTo("pricing")}><span className="nav-symbol">₽</span>Таргет цен</button>
           <button type="button" className={`nav-item ${activeView === "fulfillment" || activeView === "manual" ? "active" : ""}`} onClick={() => navigateTo("fulfillment")}><span className="nav-symbol">▤</span>ФФ</button>
           <button type="button" className={`nav-item ${activeView === "payments" ? "active" : ""}`} onClick={() => navigateTo("payments")}><span className="nav-symbol">₽</span>Оплаты ФФ</button>
           <button type="button" className={`nav-item ${activeView === "reports" ? "active" : ""}`} onClick={() => navigateTo("reports")}><span className="nav-symbol">≡</span>Отчёты</button>
           </>}
         </nav>
-        {mediaOnly ? <div className="sidebar-bottom"><div className="connection"><span className="live-dot" />Доступ к медийному блоку</div><div className="profile"><span className="avatar">М</span><span><strong>Медиа</strong><small>Только медийная реклама</small></span></div></div> : <div className="sidebar-bottom"><div className="connection"><span className={error ? "live-dot offline" : "live-dot"} />{error ? "Нужна проверка подключения" : `Подключено к API ${marketplaceName}`}</div><button type="button" className="profile" disabled={yandexOnly} onClick={() => navigateTo("cabinets")}><span className="avatar">{marketplaceCode}</span><span><strong>{cabinet?.name ?? marketplaceName}</strong><small>{yandexOnly ? "Менеджер ЯМ" : role === "viewer" ? "Гость · просмотр и обновление" : configured ? "Владелец · кабинеты и ключи" : "Владелец · ключ не добавлен"}</small></span><span className="chevron">›</span></button></div>}
+        {mediaOnly ? <div className="sidebar-bottom"><div className="connection"><span className="live-dot" />Доступ к медийному блоку</div><div className="profile"><span className="avatar">М</span><span><strong>Медиа</strong><small>Только медийная реклама</small></span></div></div> : <div className="sidebar-bottom"><div className="connection"><span className={error ? "live-dot offline" : "live-dot"} />{error ? "Нужна проверка подключения" : `Подключено к API ${marketplaceName}`}</div><button type="button" className="profile" disabled={marketplaceManager} onClick={() => navigateTo("cabinets")}><span className="avatar">{marketplaceCode}</span><span><strong>{cabinet?.name ?? marketplaceName}</strong><small>{yandexOnly ? "Менеджер ЯМ" : wbOnly ? "Менеджер WB" : role === "viewer" ? "Гость · просмотр и обновление" : configured ? "Владелец · кабинеты и ключи" : "Владелец · ключ не добавлен"}</small></span><span className="chevron">›</span></button></div>}
       </aside>
 
       <section className="workspace">
@@ -2160,7 +2162,7 @@ export default function Home() {
           {!mediaOnly && cabinet && <section className={`cabinet-strip ${cabinet.configured ? "ready" : "waiting"}`}>
             <div><span className="cabinet-strip-mark">{marketplaceCode}</span><span><small>ТЕКУЩАЯ КАМПАНИЯ</small><strong>{cabinet.name}</strong></span></div>
             <p>{cabinet.configured ? "Свои товары, ФФ-склады и сроки годности. Переключение кабинетов не требует нового входа." : `Ожидает ключ API ${marketplaceName}. Вход и отдельные склады уже готовы.`}</p>
-            {!yandexOnly && <button type="button" onClick={() => navigateTo("cabinets")}>Сменить кампанию</button>}
+            {!marketplaceManager && <button type="button" onClick={() => navigateTo("cabinets")}>Сменить кампанию</button>}
           </section>}
           {!mediaOnly && error && <section className="api-notice" role="alert"><span className="api-notice-icon">!</span><div><strong>{error}</strong><p>{configured ? isOzon ? "Проверьте права ключа Ozon на товары, остатки и FBS-заказы." : isYandex ? "Проверьте права ключа Яндекс Маркета на товары, остатки и FBS-заказы." : "Для полной загрузки токену нужны категории: Контент, Маркетплейс и Аналитика." : "Безопасный ключ хранится только на сервере и не передаётся в браузер."}</p></div><button type="button" onClick={() => void loadData(true)}>Проверить снова</button></section>}
           {!mediaOnly && !error && warnings.length > 0 && <section className="warning-strip"><span>!</span><p>{warnings.join(" · ")}</p></section>}
