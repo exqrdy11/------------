@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { getTargetPriceRefreshCooldown, listTargetPrices, releaseTargetPriceRefresh, reserveTargetPriceRefresh, saveTargetPrices, type TargetPriceCompetitor, type TargetPriceRow } from "@/db/target-prices";
 import { cabinetToken, getAdminCabinet, getAdminSession } from "@/lib/admin-auth";
 import { normalizeOzonProductUrl, refreshOzonCompetitorQuote, refreshOzonTargetPrices } from "@/lib/ozon-target-prices";
+import { attachWebsitePrices } from "@/lib/website-prices";
 import { refreshYandexTargetPrices } from "@/lib/yandex-target-prices";
 import { normalizeYandexMarketProductUrl, refreshYandexMarketCompetitorQuote } from "@/lib/yandex-public-prices";
 
@@ -93,6 +94,14 @@ function cooldownMessage() {
   return "Цены уже обновляет другой пользователь. Дождитесь завершения текущего запроса и повторите попытку.";
 }
 
+async function withWebsitePrices(cabinetId: string, rows: TargetPriceRow[]) {
+  if (cabinetId !== "metanutrix") {
+    return { rows: rows.map((row) => ({ ...row, websitePrice: null })), warnings: [] as string[] };
+  }
+  const result = await attachWebsitePrices(rows);
+  return { rows: result.rows, warnings: result.warning ? [result.warning] : [] };
+}
+
 async function fetchSellerPrices(token: string, nmIds: number[]) {
   try {
     const response = await fetch(WB_SELLER_PRICES_API, {
@@ -119,7 +128,8 @@ export async function GET(request: Request) {
   const rows = await listTargetPrices(cabinetId);
   const latest = rows.reduce<string | null>((result, row) => row.refreshedAt && (!result || row.refreshedAt > result) ? row.refreshedAt : result, null);
   const cooldownUntil = await getTargetPriceRefreshCooldown(cabinetId, "prices");
-  return NextResponse.json({ rows, updatedAt: latest, cooldownUntil }, { headers: { "Cache-Control": "no-store" } });
+  const website = await withWebsitePrices(cabinetId, rows);
+  return NextResponse.json({ rows: website.rows, updatedAt: latest, cooldownUntil, warnings: website.warnings }, { headers: { "Cache-Control": "no-store" } });
 }
 
 export async function POST(request: Request) {
@@ -199,7 +209,8 @@ export async function POST(request: Request) {
       }
       : item);
     await saveTargetPrices(session.cabinetId, updatedRows);
-    return NextResponse.json({ rows: updatedRows }, { headers: { "Cache-Control": "no-store" } });
+    const website = await withWebsitePrices(session.cabinetId, updatedRows);
+    return NextResponse.json({ rows: website.rows, warnings: website.warnings }, { headers: { "Cache-Control": "no-store" } });
   }
   if (session.cabinetId === "ozon") {
     const reservation = await reserveTargetPriceRefresh(session.cabinetId, "prices", TARGET_PRICE_REFRESH_REQUEST_LOCK_MS);
@@ -260,7 +271,8 @@ export async function POST(request: Request) {
       };
     });
     await saveTargetPrices(session.cabinetId, refreshed);
-    return NextResponse.json({ rows: refreshed, updatedAt: refreshedAt, warnings: sharedErrors, cooldownUntil: null }, { headers: { "Cache-Control": "no-store" } });
+    const website = await withWebsitePrices(session.cabinetId, refreshed);
+    return NextResponse.json({ rows: website.rows, updatedAt: refreshedAt, warnings: [...sharedErrors, ...website.warnings], cooldownUntil: null }, { headers: { "Cache-Control": "no-store" } });
   } finally {
     await releaseTargetPriceRefresh(session.cabinetId, "prices").catch(() => undefined);
   }

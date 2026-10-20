@@ -4,7 +4,7 @@ import test from "node:test";
 
 const root = new URL("../", import.meta.url);
 
-test("таргет цен работает через API WB, а не через Google-таблицу", async () => {
+test("рынок и таргет рассчитываются через API WB, а не по цене сайта", async () => {
   const [page, route] = await Promise.all([
     readFile(new URL("app/page.tsx", root), "utf8"),
     readFile(new URL("app/api/target-prices/route.ts", root), "utf8"),

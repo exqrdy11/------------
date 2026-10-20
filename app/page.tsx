@@ -150,6 +150,7 @@ type TargetPriceRow = {
   priceBeforeSpp: number | null;
   sppPercent: number | null;
   currentPrice: number | null;
+  websitePrice: number | null;
   updatedAt: string | null;
   searchQuery: string | null;
   competitors: TargetPriceCompetitor[];
@@ -1334,6 +1335,7 @@ export default function Home() {
       const updatedRows = data.rows ?? [];
       const updated = updatedRows.find((item) => item.sku === row.sku && item.nmId === row.nmId) ?? null;
       setTargetPriceRows(updatedRows);
+      setTargetPricesWarnings(data.warnings ?? []);
       setSelectedPricingRow(updated);
       setManualCompetitorNmId("");
       if (updated) setCompetitorPriceDrafts(Object.fromEntries(updated.competitors.map((competitor) => [competitor.nmId, competitor.price ? String(competitor.price) : ""])));
@@ -2229,9 +2231,10 @@ export default function Home() {
 
               <section className="pricing-table-card">
                 <div className="pricing-table-heading"><div><span className="section-kicker">РЕКОМЕНДАЦИИ</span><h3>Что проверить в первую очередь</h3></div><span>{pricingRows.length} из {pricingCounts.all} карточек</span></div>
-                <div className="pricing-table-wrap">{targetPricesLoading ? <div className="empty-state"><strong>Загружаем мониторинг цен…</strong></div> : <table><thead><tr><th>Товар / артикул</th><th>Цена на<br/>витрине {marketplaceName}</th><th>Рынок</th><th>Таргет</th><th>Изменение</th><th>Решение</th></tr></thead><tbody>{pricingRows.map((item) => <tr key={item.row.sku} className="pricing-row-open" role="button" tabIndex={0} aria-label={`Открыть рынок и конкурентов: ${item.row.sku}`} onClick={() => openPricingRow(item.row)} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); openPricingRow(item.row); } }}>
+                <div className="pricing-table-wrap">{targetPricesLoading ? <div className="empty-state"><strong>Загружаем мониторинг цен…</strong></div> : <table><thead><tr><th>Товар / артикул</th><th>Цена на<br/>витрине {marketplaceName}</th>{!isOzon && !isYandex && <th>Цена<br/>на сайте</th>}<th>Рынок</th><th>Таргет</th><th>Изменение</th><th>Решение</th></tr></thead><tbody>{pricingRows.map((item) => <tr key={item.row.sku} className="pricing-row-open" role="button" tabIndex={0} aria-label={`Открыть рынок и конкурентов: ${item.row.sku}`} onClick={() => openPricingRow(item.row)} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); openPricingRow(item.row); } }}>
                   <td><button className="pricing-product pricing-product-open" type="button" onClick={() => openPricingRow(item.row)}><strong>{item.row.sku}</strong><small>{item.row.searchQuery || "Запрос не указан"}{item.row.nmId ? ` · ${marketplaceCode} ${item.row.nmId}` : ""}</small><span>Открыть рынок и конкурентов →</span></button></td>
                   <td><b>{item.row.currentPrice ? formatMoney.format(item.row.currentPrice) : "—"}</b><small>{item.row.sppPercent !== null ? `СПП ${Math.round(item.row.sppPercent * 100)}%` : "СПП не указан"}</small></td>
+                  {!isOzon && !isYandex && <td><b>{item.row.websitePrice ? formatMoney.format(item.row.websitePrice) : "—"}</b><small>{item.row.websitePrice ? "gribnikrf.ru" : "нет цены"}</small></td>}
                   <td>{item.low !== null && item.high !== null ? <><b>{formatMoney.format(item.low)}–{formatMoney.format(item.high)}</b><small>{item.row.competitors.length} конкурента · середина {item.median ? formatMoney.format(item.median) : "—"}</small></> : <span className="pricing-empty">Нет цен</span>}</td>
                   <td><b>{item.target ? formatMoney.format(item.target) : "—"}</b><small>{item.target ? "после СПП" : "нужен рынок"}</small></td>
                   <td><span className={`pricing-delta ${item.delta === null || item.delta === 0 ? "flat" : item.delta < 0 ? "down" : "up"}`}>{item.delta === null ? "—" : item.delta === 0 ? "0 ₽" : `${item.delta > 0 ? "+" : ""}${formatMoney.format(item.delta)}`}</span></td>
